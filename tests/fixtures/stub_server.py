@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Minimal stdio MCP server for tests: tools = echo, add."""
+import json, sys
+
+TOOLS = [
+    {"name": "echo", "description": "Echo the input text back",
+     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+    {"name": "add", "description": "Add two numbers a and b",
+     "inputSchema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}},
+    {"name": "secret_tool", "description": "Should be hidden by denylist in tests",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+
+def reply(id_, result):
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method, id_ = msg.get("method"), msg.get("id")
+    if method == "initialize":
+        reply(id_, {"protocolVersion": msg["params"].get("protocolVersion", "2024-11-05"),
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "stub", "version": "0.0.1"}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        reply(id_, {"tools": TOOLS})
+    elif method == "tools/call":
+        name = msg["params"]["name"]
+        args = msg["params"].get("arguments") or {}
+        if name == "echo":
+            reply(id_, {"content": [{"type": "text", "text": args.get("text", "")}], "isError": False})
+        elif name == "add":
+            reply(id_, {"content": [{"type": "text", "text": str(args.get("a", 0) + args.get("b", 0))}], "isError": False})
+        else:
+            reply(id_, {"content": [{"type": "text", "text": f"unknown tool {name}"}], "isError": True})
+    elif id_ is not None:
+        reply(id_, {})

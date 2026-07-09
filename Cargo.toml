@@ -1,0 +1,29 @@
+[package]
+name = "ondemand-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP proxy that keeps backend tool schemas out of your context until the moment they're needed"
+license = "MIT"
+
+[dependencies]
+rmcp = { version = "2.2", features = ["server", "client", "macros", "transport-io", "transport-child-process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-std", "time", "sync", "fs", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+schemars = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+directories = "6"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

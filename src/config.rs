@@ -1,0 +1,266 @@
+//! Configuration: a single JSON file, deliberately compatible with the
+//! `mcpServers` shape used by Claude Desktop ("command" + "args") AND the
+//! OpenCode shape ("command" as an array). Unknown fields are ignored so an
+//! entry can be copy-pasted from either tool's config unchanged.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+    #[serde(rename = "mcpServers", alias = "servers", default)]
+    pub servers: BTreeMap<String, ServerConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Seconds allowed for a proxied tool call.
+    pub call_timeout_secs: u64,
+    /// Seconds allowed for a backend to start + initialize.
+    pub startup_timeout_secs: u64,
+    /// Refresh the tool snapshot at startup when the config changed.
+    pub refresh_on_start: bool,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            call_timeout_secs: 120,
+            startup_timeout_secs: 30,
+            refresh_on_start: true,
+        }
+    }
+}
+
+/// "command": "npx" + "args": [...]  (Claude style)  — or —
+/// "command": ["npx", "-y", "server"] (OpenCode style)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CommandField {
+    Line(Vec<String>),
+    Bin(String),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    pub command: CommandField,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// One-line description shown in `list_servers`. Optional but worth
+    /// writing: it is the only thing the agent sees before drilling in.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Tool allowlist (glob, `*` wildcard). Empty = every tool.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Tool denylist (glob). Deny wins over allow.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl ServerConfig {
+    /// Resolved (binary, argv) with `${VAR}` env expansion applied.
+    pub fn command_line(&self) -> Result<(String, Vec<String>)> {
+        let (bin, mut argv) = match &self.command {
+            CommandField::Bin(b) => (b.clone(), Vec::new()),
+            CommandField::Line(l) => {
+                let Some((first, rest)) = l.split_first() else {
+                    bail!("empty command array");
+                };
+                (first.clone(), rest.to_vec())
+            }
+        };
+        argv.extend(self.args.iter().cloned());
+        let bin = expand_env(&bin);
+        let argv = argv.iter().map(|a| expand_env(a)).collect();
+        Ok((bin, argv))
+    }
+
+    /// Env map with `${VAR}` expansion.
+    pub fn env_expanded(&self) -> BTreeMap<String, String> {
+        self.env
+            .iter()
+            .map(|(k, v)| (k.clone(), expand_env(v)))
+            .collect()
+    }
+
+    /// Allow/deny filter for a backend tool name. Deny wins.
+    pub fn tool_allowed(&self, name: &str) -> bool {
+        if self.deny.iter().any(|p| glob_match(p, name)) {
+            return false;
+        }
+        if self.allow.is_empty() {
+            return true;
+        }
+        self.allow.iter().any(|p| glob_match(p, name))
+    }
+}
+
+/// Minimal `*` glob: segments between stars must appear in order.
+/// Covers `foo`, `foo*`, `*foo`, `*foo*`, `foo*bar`.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let mut pos = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        match text[pos..].find(part) {
+            Some(found) => {
+                // First segment must anchor at the start unless pattern starts with '*'.
+                if i == 0 && found != 0 {
+                    return false;
+                }
+                pos += found + part.len();
+            }
+            None => return false,
+        }
+    }
+    // Last segment must anchor at the end unless pattern ends with '*'.
+    if let Some(last) = parts.last() {
+        if !last.is_empty() && !text.ends_with(last) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Expand `${VAR}` using the process environment. Unknown vars expand to "".
+pub fn expand_env(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find('}') {
+            Some(end) => {
+                let var = &rest[start + 2..start + 2 + end];
+                out.push_str(&std::env::var(var).unwrap_or_default());
+                rest = &rest[start + 2 + end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read config {}", path.display()))?;
+        let cfg: Config = serde_json::from_str(&raw)
+            .with_context(|| format!("cannot parse config {}", path.display()))?;
+        if cfg.servers.is_empty() {
+            bail!("config has no mcpServers entries");
+        }
+        Ok(cfg)
+    }
+
+    /// Stable hash over everything that affects the tool snapshot.
+    pub fn snapshot_hash(&self) -> String {
+        let mut hasher = Sha256::new();
+        for (name, s) in &self.servers {
+            hasher.update(name.as_bytes());
+            if let Ok((bin, argv)) = s.command_line() {
+                hasher.update(bin.as_bytes());
+                for a in &argv {
+                    hasher.update(a.as_bytes());
+                }
+            }
+            for (k, v) in &s.env {
+                hasher.update(k.as_bytes());
+                hasher.update(v.as_bytes());
+            }
+            for p in s.allow.iter().chain(s.deny.iter()) {
+                hasher.update(p.as_bytes());
+            }
+            hasher.update([s.enabled as u8]);
+        }
+        hex(&hasher.finalize())
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_claude_style() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"mcpServers":{"icm":{"command":"/opt/homebrew/bin/icm","args":["serve"],"env":{}}}}"#,
+        )
+        .unwrap();
+        let (bin, argv) = cfg.servers["icm"].command_line().unwrap();
+        assert_eq!(bin, "/opt/homebrew/bin/icm");
+        assert_eq!(argv, vec!["serve"]);
+    }
+
+    #[test]
+    fn parses_opencode_style() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"mcpServers":{"icm":{"type":"local","command":["icm","serve"],"enabled":true}}}"#,
+        )
+        .unwrap();
+        let (bin, argv) = cfg.servers["icm"].command_line().unwrap();
+        assert_eq!(bin, "icm");
+        assert_eq!(argv, vec!["serve"]);
+    }
+
+    #[test]
+    fn allow_deny() {
+        let s: ServerConfig = serde_json::from_str(
+            r#"{"command":"x","allow":["icm_memory_*","icm_wake_up"],"deny":["*_forget_topic"]}"#,
+        )
+        .unwrap();
+        assert!(s.tool_allowed("icm_memory_store"));
+        assert!(s.tool_allowed("icm_wake_up"));
+        assert!(!s.tool_allowed("icm_memory_forget_topic")); // deny wins
+        assert!(!s.tool_allowed("icm_transcript_show")); // not in allow
+    }
+
+    #[test]
+    fn glob_basics() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("foo*", "foobar"));
+        assert!(!glob_match("foo*", "xfoobar"));
+        assert!(glob_match("*bar", "foobar"));
+        assert!(!glob_match("*bar", "barfoo"));
+        assert!(glob_match("f*r", "foobar"));
+        assert!(!glob_match("f*r", "foobaz"));
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("exact", "exactly"));
+    }
+
+    #[test]
+    fn env_expansion() {
+        std::env::set_var("OM_TEST_VAR", "hello");
+        assert_eq!(expand_env("${OM_TEST_VAR}/x"), "hello/x");
+        assert_eq!(expand_env("no vars"), "no vars");
+        assert_eq!(expand_env("${OM_MISSING_VAR}"), "");
+    }
+}

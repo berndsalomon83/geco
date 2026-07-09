@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# ondemand-mcp uninstaller. --purge also deletes config + snapshot cache.
+set -euo pipefail
+say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mWARN\033[0m %s\n' "$*"; }
+
+PURGE=0; [ "${1:-}" = "--purge" ] && PURGE=1
+
+# Remove 'ondemand' entries from agent configs (backup first).
+python3 <<'PYEOF'
+import json, os, shutil
+home = os.path.expanduser("~")
+for p in [os.path.join(home, ".config/opencode/opencode.json"),
+          os.path.join(home, "Library/Application Support/Claude/claude_desktop_config.json")]:
+    if not os.path.exists(p): continue
+    try:
+        cfg = json.load(open(p))
+    except Exception:
+        print(f"    skip (unparseable): {p}"); continue
+    changed = False
+    for key in ("mcp", "mcpServers"):
+        if isinstance(cfg.get(key), dict) and "ondemand" in cfg[key]:
+            del cfg[key]["ondemand"]; changed = True
+    if changed:
+        shutil.copy(p, p + ".bak")
+        with open(p, "w") as f: json.dump(cfg, f, indent=2); f.write("\n")
+        print(f"    removed 'ondemand' entry: {p}")
+PYEOF
+
+BIN="$(command -v ondemand-mcp 2>/dev/null || true)"
+if [ -n "$BIN" ]; then rm -f "$BIN" && say "Removed binary: $BIN"; fi
+
+if [ "$PURGE" = 1 ]; then
+    rm -rf "$HOME/.config/ondemand-mcp" \
+           "$HOME/.cache/ondemand-mcp" \
+           "$HOME/Library/Caches/dev.ondemand-mcp.ondemand-mcp" 2>/dev/null || true
+    say "Purged config + snapshot cache"
+else
+    say "Config kept at ~/.config/ondemand-mcp (re-run with --purge to delete)"
+fi
+say "Done. Restart your agents; re-add any servers you still want direct."
