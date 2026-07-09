@@ -71,6 +71,16 @@ Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expans
 
 `proxy` section: `call_timeout_secs` (default 120), `startup_timeout_secs` (30), `refresh_on_start` (true).
 
+### Secrets
+
+Don't put tokens in the config or your shell rc. `${keychain:SERVICE}` resolves from the OS keychain **at backend spawn time** — the secret exists only in that child process's environment:
+
+```jsonc
+"env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${keychain:github_token}" }
+```
+
+Store it once: `security add-generic-password -a "$USER" -s github_token -w '<token>'` (macOS Keychain; Linux uses `secret-tool` / libsecret). A missing keychain item fails the spawn loudly — plain `${VAR}` env references still expand to "" like shell. There is deliberately no `${cmd:...}`: arbitrary command execution from a config file is an injection surface.
+
 ## CLI
 
 ```bash

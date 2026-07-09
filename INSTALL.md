@@ -67,7 +67,7 @@ In the agent: ask it to `search_tools` for something you know is behind the prox
 
 ## Config knobs
 
-`proxy.call_timeout_secs` (120), `proxy.startup_timeout_secs` (30 — raise for slow `npx` first-runs), `proxy.refresh_on_start` (true; refresh only happens when the config hash changed). Per server: `allow`/`deny` glob lists (deny wins, enforced at listing *and* execution), `enabled`, `${VAR}` expansion in `command`/`args`/`env`.
+`proxy.call_timeout_secs` (120), `proxy.startup_timeout_secs` (30 — raise for slow `npx` first-runs), `proxy.refresh_on_start` (true; refresh only happens when the config hash changed). Per server: `allow`/`deny` glob lists (deny wins, enforced at listing *and* execution), `enabled`, `${VAR}` expansion in `command`/`args`/`env`, and `${keychain:SERVICE}` for secrets resolved from the OS keychain at spawn time (see README → Secrets).
 
 ## Uninstall
 

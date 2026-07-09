@@ -55,7 +55,7 @@ impl Backend {
 
     fn transport(&self) -> Result<TokioChildProcess> {
         let (bin, argv) = self.cfg.command_line()?;
-        let envs = self.cfg.env_expanded();
+        let envs = self.cfg.env_expanded()?;
         TokioChildProcess::new(Command::new(&bin).configure(|c| {
             c.args(&argv);
             c.envs(&envs);

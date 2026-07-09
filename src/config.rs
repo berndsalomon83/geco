@@ -86,16 +86,20 @@ impl ServerConfig {
             }
         };
         argv.extend(self.args.iter().cloned());
-        let bin = expand_env(&bin);
-        let argv = argv.iter().map(|a| expand_env(a)).collect();
+        let bin = expand_value(&bin)?;
+        let argv = argv
+            .iter()
+            .map(|a| expand_value(a))
+            .collect::<Result<Vec<_>>>()?;
         Ok((bin, argv))
     }
 
-    /// Env map with `${VAR}` expansion.
-    pub fn env_expanded(&self) -> BTreeMap<String, String> {
+    /// Env map with `${VAR}` / `${keychain:...}` expansion, resolved at
+    /// spawn time.
+    pub fn env_expanded(&self) -> Result<BTreeMap<String, String>> {
         self.env
             .iter()
-            .map(|(k, v)| (k.clone(), expand_env(v)))
+            .map(|(k, v)| Ok((k.clone(), expand_value(v)?)))
             .collect()
     }
 
@@ -143,8 +147,10 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     true
 }
 
-/// Expand `${VAR}` using the process environment. Unknown vars expand to "".
-pub fn expand_env(input: &str) -> String {
+/// Expand `${VAR}` (process environment, missing vars expand to "") and
+/// `${keychain:SERVICE}` (OS keychain, missing items are a hard error —
+/// secrets must fail loudly, not silently expand to nothing).
+pub fn expand_value(input: &str) -> Result<String> {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(start) = rest.find("${") {
@@ -152,7 +158,7 @@ pub fn expand_env(input: &str) -> String {
         match rest[start + 2..].find('}') {
             Some(end) => {
                 let var = &rest[start + 2..start + 2 + end];
-                out.push_str(&std::env::var(var).unwrap_or_default());
+                out.push_str(&resolve_var(var)?);
                 rest = &rest[start + 2 + end + 1..];
             }
             None => {
@@ -162,7 +168,47 @@ pub fn expand_env(input: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
+    Ok(out)
+}
+
+fn resolve_var(var: &str) -> Result<String> {
+    if let Some(service) = var.strip_prefix("keychain:") {
+        return keychain_lookup(service.trim());
+    }
+    Ok(std::env::var(var).unwrap_or_default())
+}
+
+/// Resolve a secret from the OS keychain at spawn time. The secret never
+/// appears in a config file, shell rc, or the proxy's own environment —
+/// only in the spawned backend's env.
+///
+/// Deliberately NOT a generic `${cmd:...}`: arbitrary command execution
+/// from a config file is an injection surface. Secrets come from the OS
+/// keychain, nothing else.
+fn keychain_lookup(service: &str) -> Result<String> {
+    if service.is_empty() {
+        bail!("empty keychain service name in ${{keychain:}}");
+    }
+    let (bin, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
+        ("security", vec!["find-generic-password", "-s", service, "-w"])
+    } else {
+        // Linux desktop: libsecret. Headless hosts should use plain env vars.
+        ("secret-tool", vec!["lookup", "service", service])
+    };
+    let out = std::process::Command::new(bin)
+        .args(&args)
+        .output()
+        .with_context(|| format!("cannot run '{bin}' to resolve keychain item '{service}'"))?;
+    if !out.status.success() {
+        bail!("keychain item '{service}' not found ('{bin}' exited {})", out.status);
+    }
+    let secret = String::from_utf8_lossy(&out.stdout)
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
+    if secret.is_empty() {
+        bail!("keychain item '{service}' resolved to an empty value");
+    }
+    Ok(secret)
 }
 
 impl Config {
@@ -259,8 +305,23 @@ mod tests {
     #[test]
     fn env_expansion() {
         std::env::set_var("OM_TEST_VAR", "hello");
-        assert_eq!(expand_env("${OM_TEST_VAR}/x"), "hello/x");
-        assert_eq!(expand_env("no vars"), "no vars");
-        assert_eq!(expand_env("${OM_MISSING_VAR}"), "");
+        assert_eq!(expand_value("${OM_TEST_VAR}/x").unwrap(), "hello/x");
+        assert_eq!(expand_value("no vars").unwrap(), "no vars");
+        assert_eq!(expand_value("${OM_MISSING_VAR}").unwrap(), "");
+    }
+
+    #[test]
+    fn keychain_missing_item_is_hard_error() {
+        // Regardless of platform, a nonexistent item (or missing keychain
+        // binary) must produce an error naming the service — never an
+        // empty expansion.
+        let err = expand_value("${keychain:om-test-nonexistent-item-xyz}").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("om-test-nonexistent-item-xyz"), "got: {msg}");
+    }
+
+    #[test]
+    fn keychain_empty_service_rejected() {
+        assert!(expand_value("${keychain:}").is_err());
     }
 }
