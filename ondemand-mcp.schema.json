@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "proxy": {
+      "$ref": "#/$defs/ProxyConfig"
+    },
+    "mcpServers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ServerConfig"
+      }
+    }
+  },
+  "$defs": {
+    "ProxyConfig": {
+      "type": "object",
+      "properties": {
+        "call_timeout_secs": {
+          "description": "Seconds allowed for a proxied tool call.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 120
+        },
+        "startup_timeout_secs": {
+          "description": "Seconds allowed for a backend to start + initialize.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30
+        },
+        "refresh_on_start": {
+          "description": "Refresh the tool snapshot at startup when the config changed.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "ServerConfig": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/CommandField"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "description": {
+          "description": "One-line description shown in `list_servers`. Optional but worth\nwriting: it is the only thing the agent sees before drilling in.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "allow": {
+          "description": "Tool allowlist (glob, `*` wildcard). Empty = every tool.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "deny": {
+          "description": "Tool denylist (glob). Deny wins over allow.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "command"
+      ]
+    },
+    "CommandField": {
+      "description": "\"command\": \"npx\" + \"args\": [...]  (Claude style)  — or —\n\"command\": [\"npx\", \"-y\", \"server\"] (OpenCode style)",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  }
+}

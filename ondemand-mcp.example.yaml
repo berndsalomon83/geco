@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=./ondemand-mcp.schema.json
+# ondemand-mcp configuration (YAML — standard; JSON also accepted, entries are
+# copy-paste compatible with Claude Desktop / OpenCode mcpServers blocks).
+# Location: ~/.config/ondemand-mcp/config.yaml
+# Schema:   ondemand-mcp schema > ~/.config/ondemand-mcp/ondemand-mcp.schema.json
+
+proxy:
+  call_timeout_secs: 120
+  startup_timeout_secs: 60     # first npx run downloads — be generous
+  refresh_on_start: true       # re-scan when this file's hash changes
+
+mcpServers:
+  playwright:
+    command: [npx, "@playwright/mcp@latest"]
+    description: "Browser automation: navigate, click, screenshots, E2E checks."
+
+  context7:
+    command: [npx, -y, "@upstash/context7-mcp"]
+    description: "Up-to-date library docs and code examples."
+
+  github:
+    command: [github-mcp-server, stdio]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${keychain:github_token}"
+      GITHUB_TOOLSETS: "repos,issues,pull_requests"
+    description: "GitHub: repos, issues, pull requests."
+    deny: ["delete_*"]
+
+  websearch:
+    command: [npx, -y, mcp-searxng]
+    env:
+      SEARXNG_URL: "http://spark.local:8888"
+    description: "Web search via self-hosted SearXNG; also reads result URLs."

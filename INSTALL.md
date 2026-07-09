@@ -33,18 +33,20 @@ Take the occasional servers out of your agent config and move them into the prox
 }
 ```
 
-`~/.config/ondemand-mcp/config.json`:
-```jsonc
-{
-  "mcpServers": {
-    "github":     { "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
-                    "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}" },
-                    "description": "GitHub: issues, PRs, repos" },
-    "playwright": { "command": ["npx", "@playwright/mcp@latest"],
-                    "description": "Browser automation" }
-  }
-}
+`~/.config/ondemand-mcp/config.yaml`:
+```yaml
+mcpServers:
+  github:
+    command: [github-mcp-server, stdio]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${keychain:github_token}"
+    description: "GitHub: issues, PRs, repos"
+  playwright:
+    command: [npx, "@playwright/mcp@latest"]
+    description: "Browser automation"
 ```
+
+(JSON configs keep working — handy when copy-pasting entries straight from `opencode.json`. The installer drops an editor schema next to the config; regenerate anytime with `ondemand-mcp schema`.)
 
 The entries are the same shape — copy, paste, add a `description` (that's what the agent sees when deciding). Then:
 

@@ -35,33 +35,42 @@ enum Cmd {
     Refresh,
     /// Print the cached snapshot summary and exit
     Inspect,
+    /// Print the config JSON Schema (valid for YAML and JSON configs)
+    Schema,
 }
 
 fn find_config(cli: &Cli) -> Result<PathBuf> {
     if let Some(p) = &cli.config {
         return Ok(p.clone());
     }
-    let local = PathBuf::from("ondemand-mcp.json");
-    if local.exists() {
-        return Ok(local);
+    for name in ["ondemand-mcp.yaml", "ondemand-mcp.yml", "ondemand-mcp.json"] {
+        let local = PathBuf::from(name);
+        if local.exists() {
+            return Ok(local);
+        }
     }
     // ~/.config/ondemand-mcp/config.json on every platform (predictable),
     // then the platform-native config dir as a fallback.
     if let Some(home) = std::env::var_os("HOME") {
-        let dotconfig = PathBuf::from(home).join(".config/ondemand-mcp/config.json");
-        if dotconfig.exists() {
-            return Ok(dotconfig);
+        let dir = PathBuf::from(home).join(".config/ondemand-mcp");
+        for name in ["config.yaml", "config.yml", "config.json"] {
+            let p = dir.join(name);
+            if p.exists() {
+                return Ok(p);
+            }
         }
     }
     if let Some(dirs) = directories::ProjectDirs::from("dev", "ondemand-mcp", "ondemand-mcp") {
-        let global = dirs.config_dir().join("config.json");
-        if global.exists() {
-            return Ok(global);
+        for name in ["config.yaml", "config.yml", "config.json"] {
+            let p = dirs.config_dir().join(name);
+            if p.exists() {
+                return Ok(p);
+            }
         }
     }
     bail!(
-        "no config found — pass --config, or create ./ondemand-mcp.json or \
-         ~/.config/ondemand-mcp/config.json"
+        "no config found — pass --config, or create ./ondemand-mcp.yaml or \
+         ~/.config/ondemand-mcp/config.yaml (JSON also accepted)"
     )
 }
 
@@ -78,6 +87,10 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Cmd::Schema)) {
+        println!("{}", Config::schema_json());
+        return Ok(());
+    }
     let config_path = find_config(&cli)?;
     let cfg = Config::load(&config_path)?;
     let hash = cfg.snapshot_hash();
@@ -92,6 +105,9 @@ async fn main() -> Result<()> {
                 eprintln!("{name:24} {:4} tools  {}", s.tools.len(), s.refresh_status);
             }
             eprintln!("snapshot: {}", snapshot_path.display());
+        }
+        Cmd::Schema => {
+            println!("{}", Config::schema_json());
         }
         Cmd::Inspect => {
             match Snapshot::load(&snapshot_path) {

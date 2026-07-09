@@ -9,7 +9,8 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_DIR="$HOME/.config/ondemand-mcp"
-CFG="$CFG_DIR/config.json"
+CFG="$CFG_DIR/config.yaml"
+CFG_LEGACY="$CFG_DIR/config.json"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN\033[0m %s\n' "$*"; }
@@ -49,12 +50,17 @@ fi
 "$DEST" --version >/dev/null 2>&1 || die "installed binary does not run"
 say "Installed: $("$DEST" --version)"
 
-if [ ! -f "$CFG" ]; then
+if [ -f "$CFG_LEGACY" ] && [ ! -f "$CFG" ]; then
+    CFG="$CFG_LEGACY"
+    say "Using existing JSON config: $CFG (YAML is the standard now; migrate when convenient)"
+elif [ ! -f "$CFG" ]; then
     mkdir -p "$CFG_DIR"
-    cp "$REPO_DIR/ondemand-mcp.example.json" "$CFG"
-    say "Scaffolded config: $CFG  ← EDIT THIS: move your occasional MCP servers in"
+    cp "$REPO_DIR/ondemand-mcp.example.yaml" "$CFG"
+    "$NEW_BIN" schema > "$CFG_DIR/ondemand-mcp.schema.json" 2>/dev/null || true
+    say "Scaffolded config: $CFG (+ editor schema)  ← EDIT THIS: move your occasional MCP servers in"
 else
     say "Config exists: $CFG"
+    "$NEW_BIN" schema > "$CFG_DIR/ondemand-mcp.schema.json" 2>/dev/null || true
 fi
 
 say "Building tool snapshot…"

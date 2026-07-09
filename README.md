@@ -29,7 +29,7 @@ cargo build --release
 cp target/release/ondemand-mcp ~/.local/bin/   # or use install.sh
 ```
 
-Create `~/.config/ondemand-mcp/config.json` (see `ondemand-mcp.example.json`) — entries are copy-paste compatible with both Claude Desktop and OpenCode shapes:
+Create `~/.config/ondemand-mcp/config.yaml` (see `ondemand-mcp.example.yaml`; JSON is equally accepted) — entries are copy-paste compatible with both Claude Desktop and OpenCode shapes:
 
 ```jsonc
 {
@@ -66,6 +66,8 @@ Then register the **proxy** (instead of the individual servers) in your agent:
 ```
 
 ## Config reference
+
+**Format:** YAML is the standard (`config.yaml`); JSON works identically for paste-compat with agent configs. A JSON Schema — generated from the binary's own structs, so it can't drift — powers editor validation and autocomplete: `ondemand-mcp schema > ~/.config/ondemand-mcp/ondemand-mcp.schema.json`, referenced from the YAML via the `# yaml-language-server: $schema=…` header (see the example file).
 
 Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `description` (shown in `list_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`.
 

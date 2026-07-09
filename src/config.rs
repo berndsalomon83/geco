@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct Config {
     #[serde(default)]
     pub proxy: ProxyConfig,
@@ -18,7 +18,7 @@ pub struct Config {
     pub servers: BTreeMap<String, ServerConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProxyConfig {
     /// Seconds allowed for a proxied tool call.
@@ -41,14 +41,14 @@ impl Default for ProxyConfig {
 
 /// "command": "npx" + "args": [...]  (Claude style)  — or —
 /// "command": ["npx", "-y", "server"] (OpenCode style)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CommandField {
     Line(Vec<String>),
     Bin(String),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ServerConfig {
     pub command: CommandField,
     #[serde(default)]
@@ -215,12 +215,28 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read config {}", path.display()))?;
-        let cfg: Config = serde_json::from_str(&raw)
-            .with_context(|| format!("cannot parse config {}", path.display()))?;
+        let is_yaml = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yaml") | Some("yml")
+        );
+        let cfg: Config = if is_yaml {
+            serde_norway::from_str(&raw)
+                .with_context(|| format!("cannot parse YAML config {}", path.display()))?
+        } else {
+            serde_json::from_str(&raw)
+                .with_context(|| format!("cannot parse JSON config {}", path.display()))?
+        };
         if cfg.servers.is_empty() {
             bail!("config has no mcpServers entries");
         }
         Ok(cfg)
+    }
+
+    /// JSON Schema generated from these structs — valid for both the YAML
+    /// and JSON config forms.
+    pub fn schema_json() -> String {
+        let schema = schemars::schema_for!(Config);
+        serde_json::to_string_pretty(&schema).unwrap_or_default()
     }
 
     /// Stable hash over everything that affects the tool snapshot.
@@ -323,5 +339,36 @@ mod tests {
     #[test]
     fn keychain_empty_service_rejected() {
         assert!(expand_value("${keychain:}").is_err());
+    }
+
+    #[test]
+    fn yaml_config_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.yaml");
+        std::fs::write(&p, r#"
+proxy:
+  startup_timeout_secs: 60
+mcpServers:
+  websearch:
+    command: [npx, -y, mcp-searxng]
+    env:
+      SEARXNG_URL: http://spark.local:8888
+    description: private web search
+    deny: ["*_dangerous"]
+"#).unwrap();
+        let cfg = Config::load(&p).unwrap();
+        assert_eq!(cfg.proxy.startup_timeout_secs, 60);
+        let (bin, argv) = cfg.servers["websearch"].command_line().unwrap();
+        assert_eq!(bin, "npx");
+        assert_eq!(argv, vec!["-y", "mcp-searxng"]);
+        assert!(!cfg.servers["websearch"].tool_allowed("x_dangerous"));
+    }
+
+    #[test]
+    fn schema_covers_the_surface() {
+        let s = Config::schema_json();
+        for key in ["mcpServers", "allow", "deny", "call_timeout_secs"] {
+            assert!(s.contains(key), "schema missing {key}");
+        }
     }
 }
