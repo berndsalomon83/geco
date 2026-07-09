@@ -1,0 +1,38 @@
+{
+  "proxy": {
+    "call_timeout_secs": 120,
+    "startup_timeout_secs": 60,
+    "refresh_on_start": true
+  },
+  "mcpServers": {
+    "playwright": {
+      "command": ["npx", "@playwright/mcp@latest"],
+      "description": "Browser automation: navigate, click, fill forms, screenshots, E2E checks. Use for anything requiring a real browser.",
+      "deny": []
+    },
+    "context7": {
+      "command": ["npx", "-y", "@upstash/context7-mcp"],
+      "description": "Up-to-date library/framework documentation and code examples. Use when coding against an API you're not 100% sure about.",
+      "env": {}
+    },
+    "github": {
+      "command": ["github-mcp-server", "stdio"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${keychain:github_token}",
+        "GITHUB_TOOLSETS": "repos,issues,pull_requests"
+      },
+      "description": "GitHub: repos, issues, pull requests (read + write). Use for anything on github.com.",
+      "deny": ["delete_*"]
+    },
+    "websearch": {
+      "command": ["npx", "-y", "mcp-searxng"],
+      "env": { "SEARXNG_URL": "http://spark.local:8888" },
+      "description": "Web search via self-hosted SearXNG (aggregated engines, private). Also reads page content from result URLs. Use to find current information online."
+    },
+    "websearch-fallback": {
+      "enabled": false,
+      "command": ["npx", "-y", "duckduckgo-mcp-server"],
+      "description": "Fallback web search (DuckDuckGo, keyless) for when spark.local is unreachable. Enable only then."
+    }
+  }
+}

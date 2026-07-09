@@ -16,12 +16,78 @@ use crate::backend::Registry;
 use crate::search;
 use crate::snapshot::{short_desc, Snapshot};
 
+// NOTE on the schema annotations below: schemars renders `Option<T>` as a
+// `["T","null"]` union type, which some client bridges silently drop —
+// leaving the field UNTYPED in the schema the model sees. Untyped fields
+// invite stringly-typed guesses ("3" for a count, JSON-in-a-string for an
+// object). So every optional field pins a concrete schema type via
+// `#[schemars(with = ...)]` (optionality is conveyed by `required` alone),
+// and the deserializers are lenient about the guesses clients make anyway.
+
+fn opt_u32_lenient<'de, D>(d: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        N(u32),
+        S(String),
+    }
+    Ok(match Option::<NumOrStr>::deserialize(d)? {
+        None => None,
+        Some(NumOrStr::N(n)) => Some(n),
+        Some(NumOrStr::S(s)) => Some(s.trim().parse().map_err(serde::de::Error::custom)?),
+    })
+}
+
+/// Accept a JSON object — or the same object serialized into a string,
+/// which LLM clients produce constantly.
+fn opt_args_lenient<'de, D>(d: D) -> Result<Option<JsonObject>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum ObjOrStr {
+        O(JsonObject),
+        S(String),
+    }
+    Ok(match Option::<ObjOrStr>::deserialize(d)? {
+        None => None,
+        Some(ObjOrStr::O(o)) => Some(o),
+        Some(ObjOrStr::S(s)) => {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                match serde_json::from_str::<serde_json::Value>(s) {
+                    Ok(serde_json::Value::Object(o)) => Some(o),
+                    Ok(other) => {
+                        return Err(serde::de::Error::custom(format!(
+                            "arguments must be a JSON object, got {other}"
+                        )))
+                    }
+                    Err(e) => {
+                        return Err(serde::de::Error::custom(format!(
+                            "arguments is a string but not valid JSON: {e}"
+                        )))
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetToolsParams {
     /// Server name from list_servers
     pub server: String,
     /// Optional: a tool name to get the full input schema for
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub tool: Option<String>,
 }
 
@@ -30,8 +96,9 @@ pub struct SearchParams {
     /// What you're looking for, e.g. "store memory" or "create issue"
     pub query: String,
     /// Max results (default 8)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
+    #[serde(default, deserialize_with = "opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -40,15 +107,17 @@ pub struct ExecuteParams {
     pub server: String,
     /// Tool name on that server
     pub tool: String,
-    /// Arguments for the tool, matching its input schema
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Arguments for the tool as a JSON object, matching its input schema
+    #[serde(default, deserialize_with = "opt_args_lenient")]
+    #[schemars(with = "JsonObject")]
     pub arguments: Option<JsonObject>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RefreshParams {
     /// Optional: refresh only this server
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub server: Option<String>,
 }
 
@@ -150,7 +219,7 @@ impl Proxy {
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let snap = self.snapshot.read().await;
-        let limit = p.limit.unwrap_or(8).clamp(1, 25);
+        let limit = p.limit.unwrap_or(8).clamp(1, 25) as usize;
         let hits = search::search(&snap, &p.query, limit);
         if hits.is_empty() {
             return Ok(err(format!(
@@ -229,5 +298,51 @@ impl ServerHandler for Proxy {
                  Backends start lazily on first execution."
                     .to_string(),
             )
+    }
+}
+
+#[cfg(test)]
+mod param_tests {
+    use super::*;
+
+    #[test]
+    fn limit_accepts_number_and_string() {
+        let p: SearchParams = serde_json::from_str(r#"{"query":"x","limit":3}"#).unwrap();
+        assert_eq!(p.limit, Some(3));
+        let p: SearchParams = serde_json::from_str(r#"{"query":"x","limit":"3"}"#).unwrap();
+        assert_eq!(p.limit, Some(3));
+        let p: SearchParams = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
+        assert_eq!(p.limit, None);
+    }
+
+    #[test]
+    fn arguments_accept_object_and_stringified_object() {
+        let p: ExecuteParams =
+            serde_json::from_str(r#"{"server":"s","tool":"t","arguments":{"q":"hi"}}"#).unwrap();
+        assert_eq!(p.arguments.unwrap()["q"], "hi");
+        let p: ExecuteParams =
+            serde_json::from_str(r#"{"server":"s","tool":"t","arguments":"{\"q\": \"hi\"}"}"#)
+                .unwrap();
+        assert_eq!(p.arguments.unwrap()["q"], "hi");
+        let p: ExecuteParams = serde_json::from_str(r#"{"server":"s","tool":"t"}"#).unwrap();
+        assert!(p.arguments.is_none());
+    }
+
+    #[test]
+    fn stringified_non_object_arguments_rejected() {
+        let r = serde_json::from_str::<ExecuteParams>(r#"{"server":"s","tool":"t","arguments":"[1,2]"}"#);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn optional_fields_have_concrete_schema_types() {
+        // The regression that bit us live: Option<T> fields rendered as
+        // type unions that client bridges drop. Pin concrete types.
+        let schema = serde_json::to_value(schemars::schema_for!(SearchParams)).unwrap();
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+        let schema = serde_json::to_value(schemars::schema_for!(ExecuteParams)).unwrap();
+        assert_eq!(schema["properties"]["arguments"]["type"], "object");
+        let schema = serde_json::to_value(schemars::schema_for!(GetToolsParams)).unwrap();
+        assert_eq!(schema["properties"]["tool"]["type"], "string");
     }
 }
