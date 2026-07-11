@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 pub struct Config {
     #[serde(default)]
     pub proxy: ProxyConfig,
+    /// Skill libraries served on demand (dirs containing <skill>/SKILL.md).
+    /// Skills here cost ZERO session context until read_skill fetches them.
+    #[serde(default)]
+    pub skills: SkillsConfig,
     #[serde(rename = "mcpServers", alias = "servers", default)]
     pub servers: BTreeMap<String, ServerConfig>,
 }
@@ -37,6 +41,13 @@ impl Default for ProxyConfig {
             refresh_on_start: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Directories scanned for skills (tilde-expanded).
+    pub dirs: Vec<String>,
 }
 
 /// "command": "npx" + "args": [...]  (Claude style)  — or —

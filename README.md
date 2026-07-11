@@ -65,6 +65,24 @@ Then register the **proxy** (instead of the individual servers) in your agent:
 }
 ```
 
+## Skills on demand
+
+Agent skills have the same context disease as tools: every skill's name and description ride in the system prompt of every session (measured live: 36 skills ≈ 2,300 tokens, used or not). Point the gateway at a skill library instead:
+
+```yaml
+skills:
+  dirs: ["~/.config/opencode/skills-library"]
+```
+
+Two meta-tools appear: `search_skills` (find a playbook by intent) and `read_skill` (full SKILL.md + bundled file paths — the agent runs scripts via its shell exactly as a native skill would instruct). Migration: move skills out of the auto-loaded dir into the library; keep your few daily drivers native if you like:
+
+```bash
+mkdir -p ~/.config/opencode/skills-library
+mv ~/.config/opencode/skills/* ~/.config/opencode/skills-library/
+```
+
+Add one line to your global AGENTS.md so models reach for it: *"Before specialized work, search_skills → read_skill and follow the playbook."*
+
 ## Config reference
 
 **Format:** YAML is the standard (`config.yaml`); JSON works identically for paste-compat with agent configs. A JSON Schema — generated from the binary's own structs, so it can't drift — powers editor validation and autocomplete: `ondemand-mcp schema > ~/.config/ondemand-mcp/ondemand-mcp.schema.json`, referenced from the YAML via the `# yaml-language-server: $schema=…` header (see the example file).

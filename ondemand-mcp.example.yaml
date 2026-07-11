@@ -4,6 +4,9 @@
 # Location: ~/.config/ondemand-mcp/config.yaml
 # Schema:   ondemand-mcp schema > ~/.config/ondemand-mcp/ondemand-mcp.schema.json
 
+skills:
+  dirs: ["~/.config/opencode/skills-library"]
+
 proxy:
   call_timeout_secs: 120
   startup_timeout_secs: 60     # first npx run downloads — be generous

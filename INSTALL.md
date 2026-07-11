@@ -86,3 +86,23 @@ Re-add any servers you still want directly to your agent config afterwards.
 - **First `execute_tool` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm: `ondemand-mcp refresh`.
 - **Agent can't see a newly installed backend tool** — `refresh_tools` meta-tool, or `ondemand-mcp refresh`.
 - **Where are logs?** stderr of the proxy process (your agent's MCP log view), `RUST_LOG=debug` for detail.
+
+---
+
+## Skills on demand (v0.4)
+
+Move your skill library behind the gateway (zero session cost until used):
+
+```bash
+mkdir -p ~/.config/opencode/skills-library
+mv ~/.config/opencode/skills/* ~/.config/opencode/skills-library/
+```
+
+`~/.config/ondemand-mcp/config.yaml`:
+
+```yaml
+skills:
+  dirs: ["~/.config/opencode/skills-library"]
+```
+
+Restart the agent. `search_skills` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `refresh_tools` re-scans the library. Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.

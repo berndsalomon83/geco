@@ -150,7 +150,8 @@ async fn main() -> Result<()> {
                 snapshot.servers.len(),
                 snapshot.tool_count()
             );
-            let proxy = Proxy::new(registry.clone(), snapshot, snapshot_path);
+            let proxy = Proxy::new(registry.clone(), snapshot, snapshot_path,
+                                   cfg.skills.dirs.clone());
             let service = proxy
                 .serve(rmcp::transport::stdio())
                 .await

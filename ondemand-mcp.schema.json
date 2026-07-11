@@ -6,6 +6,10 @@
     "proxy": {
       "$ref": "#/$defs/ProxyConfig"
     },
+    "skills": {
+      "description": "Skill libraries served on demand (dirs containing <skill>/SKILL.md).\nSkills here cost ZERO session context until read_skill fetches them.",
+      "$ref": "#/$defs/SkillsConfig"
+    },
     "mcpServers": {
       "type": "object",
       "additionalProperties": {
@@ -35,6 +39,19 @@
           "description": "Refresh the tool snapshot at startup when the config changed.",
           "type": "boolean",
           "default": true
+        }
+      }
+    },
+    "SkillsConfig": {
+      "type": "object",
+      "properties": {
+        "dirs": {
+          "description": "Directories scanned for skills (tilde-expanded).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         }
       }
     },

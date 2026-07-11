@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 
 use crate::backend::Registry;
 use crate::search;
+use crate::skills::{read_skill, SkillIndex};
 use crate::snapshot::{short_desc, Snapshot};
 
 // NOTE on the schema annotations below: schemars renders `Option<T>` as a
@@ -114,6 +115,22 @@ pub struct ExecuteParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchSkillsParams {
+    /// What you're trying to do, e.g. "plan a project" or "organize files"
+    pub query: String,
+    /// Max results (default 5)
+    #[serde(default, deserialize_with = "opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadSkillParams {
+    /// Skill name from search_skills
+    pub name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RefreshParams {
     /// Optional: refresh only this server
     #[serde(default)]
@@ -126,6 +143,8 @@ pub struct Proxy {
     registry: Arc<Registry>,
     snapshot: Arc<RwLock<Snapshot>>,
     snapshot_path: PathBuf,
+    skills: Arc<RwLock<SkillIndex>>,
+    skill_dirs: Vec<String>,
 }
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
@@ -139,11 +158,15 @@ fn err(msg: String) -> CallToolResult {
 
 #[tool_router]
 impl Proxy {
-    pub fn new(registry: Arc<Registry>, snapshot: Snapshot, snapshot_path: PathBuf) -> Self {
+    pub fn new(registry: Arc<Registry>, snapshot: Snapshot, snapshot_path: PathBuf,
+               skill_dirs: Vec<String>) -> Self {
+        let skills = SkillIndex::scan(&skill_dirs);
         Self {
             registry,
             snapshot: Arc::new(RwLock::new(snapshot)),
             snapshot_path,
+            skills: Arc::new(RwLock::new(skills)),
+            skill_dirs,
         }
     }
 
@@ -251,6 +274,54 @@ impl Proxy {
     }
 
     #[tool(
+        description = "Find an agent skill (playbook + bundled scripts) by keywords. Skills add capabilities like planning, design or analysis workflows. Follow with read_skill."
+    )]
+    pub async fn search_skills(
+        &self,
+        Parameters(p): Parameters<SearchSkillsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let idx = self.skills.read().await;
+        if idx.skills.is_empty() {
+            return Ok(err("no skill libraries configured (config `skills.dirs`)".into()));
+        }
+        let limit = p.limit.unwrap_or(5).clamp(1, 20) as usize;
+        let hits = idx.search(&p.query, limit);
+        if hits.is_empty() {
+            return Ok(err(format!("no skills match '{}' ({} in library)", p.query, idx.skills.len())));
+        }
+        Ok(text_result(json!(hits
+            .iter()
+            .map(|s| json!({"name": s.name, "description": short_desc(&s.description, 160)}))
+            .collect::<Vec<_>>())))
+    }
+
+    #[tool(
+        description = "Load a skill's full instructions (SKILL.md) and its file inventory. Follow the instructions; run bundled scripts via your shell at the listed absolute paths."
+    )]
+    pub async fn read_skill(
+        &self,
+        Parameters(p): Parameters<ReadSkillParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let idx = self.skills.read().await;
+        let Some(meta) = idx.get(&p.name) else {
+            return Ok(err(format!("unknown skill '{}' — use search_skills", p.name)));
+        };
+        match read_skill(meta) {
+            Ok((body, files)) => {
+                let tree = if files.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\n## Bundled files (absolute paths)\n{}", files.join("\n"))
+                };
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                    "{body}{tree}"
+                ))]))
+            }
+            Err(e) => Ok(err(format!("cannot read skill '{}': {e}", p.name))),
+        }
+    }
+
+    #[tool(
         description = "Re-scan backend servers for their current tools (all, or one via `server`). Use after installing or reconfiguring a backend."
     )]
     pub async fn refresh_tools(
@@ -277,6 +348,7 @@ impl Proxy {
         if let Err(e) = snap.save(&self.snapshot_path) {
             tracing::warn!("cannot persist snapshot: {e:#}");
         }
+        *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
         let summary: Vec<_> = snap
             .servers
             .iter()
