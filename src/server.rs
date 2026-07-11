@@ -453,7 +453,7 @@ impl Proxy {
 impl ServerHandler for Proxy {
     async fn initialize(
         &self,
-        params: InitializeRequestParam,
+        params: InitializeRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         // Record who we're serving ("opencode", "claude-ai", …) so the health
