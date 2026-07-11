@@ -106,3 +106,18 @@ skills:
 ```
 
 Restart the agent. `search_skills` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `refresh_tools` re-scans the library. Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
+
+### The symlink model (one home, per-skill promotion)
+
+The library is the single physical home for every skill. The native
+auto-loaded dir holds only symlinks — a skill is "promoted" to always-on
+(native context cost, native UX) with one link, and demoted with one rm:
+
+```bash
+ln -s ~/.config/opencode/skills-library/blueprint ~/.config/opencode/skills/blueprint   # promote
+rm ~/.config/opencode/skills/blueprint                                                  # demote
+```
+
+Agents are instructed (AGENTS.md) to create new skills in the library and
+call `refresh_tools` afterwards — new skills are gated by default and cost
+zero context until read. Promotion is a deliberate human act.
