@@ -73,8 +73,8 @@ TOOLS=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protoco
 for l in sys.stdin:
     m=json.loads(l)
     if m.get("id")==2: print(len(m["result"]["tools"]))' || echo 0)
-# 0.4.0: 5 gateway tools + 2 skill tools
-[ "$TOOLS" = "7" ] && say "Proxy OK: 7 meta-tools (5 gateway + 2 skills)" || warn "expected 7 meta-tools, got: $TOOLS"
+# 0.4.1: 5 gateway tools + 3 skill tools
+[ "$TOOLS" = "8" ] && say "Proxy OK: 8 meta-tools (5 gateway + 3 skills)" || warn "expected 8 meta-tools, got: $TOOLS"
 
 cat <<EOT
 

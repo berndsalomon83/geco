@@ -274,7 +274,23 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Find an agent skill (playbook + bundled scripts) by keywords. Skills add capabilities like planning, design or analysis workflows. Follow with read_skill."
+        description = "List every available agent skill (name + one-line description). Use when asked what skills exist; use search_skills for targeted lookup."
+    )]
+    pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
+        let idx = self.skills.read().await;
+        if idx.skills.is_empty() {
+            return Ok(err("no skill libraries configured (config `skills.dirs`)".into()));
+        }
+        let out: Vec<_> = idx
+            .skills
+            .iter()
+            .map(|s| json!({"name": s.name, "description": short_desc(&s.description, 100)}))
+            .collect();
+        Ok(text_result(json!({"skills": out, "count": out.len()})))
+    }
+
+    #[tool(
+        description = "Find an agent skill (playbook + bundled scripts) by keywords. list_skills shows the whole library. Follow with read_skill."
     )]
     pub async fn search_skills(
         &self,
