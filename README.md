@@ -19,6 +19,7 @@ The agent sees exactly five tools:
 | `search_tools` | Keyword search across *all* servers' tools in one call |
 | `execute_tool` | Run a backend tool — the backend process starts on first use |
 | `refresh_tools` | Re-scan backends after installing/reconfiguring one |
+| `health` | Report which backends failed their last refresh and why |
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute_tool` first touches it, and is reused afterwards.
 
@@ -110,6 +111,13 @@ ondemand-mcp inspect                          # show the cached snapshot
 ```
 
 `RUST_LOG=debug` for verbose logging (always stderr — stdout is the protocol).
+
+## Health — failures are loud, not logged
+
+The gateway is headless, so a dead backend or a partial refresh would otherwise live only in a stderr log. Instead it writes its current problem set to `<data-dir>/health.json` (level-triggered: empty = healthy, tagged with the MCP client name). Two ways to see it:
+
+- **The `health` meta-tool** — ask the agent "is the gateway healthy?" and it returns the failing backends and reasons.
+- **The opencode toast plugin** (`opencode-plugin/ondemand-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick.
 
 ## Which servers belong behind the proxy?
 

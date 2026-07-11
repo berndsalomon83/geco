@@ -125,3 +125,9 @@ skills:
 Name collisions are skipped and logged for the human; non-skill files are
 left untouched. Agents are additionally instructed (AGENTS.md) to create
 skills in the library directly and call `refresh_tools` afterwards.
+
+---
+
+## Health toasts in opencode
+
+The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugin/ondemand-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. You can also ask any model "is the ondemand gateway healthy?" — the `health` meta-tool answers with the failing backends and why.

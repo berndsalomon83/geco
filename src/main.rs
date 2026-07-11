@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
             );
             let proxy = Proxy::new(registry.clone(), snapshot, snapshot_path,
                                    cfg.skills.dirs.clone(), cfg.skills.absorb.clone());
+            proxy.publish_health(Vec::new()).await;
             let service = proxy
                 .serve(rmcp::transport::stdio())
                 .await

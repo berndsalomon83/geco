@@ -6,13 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
-    ErrorData as McpError, ServerHandler,
+    handler::server::wrapper::Parameters, model::*, service::RequestContext, tool, tool_handler,
+    tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
 use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::backend::Registry;
+use crate::health::{self, Issue};
 use crate::search;
 use crate::skills::{read_skill, SkillIndex};
 use crate::snapshot::{short_desc, Snapshot};
@@ -146,6 +147,7 @@ pub struct Proxy {
     skills: Arc<RwLock<SkillIndex>>,
     skill_dirs: Vec<String>,
     absorb_dirs: Vec<String>,
+    client: Arc<RwLock<Option<String>>>,
 }
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
@@ -161,7 +163,7 @@ fn err(msg: String) -> CallToolResult {
 impl Proxy {
     pub fn new(registry: Arc<Registry>, snapshot: Snapshot, snapshot_path: PathBuf,
                skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
-        Self::absorb(&skill_dirs, &absorb_dirs);
+        let _ = Self::absorb(&skill_dirs, &absorb_dirs);
         let skills = SkillIndex::scan(&skill_dirs);
         Self {
             registry,
@@ -170,25 +172,56 @@ impl Proxy {
             skills: Arc::new(RwLock::new(skills)),
             skill_dirs,
             absorb_dirs,
+            client: Arc::new(RwLock::new(None)),
         }
     }
 
-    fn absorb(skill_dirs: &[String], absorb_dirs: &[String]) {
+    /// Recompute the full problem set and publish it to the health file.
+    /// Level-triggered: called after every refresh (and at startup), empty
+    /// set == healthy. Backends that failed their last snapshot, plus any
+    /// absorb collisions surfaced during the sweep, become issues.
+    pub async fn publish_health(&self, extra: Vec<Issue>) {
+        let snap = self.snapshot.read().await;
+        let mut issues = extra;
+        for (name, s) in &snap.servers {
+            if s.refresh_status != "ok" {
+                issues.push(Issue {
+                    kind: "backend".into(),
+                    subject: name.clone(),
+                    detail: s.refresh_status.clone(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        let client = self.client.read().await.clone();
+        health::write(client.as_deref(), issues);
+    }
+
+    fn absorb(skill_dirs: &[String], absorb_dirs: &[String]) -> Vec<Issue> {
         if absorb_dirs.is_empty() {
-            return;
+            return Vec::new();
         }
         let Some(library) = skill_dirs.first() else {
             tracing::warn!("skills.absorb configured but skills.dirs is empty — nothing to absorb into");
-            return;
+            return Vec::new();
         };
         let (moved, errors) = crate::skills::absorb_into(library, absorb_dirs);
         if !moved.is_empty() {
             tracing::info!("absorbed {} stray skill(s) into the library: {}",
                            moved.len(), moved.join(", "));
         }
-        for e in errors {
-            tracing::warn!("skill absorb: {e}");
-        }
+        errors
+            .into_iter()
+            .map(|e| {
+                tracing::warn!("skill absorb: {e}");
+                Issue {
+                    kind: "skills".into(),
+                    subject: "absorb".into(),
+                    detail: e,
+                    severity: "warning".into(),
+                }
+            })
+            .collect()
     }
 
     #[tool(
@@ -359,6 +392,25 @@ impl Proxy {
     }
 
     #[tool(
+        description = "Report the gateway's own health: which backends failed their last refresh and why. Use if tools seem missing or a server is misbehaving."
+    )]
+    pub async fn health(&self) -> Result<CallToolResult, McpError> {
+        let snap = self.snapshot.read().await;
+        let mut issues = Vec::new();
+        for (name, s) in &snap.servers {
+            if s.refresh_status != "ok" {
+                issues.push(json!({"server": name, "status": s.refresh_status}));
+            }
+        }
+        Ok(text_result(json!({
+            "healthy": issues.is_empty(),
+            "servers": snap.servers.len(),
+            "tools": snap.tool_count(),
+            "issues": issues,
+        })))
+    }
+
+    #[tool(
         description = "Re-scan backend servers for their current tools (all, or one via `server`). Use after installing or reconfiguring a backend."
     )]
     pub async fn refresh_tools(
@@ -385,8 +437,9 @@ impl Proxy {
         if let Err(e) = snap.save(&self.snapshot_path) {
             tracing::warn!("cannot persist snapshot: {e:#}");
         }
-        Self::absorb(&self.skill_dirs, &self.absorb_dirs);
+        let absorb_issues = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
         *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
+        self.publish_health(absorb_issues).await;
         let summary: Vec<_> = snap
             .servers
             .iter()
@@ -398,6 +451,20 @@ impl Proxy {
 
 #[tool_handler]
 impl ServerHandler for Proxy {
+    async fn initialize(
+        &self,
+        params: InitializeRequestParam,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        // Record who we're serving ("opencode", "claude-ai", …) so the health
+        // file is tagged and the companion plugin only toasts for its client.
+        *self.client.write().await = Some(params.client_info.name.clone());
+        // Re-publish health now that we know who we serve, so the file is
+        // tagged for the companion plugin's client filter.
+        self.publish_health(Vec::new()).await;
+        Ok(self.get_info())
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())

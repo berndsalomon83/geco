@@ -1,6 +1,6 @@
 [package]
 name = "ondemand-mcp"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 description = "MCP proxy that keeps backend tool schemas out of your context until the moment they're needed"
 license = "MIT"
