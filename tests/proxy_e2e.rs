@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use ondemand_mcp::backend::Registry;
-use ondemand_mcp::config::Config;
+use geco::backend::Registry;
+use geco::config::Config;
 
 fn stub_config() -> Option<Config> {
     if std::process::Command::new("python3")
@@ -39,7 +39,7 @@ async fn snapshot_execute_and_denylist() {
     assert_eq!(names, vec!["add", "echo"]);
 
     // 2. Search finds the tool.
-    let hits = ondemand_mcp::search::search(&snap, "add numbers", 5);
+    let hits = geco::search::search(&snap, "add numbers", 5);
     assert_eq!(hits[0].tool, "add");
 
     // 3. Lazy execute: backend starts on demand and computes.

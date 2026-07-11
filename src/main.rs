@@ -4,13 +4,13 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 
-use ondemand_mcp::backend::Registry;
-use ondemand_mcp::config::Config;
-use ondemand_mcp::server::Proxy;
-use ondemand_mcp::snapshot::Snapshot;
+use geco::backend::Registry;
+use geco::config::Config;
+use geco::server::Proxy;
+use geco::snapshot::Snapshot;
 
 #[derive(Parser)]
-#[command(name = "ondemand-mcp", version, about = "MCP tools on demand — schemas stay out of context until needed")]
+#[command(name = "geco", version, about = "geco — the generic connector: tools, skills & more on demand, out of context until summoned")]
 struct Cli {
     /// Path to the config file (default: ./ondemand-mcp.json, then
     /// ~/.config/ondemand-mcp/config.json)
@@ -43,7 +43,8 @@ fn find_config(cli: &Cli) -> Result<PathBuf> {
     if let Some(p) = &cli.config {
         return Ok(p.clone());
     }
-    for name in ["ondemand-mcp.yaml", "ondemand-mcp.yml", "ondemand-mcp.json"] {
+    for name in ["geco.yaml", "geco.yml", "geco.json",
+                 "ondemand-mcp.yaml", "ondemand-mcp.yml", "ondemand-mcp.json"] {
         let local = PathBuf::from(name);
         if local.exists() {
             return Ok(local);
@@ -52,15 +53,17 @@ fn find_config(cli: &Cli) -> Result<PathBuf> {
     // ~/.config/ondemand-mcp/config.json on every platform (predictable),
     // then the platform-native config dir as a fallback.
     if let Some(home) = std::env::var_os("HOME") {
-        let dir = PathBuf::from(home).join(".config/ondemand-mcp");
-        for name in ["config.yaml", "config.yml", "config.json"] {
-            let p = dir.join(name);
-            if p.exists() {
-                return Ok(p);
+        for sub in [".config/geco", ".config/ondemand-mcp"] {  // legacy fallback
+            let dir = PathBuf::from(&home).join(sub);
+            for name in ["config.yaml", "config.yml", "config.json"] {
+                let p = dir.join(name);
+                if p.exists() {
+                    return Ok(p);
+                }
             }
         }
     }
-    if let Some(dirs) = directories::ProjectDirs::from("dev", "ondemand-mcp", "ondemand-mcp") {
+    if let Some(dirs) = directories::ProjectDirs::from("dev", "geco", "geco") {
         for name in ["config.yaml", "config.yml", "config.json"] {
             let p = dirs.config_dir().join(name);
             if p.exists() {
@@ -69,8 +72,8 @@ fn find_config(cli: &Cli) -> Result<PathBuf> {
         }
     }
     bail!(
-        "no config found — pass --config, or create ./ondemand-mcp.yaml or \
-         ~/.config/ondemand-mcp/config.yaml (JSON also accepted)"
+        "no config found — pass --config, or create ./geco.yaml or \
+         ~/.config/geco/config.yaml (JSON also accepted)"
     )
 }
 
@@ -146,7 +149,7 @@ async fn main() -> Result<()> {
                 })
             };
             tracing::info!(
-                "ondemand-mcp up: {} servers, {} tools behind 5 meta-tools",
+                "geco up: {} servers, {} tools behind 5 meta-tools",
                 snapshot.servers.len(),
                 snapshot.tool_count()
             );

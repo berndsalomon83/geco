@@ -1,4 +1,4 @@
-# ondemand-mcp — Install, Migrate, Verify, Uninstall
+# geco — Install, Migrate, Verify, Uninstall
 
 ## Requirements
 
@@ -10,7 +10,7 @@ Rust toolchain (rustup.rs), `python3` (used by the scripts for JSON handling). B
 bash install.sh
 ```
 
-Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/ondemand-mcp/config.json` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 5 meta-tools.
+Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/geco/config.json` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 5 meta-tools.
 
 ## Migrate servers behind the proxy
 
@@ -29,11 +29,11 @@ Take the occasional servers out of your agent config and move them into the prox
 ```jsonc
 "mcp": {
   "icm":      { "type": "local", "command": ["icm", "serve"], "enabled": true },
-  "ondemand": { "type": "local", "command": ["ondemand-mcp", "serve"], "enabled": true }
+  "geco": { "type": "local", "command": ["geco", "serve"], "enabled": true }
 }
 ```
 
-`~/.config/ondemand-mcp/config.yaml`:
+`~/.config/geco/config.yaml`:
 ```yaml
 mcpServers:
   github:
@@ -46,12 +46,12 @@ mcpServers:
     description: "Browser automation"
 ```
 
-(JSON configs keep working — handy when copy-pasting entries straight from `opencode.json`. The installer drops an editor schema next to the config; regenerate anytime with `ondemand-mcp schema`.)
+(JSON configs keep working — handy when copy-pasting entries straight from `opencode.json`. The installer drops an editor schema next to the config; regenerate anytime with `geco schema`.)
 
 The entries are the same shape — copy, paste, add a `description` (that's what the agent sees when deciding). Then:
 
 ```bash
-ondemand-mcp refresh     # snapshot the moved servers once
+geco refresh     # snapshot the moved servers once
 ```
 
 Restart the agent. Context cost for those servers drops to ~2.2 KB flat.
@@ -61,8 +61,8 @@ Restart the agent. Context cost for those servers drops to ~2.2 KB flat.
 ## Verify
 
 ```bash
-ondemand-mcp inspect                  # snapshot: servers, tool counts, refresh status
-RUST_LOG=debug ondemand-mcp serve     # verbose logs on stderr (Ctrl-C to stop)
+geco inspect                  # snapshot: servers, tool counts, refresh status
+RUST_LOG=debug geco serve     # verbose logs on stderr (Ctrl-C to stop)
 ```
 
 In the agent: ask it to `search_tools` for something you know is behind the proxy, then execute it. First execution on a cold backend takes the backend's startup time (npx downloads on very first use); after that it's warm.
@@ -74,7 +74,7 @@ In the agent: ask it to `search_tools` for something you know is behind the prox
 ## Uninstall
 
 ```bash
-bash uninstall.sh          # removes binary + 'ondemand' entries from agent configs (with .bak backups)
+bash uninstall.sh          # removes binary + geco/ondemand entries from agent configs (with .bak backups)
 bash uninstall.sh --purge  # …and config + snapshot cache
 ```
 
@@ -82,9 +82,9 @@ Re-add any servers you still want directly to your agent config afterwards.
 
 ## Troubleshooting
 
-- **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing env var or binary. Fix, then `ondemand-mcp refresh`.
-- **First `execute_tool` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm: `ondemand-mcp refresh`.
-- **Agent can't see a newly installed backend tool** — `refresh_tools` meta-tool, or `ondemand-mcp refresh`.
+- **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing env var or binary. Fix, then `geco refresh`.
+- **First `execute_tool` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm: `geco refresh`.
+- **Agent can't see a newly installed backend tool** — `refresh_tools` meta-tool, or `geco refresh`.
 - **Where are logs?** stderr of the proxy process (your agent's MCP log view), `RUST_LOG=debug` for detail.
 
 ---
@@ -98,7 +98,7 @@ mkdir -p ~/.config/opencode/skills-library
 mv ~/.config/opencode/skills/* ~/.config/opencode/skills-library/
 ```
 
-`~/.config/ondemand-mcp/config.yaml`:
+`~/.config/geco/config.yaml`:
 
 ```yaml
 skills:
@@ -130,4 +130,4 @@ skills in the library directly and call `refresh_tools` afterwards.
 
 ## Health toasts in opencode
 
-The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugin/ondemand-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. You can also ask any model "is the ondemand gateway healthy?" — the `health` meta-tool answers with the failing backends and why.
+The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugin/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. You can also ask any model "is the geco gateway healthy?" — the `health` meta-tool answers with the failing backends and why.

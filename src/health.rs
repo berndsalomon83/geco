@@ -43,7 +43,7 @@ pub struct HealthReport {
 }
 
 pub fn health_path() -> PathBuf {
-    let dir = directories::ProjectDirs::from("dev", "ondemand-mcp", "ondemand-mcp")
+    let dir = directories::ProjectDirs::from("dev", "geco", "geco")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".ondemand-mcp"));
     dir.join("health.json")

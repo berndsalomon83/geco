@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# ondemand-mcp installer
+# geco installer (formerly ondemand-mcp)
 #   1. cargo build --release
 #   2. install the binary (existing install > /opt/homebrew/bin > ~/.local/bin)
 #      — remove-then-copy, never overwrite in place (macOS signature cache)
-#   3. scaffold ~/.config/ondemand-mcp/config.json if missing
+#   3. scaffold ~/.config/geco/config.yaml if missing
 #   4. build the first tool snapshot + verify the meta-tool surface
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CFG_DIR="$HOME/.config/ondemand-mcp"
+CFG_DIR="$HOME/.config/geco"
+LEGACY_CFG_DIR="$HOME/.config/ondemand-mcp"
 CFG="$CFG_DIR/config.yaml"
 CFG_LEGACY="$CFG_DIR/config.json"
 
@@ -18,19 +19,25 @@ die()  { printf '\033[1;31mERROR\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] && die "do not run with sudo"
 command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust first: https://rustup.rs"
-[ -f "$REPO_DIR/Cargo.toml" ] || die "run this from the ondemand-mcp checkout"
+[ -f "$REPO_DIR/Cargo.toml" ] || die "run this from the geco checkout"
 
-say "Building ondemand-mcp (release)…"
+# One-time migration from the ondemand-mcp name.
+if [ -d "$LEGACY_CFG_DIR" ] && [ ! -d "$CFG_DIR" ]; then
+    say "Migrating config: ~/.config/ondemand-mcp -> ~/.config/geco"
+    mv "$LEGACY_CFG_DIR" "$CFG_DIR"
+    ln -s "$CFG_DIR" "$LEGACY_CFG_DIR" 2>/dev/null || true
+fi
+say "Building geco (release)…"
 ( cd "$REPO_DIR" && cargo build --release )
-NEW_BIN="$REPO_DIR/target/release/ondemand-mcp"
+NEW_BIN="$REPO_DIR/target/release/geco"
 
-OLD_BIN="$(command -v ondemand-mcp 2>/dev/null || true)"
+OLD_BIN="$(command -v geco 2>/dev/null || true)"
 if [ -n "$OLD_BIN" ] && [ "$OLD_BIN" != "$NEW_BIN" ]; then
     DEST="$OLD_BIN"
 elif [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then
-    DEST="/opt/homebrew/bin/ondemand-mcp"
+    DEST="/opt/homebrew/bin/geco"
 else
-    DEST="$HOME/.local/bin/ondemand-mcp"
+    DEST="$HOME/.local/bin/geco"
     mkdir -p "$HOME/.local/bin"
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
@@ -55,16 +62,16 @@ if [ -f "$CFG_LEGACY" ] && [ ! -f "$CFG" ]; then
     say "Using existing JSON config: $CFG (YAML is the standard now; migrate when convenient)"
 elif [ ! -f "$CFG" ]; then
     mkdir -p "$CFG_DIR"
-    cp "$REPO_DIR/ondemand-mcp.example.yaml" "$CFG"
-    "$NEW_BIN" schema > "$CFG_DIR/ondemand-mcp.schema.json" 2>/dev/null || true
+    cp "$REPO_DIR/geco.example.yaml" "$CFG"
+    "$NEW_BIN" schema > "$CFG_DIR/geco.schema.json" 2>/dev/null || true
     say "Scaffolded config: $CFG (+ editor schema)  ← EDIT THIS: move your occasional MCP servers in"
 else
     say "Config exists: $CFG"
-    "$NEW_BIN" schema > "$CFG_DIR/ondemand-mcp.schema.json" 2>/dev/null || true
+    "$NEW_BIN" schema > "$CFG_DIR/geco.schema.json" 2>/dev/null || true
 fi
 
 say "Building tool snapshot…"
-"$DEST" --config "$CFG" refresh || warn "refresh reported issues (fix config, then: ondemand-mcp refresh)"
+"$DEST" --config "$CFG" refresh || warn "refresh reported issues (fix config, then: geco refresh)"
 
 say "Verifying meta-tool surface…"
 TOOLS=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"install","version":"0"}}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' \
@@ -80,8 +87,8 @@ for l in sys.stdin:
 OC_PLUGIN_DIR="$HOME/.config/opencode/plugin"
 if [ -d "$HOME/.config/opencode" ]; then
     mkdir -p "$OC_PLUGIN_DIR"
-    cp "$REPO_DIR/opencode-plugin/ondemand-tui.ts" "$OC_PLUGIN_DIR/ondemand-tui.ts"
-    say "Installed opencode health plugin: $OC_PLUGIN_DIR/ondemand-tui.ts (restart opencode)"
+    cp "$REPO_DIR/opencode-plugin/geco-tui.ts" "$OC_PLUGIN_DIR/geco-tui.ts"
+    say "Installed opencode health plugin: $OC_PLUGIN_DIR/geco-tui.ts (restart opencode)"
 fi
 
 cat <<EOT
@@ -89,10 +96,10 @@ cat <<EOT
 Done. Wire it into your agent (and REMOVE the servers you moved behind it):
 
   OpenCode (~/.config/opencode/opencode.json):
-    "mcp": { "ondemand": { "type": "local", "command": ["$DEST", "serve"], "enabled": true } }
+    "mcp": { "geco": { "type": "local", "command": ["$DEST", "serve"], "enabled": true } }
 
   Claude Desktop (claude_desktop_config.json):
-    "mcpServers": { "ondemand": { "command": "$DEST", "args": ["serve"] } }
+    "mcpServers": { "geco": { "command": "$DEST", "args": ["serve"] } }
 
 Uninstall:  bash $REPO_DIR/uninstall.sh [--purge]
 EOT

@@ -1,8 +1,8 @@
-# yaml-language-server: $schema=./ondemand-mcp.schema.json
-# ondemand-mcp configuration (YAML — standard; JSON also accepted, entries are
+# yaml-language-server: $schema=./geco.schema.json
+# geco configuration (YAML — standard; JSON also accepted, entries are
 # copy-paste compatible with Claude Desktop / OpenCode mcpServers blocks).
 # Location: ~/.config/ondemand-mcp/config.yaml
-# Schema:   ondemand-mcp schema > ~/.config/ondemand-mcp/ondemand-mcp.schema.json
+# Schema:   geco schema > ~/.config/ondemand-mcp/geco.schema.json
 
 skills:
   dirs: ["~/.config/opencode/skills-library"]

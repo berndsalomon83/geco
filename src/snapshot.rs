@@ -37,7 +37,7 @@ pub struct ToolSnapshot {
 
 impl Snapshot {
     pub fn cache_path(config_path: &Path) -> PathBuf {
-        let dir = directories::ProjectDirs::from("dev", "ondemand-mcp", "ondemand-mcp")
+        let dir = directories::ProjectDirs::from("dev", "geco", "geco")
             .map(|d| d.cache_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from(".ondemand-mcp-cache"));
         // One snapshot per config file location.

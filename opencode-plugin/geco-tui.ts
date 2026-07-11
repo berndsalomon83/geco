@@ -1,15 +1,15 @@
 /**
- * ondemand-tui — surfaces ondemand-mcp's health as opencode toasts.
+ * geco-tui — surfaces geco's health as opencode toasts.
  *
  * The gateway runs headless; when a backend endpoint is down, an absorb
  * collides, or a refresh half-fails, that pain would otherwise live only in a
- * stderr log nobody reads. ondemand-mcp writes its current problem set to
+ * stderr log nobody reads. geco writes its current problem set to
  * `<data>/health.json` (level-triggered: empty == healthy). This plugin polls
  * that file and toasts when the problem set CHANGES — a new problem raises an
  * error/warning toast; recovery (problems → none) raises a success toast. A
  * persistent problem is shown once, not every tick.
  *
- * Install: copy to ~/.config/opencode/plugin/ondemand-tui.ts
+ * Install: copy to ~/.config/opencode/plugin/geco-tui.ts
  * Requires: the `ondemand` MCP server configured in opencode.
  */
 
@@ -18,14 +18,14 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 
-// ondemand-mcp's data dir (macOS + Linux). Override with ONDEMAND_HEALTH.
+// geco's data dir (macOS + Linux). Override with GECO_HEALTH.
 function healthPath(): string {
-  if (process.env.ONDEMAND_HEALTH) return process.env.ONDEMAND_HEALTH
+  if (process.env.GECO_HEALTH) return process.env.GECO_HEALTH
   const home = os.homedir()
   const mac = path.join(home, "Library", "Application Support",
-                        "dev.ondemand-mcp.ondemand-mcp", "health.json")
+                        "dev.geco.geco", "health.json")
   const linux = path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
-                          "ondemand-mcp", "health.json")
+                          "geco", "health.json")
   return process.platform === "darwin" ? mac : linux
 }
 
@@ -73,7 +73,7 @@ const tuiPlugin: TuiPlugin = async (api) => {
 
     if (r.issues.length === 0) {
       if (wasUnhealthy) {
-        ui.toast({ variant: "success", title: "ondemand: recovered",
+        ui.toast({ variant: "success", title: "geco: recovered",
                    message: "All gateway backends healthy again." })
       }
       return
@@ -83,7 +83,7 @@ const tuiPlugin: TuiPlugin = async (api) => {
       variant: worst,
       title: `ondemand: ${r.issues.length} issue${r.issues.length > 1 ? "s" : ""}`,
       message: summarize(r.issues) +
-               "\n\nRun `ondemand-mcp inspect` or the health tool for detail.",
+               "\n\nRun `geco inspect` or the health tool for detail.",
     })
   }
 

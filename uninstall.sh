@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ondemand-mcp uninstaller. --purge also deletes config + snapshot cache.
+# geco uninstaller. --purge also deletes config + snapshot cache.
 set -euo pipefail
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN\033[0m %s\n' "$*"; }
@@ -19,23 +19,25 @@ for p in [os.path.join(home, ".config/opencode/opencode.json"),
         print(f"    skip (unparseable): {p}"); continue
     changed = False
     for key in ("mcp", "mcpServers"):
-        if isinstance(cfg.get(key), dict) and "ondemand" in cfg[key]:
-            del cfg[key]["ondemand"]; changed = True
+        if isinstance(cfg.get(key), dict):
+            for name in ("geco", "ondemand"):   # new + legacy
+                if name in cfg[key]:
+                    del cfg[key][name]; changed = True
     if changed:
         shutil.copy(p, p + ".bak")
         with open(p, "w") as f: json.dump(cfg, f, indent=2); f.write("\n")
-        print(f"    removed 'ondemand' entry: {p}")
+        print(f"    removed geco entry: {p}")
 PYEOF
 
-BIN="$(command -v ondemand-mcp 2>/dev/null || true)"
+BIN="$(command -v geco 2>/dev/null || true)"
 if [ -n "$BIN" ]; then rm -f "$BIN" && say "Removed binary: $BIN"; fi
 
 if [ "$PURGE" = 1 ]; then
-    rm -rf "$HOME/.config/ondemand-mcp" \
-           "$HOME/.cache/ondemand-mcp" \
-           "$HOME/Library/Caches/dev.ondemand-mcp.ondemand-mcp" 2>/dev/null || true
+    rm -rf "$HOME/.config/geco" \
+           "$HOME/.cache/geco" \
+           "$HOME/Library/Caches/dev.geco.geco" 2>/dev/null || true
     say "Purged config + snapshot cache"
 else
-    say "Config kept at ~/.config/ondemand-mcp (re-run with --purge to delete)"
+    say "Config kept at ~/.config/geco (re-run with --purge to delete)"
 fi
 say "Done. Restart your agents; re-add any servers you still want direct."
