@@ -49,6 +49,51 @@ pub fn expand_tilde(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Sweep skills out of `absorb_dirs` into `library` (the first configured
+/// skills dir). Runs at startup and on refresh — the native auto-loaded dir
+/// stays empty forever, so no skill ever costs always-on context, no matter
+/// where a model or installer drops it. Collisions are skipped and reported;
+/// non-skill entries are left alone.
+pub fn absorb_into(library: &str, absorb_dirs: &[String]) -> (Vec<String>, Vec<String>) {
+    let lib = expand_tilde(library);
+    let mut moved = Vec::new();
+    let mut errors = Vec::new();
+    if std::fs::create_dir_all(&lib).is_err() {
+        errors.push(format!("cannot create library {}", lib.display()));
+        return (moved, errors);
+    }
+    for dir in absorb_dirs {
+        let src_root = expand_tilde(dir);
+        if src_root == lib {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&src_root) else { continue };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            if !src.join("SKILL.md").is_file() {
+                continue; // not a skill — leave it alone
+            }
+            let name = src.file_name().unwrap_or_default().to_owned();
+            let dst = lib.join(&name);
+            if dst.exists() {
+                errors.push(format!(
+                    "absorb skipped '{}': already in library (resolve manually)",
+                    name.to_string_lossy()
+                ));
+                continue;
+            }
+            match std::fs::rename(&src, &dst) {
+                Ok(()) => moved.push(name.to_string_lossy().to_string()),
+                Err(e) => errors.push(format!(
+                    "absorb failed for '{}': {e}",
+                    name.to_string_lossy()
+                )),
+            }
+        }
+    }
+    (moved, errors)
+}
+
 impl SkillIndex {
     pub fn scan(dirs: &[String]) -> SkillIndex {
         let mut idx = SkillIndex::default();
@@ -184,5 +229,37 @@ mod tests {
         let idx = SkillIndex::scan(&["/nonexistent/skills".into()]);
         assert!(idx.skills.is_empty());
         assert_eq!(idx.errors.len(), 1);
+    }
+
+    #[test]
+    fn absorb_moves_skills_and_spares_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let native = tmp.path().join("native");
+        std::fs::create_dir_all(&native).unwrap();
+        mk_skill(&native, "stray-skill", Some("stray-skill"), "dropped by a model");
+        std::fs::write(native.join("notes.txt"), "not a skill").unwrap();
+        std::fs::create_dir(native.join("empty-dir")).unwrap();
+
+        let (moved, errors) = absorb_into(
+            &lib.display().to_string(),
+            &[native.display().to_string()],
+        );
+        assert_eq!(moved, vec!["stray-skill"]);
+        assert!(errors.is_empty());
+        assert!(lib.join("stray-skill/SKILL.md").is_file());
+        assert!(!native.join("stray-skill").exists());
+        assert!(native.join("notes.txt").exists());     // junk untouched
+        assert!(native.join("empty-dir").exists());
+
+        // collision: same name appears again in native → skipped + reported
+        mk_skill(&native, "stray-skill", Some("stray-skill"), "second copy");
+        let (moved2, errors2) = absorb_into(
+            &lib.display().to_string(),
+            &[native.display().to_string()],
+        );
+        assert!(moved2.is_empty());
+        assert_eq!(errors2.len(), 1);
+        assert!(native.join("stray-skill").exists());   // left for the human
     }
 }

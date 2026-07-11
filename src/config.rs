@@ -48,6 +48,12 @@ impl Default for ProxyConfig {
 pub struct SkillsConfig {
     /// Directories scanned for skills (tilde-expanded).
     pub dirs: Vec<String>,
+    /// Directories SWEPT into `dirs[0]` at startup and on refresh: any
+    /// skill (subdir with SKILL.md) found here is MOVED into the library.
+    /// Point this at your agent's native auto-loaded skills dir to enforce
+    /// "nothing is ever native" — wherever a model drops a skill, the
+    /// gateway absorbs it. Name collisions are skipped and reported.
+    pub absorb: Vec<String>,
 }
 
 /// "command": "npx" + "args": [...]  (Claude style)  — or —

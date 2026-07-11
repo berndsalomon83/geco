@@ -52,6 +52,14 @@
             "type": "string"
           },
           "default": []
+        },
+        "absorb": {
+          "description": "Directories SWEPT into `dirs[0]` at startup and on refresh: any\nskill (subdir with SKILL.md) found here is MOVED into the library.\nPoint this at your agent's native auto-loaded skills dir to enforce\n\"nothing is ever native\" — wherever a model drops a skill, the\ngateway absorbs it. Name collisions are skipped and reported.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         }
       }
     },

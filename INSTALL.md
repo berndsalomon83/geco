@@ -107,17 +107,21 @@ skills:
 
 Restart the agent. `search_skills` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `refresh_tools` re-scans the library. Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
 
-### The symlink model (one home, per-skill promotion)
+### The absorb model (nothing is ever native)
 
-The library is the single physical home for every skill. The native
-auto-loaded dir holds only symlinks — a skill is "promoted" to always-on
-(native context cost, native UX) with one link, and demoted with one rm:
+The library is the single home for every skill, and the gateway enforces
+it: at startup and on every `refresh_tools`, any skill found in the
+configured `absorb` dirs is MOVED into the library. Wherever a model, an
+installer, or a playbook drops a skill, it gets swept behind the gate —
+the native auto-loaded dir stays empty forever, so no skill ever costs
+always-on context:
 
-```bash
-ln -s ~/.config/opencode/skills-library/blueprint ~/.config/opencode/skills/blueprint   # promote
-rm ~/.config/opencode/skills/blueprint                                                  # demote
+```yaml
+skills:
+  dirs: ["~/.config/opencode/skills-library"]
+  absorb: ["~/.config/opencode/skills"]
 ```
 
-Agents are instructed (AGENTS.md) to create new skills in the library and
-call `refresh_tools` afterwards — new skills are gated by default and cost
-zero context until read. Promotion is a deliberate human act.
+Name collisions are skipped and logged for the human; non-skill files are
+left untouched. Agents are additionally instructed (AGENTS.md) to create
+skills in the library directly and call `refresh_tools` afterwards.

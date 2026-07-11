@@ -145,6 +145,7 @@ pub struct Proxy {
     snapshot_path: PathBuf,
     skills: Arc<RwLock<SkillIndex>>,
     skill_dirs: Vec<String>,
+    absorb_dirs: Vec<String>,
 }
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
@@ -159,7 +160,8 @@ fn err(msg: String) -> CallToolResult {
 #[tool_router]
 impl Proxy {
     pub fn new(registry: Arc<Registry>, snapshot: Snapshot, snapshot_path: PathBuf,
-               skill_dirs: Vec<String>) -> Self {
+               skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
+        Self::absorb(&skill_dirs, &absorb_dirs);
         let skills = SkillIndex::scan(&skill_dirs);
         Self {
             registry,
@@ -167,6 +169,25 @@ impl Proxy {
             snapshot_path,
             skills: Arc::new(RwLock::new(skills)),
             skill_dirs,
+            absorb_dirs,
+        }
+    }
+
+    fn absorb(skill_dirs: &[String], absorb_dirs: &[String]) {
+        if absorb_dirs.is_empty() {
+            return;
+        }
+        let Some(library) = skill_dirs.first() else {
+            tracing::warn!("skills.absorb configured but skills.dirs is empty — nothing to absorb into");
+            return;
+        };
+        let (moved, errors) = crate::skills::absorb_into(library, absorb_dirs);
+        if !moved.is_empty() {
+            tracing::info!("absorbed {} stray skill(s) into the library: {}",
+                           moved.len(), moved.join(", "));
+        }
+        for e in errors {
+            tracing::warn!("skill absorb: {e}");
         }
     }
 
@@ -364,6 +385,7 @@ impl Proxy {
         if let Err(e) = snap.save(&self.snapshot_path) {
             tracing::warn!("cannot persist snapshot: {e:#}");
         }
+        Self::absorb(&self.skill_dirs, &self.absorb_dirs);
         *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
         let summary: Vec<_> = snap
             .servers

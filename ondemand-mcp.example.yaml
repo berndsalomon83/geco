@@ -6,6 +6,7 @@
 
 skills:
   dirs: ["~/.config/opencode/skills-library"]
+  absorb: ["~/.config/opencode/skills"]   # swept into the library at startup
 
 proxy:
   call_timeout_secs: 120
