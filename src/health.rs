@@ -20,6 +20,23 @@ use serde::{Deserialize, Serialize};
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Hash of the last content written to disk. If the next write has the
+/// same hash, we skip the disk I/O entirely — avoids SSD wear when the
+/// problem set hasn't changed (e.g. repeated publish_health calls during
+/// a session with no backend failures).
+static LAST_CONTENT_HASH: AtomicU64 = AtomicU64::new(0);
+
+/// FNV-1a 64-bit hash — fast, no dependencies, good enough for change
+/// detection (not cryptographic).
+fn fnv1a(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     /// "backend" | "skills" | "preflight" | "config"
@@ -70,25 +87,54 @@ pub fn health_path() -> PathBuf {
 
 /// Write the current problem set to a specific path (test-friendly; the
 /// production path is `health_path()`). Empty issues == healthy.
+/// Skips the disk write entirely if the content (issues + metrics) hasn't
+/// changed since the last write — avoids SSD wear on repeated publish_health
+/// calls with no state change.
 pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: Option<Metrics>) {
+    // Build the report body (without generation/updated_at, which always
+    // change and would defeat the content-hash check).
+    let body = HealthReportBody {
+        client: client.map(str::to_string),
+        healthy: issues.is_empty(),
+        issues,
+        metrics,
+    };
+    let body_json = serde_json::to_string(&body).unwrap_or_default();
+    let hash = fnv1a(body_json.as_bytes());
+
+    // Skip the write if nothing changed since last time.
+    if LAST_CONTENT_HASH.swap(hash, Ordering::SeqCst) == hash {
+        return;
+    }
+
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let report = HealthReport {
         generation: GENERATION.fetch_add(1, Ordering::SeqCst) + 1,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        client: client.map(str::to_string),
-        healthy: issues.is_empty(),
-        issues,
-        metrics,
+        client: body.client,
+        healthy: body.healthy,
+        issues: body.issues,
+        metrics: body.metrics,
     };
     if let Ok(json) = serde_json::to_string_pretty(&report) {
-        // best-effort atomic-ish write
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, &json).is_ok() {
             let _ = std::fs::rename(tmp, path);
         }
     }
+}
+
+/// The mutable parts of a health report — used for content hashing
+/// (generation and updated_at always change, so they're excluded).
+#[derive(Serialize)]
+struct HealthReportBody {
+    client: Option<String>,
+    healthy: bool,
+    issues: Vec<Issue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<Metrics>,
 }
 
 /// Write the current problem set. Empty issues == healthy (and that itself is
@@ -125,5 +171,22 @@ mod tests {
         let r2 = read(&path).unwrap();
         assert!(r2.healthy);
         assert!(r2.generation > r1.generation);
+    }
+
+    #[test]
+    fn identical_content_skips_disk_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.json");
+        let issues = vec![Issue {
+            kind: "backend".into(),
+            subject: "test".into(),
+            detail: "flapping".into(),
+            severity: "error".into(),
+        }];
+        write_to(&path, Some("opencode"), issues.clone(), None);
+        let gen1 = read(&path).unwrap().generation;
+        write_to(&path, Some("opencode"), issues, None);
+        let gen2 = read(&path).unwrap().generation;
+        assert_eq!(gen1, gen2, "identical content should skip the disk write");
     }
 }
