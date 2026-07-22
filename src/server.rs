@@ -100,7 +100,7 @@ pub struct ListToolsParams {
 pub struct SearchParams {
     /// What you're looking for, e.g. "store memory", "create issue", "plan a project"
     pub query: String,
-    /// Max results per kind (default 8 for tools, 5 for skills)
+    /// Max results per kind (default 8; skills capped at 20)
     #[serde(default, deserialize_with = "opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub limit: Option<u32>,
@@ -131,8 +131,8 @@ pub struct ExecuteCall {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteParams {
-    /// 1–10 tool calls to execute. Cross-backend calls run in parallel;
-    /// same-backend calls serialize. Results are returned in input order.
+    /// 1–10 tool calls to execute. Cross-backend calls run in parallel.
+    /// Results are returned in input order as {server, tool, ok, result/error}.
     /// A single call is just `execute({calls: [{server, tool, arguments}]})`.
     pub calls: Vec<ExecuteCall>,
 }
@@ -493,20 +493,28 @@ impl Proxy {
         description = "List the MCP servers behind this proxy: name, what it's for, tool count, running state. Start here."
     )]
     pub async fn list_mcp_servers(&self) -> Result<CallToolResult, McpError> {
-        let snap = self.snapshot.read().await;
-        let registry = self.registry.read().await;
+        let servers: Vec<_> = {
+            let snap = self.snapshot.read().await;
+            snap.servers.iter()
+                .map(|(name, s)| (name.clone(), s.description.clone(), s.tools.len(), s.refresh_status.clone()))
+                .collect()
+        };
+        let registry = {
+            let guard = self.registry.read().await;
+            guard.clone()
+        };
         let mut out = Vec::new();
-        for (name, s) in &snap.servers {
+        for (name, desc, tools, last_refresh) in &servers {
             let status = match registry.get(name) {
                 Ok(b) => serde_json::to_value(b.status().await).unwrap_or(json!("unknown")),
                 Err(_) => json!("removed from config"),
             };
             out.push(json!({
                 "server": name,
-                "description": s.description,
-                "tools": s.tools.len(),
+                "description": desc,
+                "tools": tools,
                 "status": status,
-                "last_refresh": s.refresh_status,
+                "last_refresh": last_refresh,
             }));
         }
         Ok(text_result(json!(out)))
@@ -614,7 +622,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Execute 1–10 tool calls. Cross-backend calls run in parallel; same-backend calls serialize. Results returned in input order as {server, tool, ok, result/error}. A single call: execute({calls: [{server, tool, arguments}]})."
+        description = "Execute 1–10 tool calls. Cross-backend calls run in parallel. Results returned in input order as {server, tool, ok, result/error}. A single call: execute({calls: [{server, tool, arguments}]})."
     )]
     pub async fn execute(
         &self,
@@ -626,6 +634,7 @@ impl Proxy {
         if p.calls.len() > 10 {
             return Ok(structured_err("too_many_calls", &format!("{} calls (max 10)", p.calls.len())));
         }
+        let n = p.calls.len();
         // Clone what we need and drop the read lock so execute doesn't
         // block hot reload (which needs a write lock) during long calls.
         let (registry, proxy_cfg) = {
@@ -686,21 +695,21 @@ impl Proxy {
             });
         }
 
-        let mut results = Vec::new();
+        // Pre-fill all slots — if a task panics, the slot keeps its
+        // placeholder so the agent sees a result for every call.
+        let mut results: Vec<serde_json::Value> = (0..n)
+            .map(|_| json!({"ok": false, "error": {"code": "internal_error", "message": "task panicked"}}))
+            .collect();
         while let Some(joined) = join.join_next().await {
             match joined {
-                Ok((i, result)) => results.push((i, result)),
+                Ok((i, result)) => {
+                    if i < n { results[i] = result; }
+                }
                 Err(e) => {
-                    // Task panicked — find its index and push an error.
-                    // JoinError doesn't carry the index, so we can only
-                    // push a generic error. In practice panics don't happen
-                    // because all backend errors are caught above.
                     tracing::error!("execute: task panicked: {e}");
                 }
             }
         }
-        results.sort_by_key(|(i, _)| *i);
-        let results: Vec<_> = results.into_iter().map(|(_, r)| r).collect();
         Ok(text_result(json!(results)))
     }
 
@@ -784,7 +793,7 @@ impl Proxy {
     ) -> Result<CallToolResult, McpError> {
         let hash = { self.snapshot.read().await.config_hash.clone() };
         let fresh = {
-            let registry = self.registry.read().await;
+            let registry = self.registry.read().await.clone();
             registry.build_snapshot(hash, p.server.as_deref()).await
         };
         let mut snap = self.snapshot.write().await;

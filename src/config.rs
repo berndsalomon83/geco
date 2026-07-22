@@ -288,23 +288,29 @@ impl Config {
     pub fn snapshot_hash(&self) -> String {
         let mut hasher = Sha256::new();
         for (name, s) in &self.servers {
-            hasher.update(name.as_bytes());
+            // Length-prefix each field to prevent hash collisions from
+            // adjacent string boundary shifts (e.g. "foo"+"bar" vs "foob"+"ar").
+            let field = |h: &mut Sha256, bytes: &[u8]| {
+                h.update((bytes.len() as u64).to_le_bytes());
+                h.update(bytes);
+            };
+            field(&mut hasher, name.as_bytes());
             for part in &s.command.0 {
-                hasher.update(part.as_bytes());
+                field(&mut hasher, part.as_bytes());
             }
             for a in &s.args {
-                hasher.update(a.as_bytes());
+                field(&mut hasher, a.as_bytes());
             }
             for (k, v) in &s.env {
-                hasher.update(k.as_bytes());
-                hasher.update(v.as_bytes());
+                field(&mut hasher, k.as_bytes());
+                field(&mut hasher, v.as_bytes());
             }
             for p in s.allow.iter().chain(s.deny.iter()) {
-                hasher.update(p.as_bytes());
+                field(&mut hasher, p.as_bytes());
             }
             hasher.update([s.enabled as u8]);
             if let Some(d) = &s.description {
-                hasher.update(d.as_bytes());
+                field(&mut hasher, d.as_bytes());
             }
         }
         hex(&hasher.finalize())
