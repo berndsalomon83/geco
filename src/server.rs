@@ -830,15 +830,20 @@ impl Proxy {
         let mut results: Vec<serde_json::Value> = (0..n)
             .map(|_| json!({"ok": false, "error": {"code": "internal_error", "message": "task panicked"}}))
             .collect();
+        let mut needs_health_update = false;
         while let Some(joined) = join.join_next().await {
             match joined {
                 Ok((i, result, latency_ms, was_cold)) => {
                     if i < n {
                         results[i] = result;
                     }
-                    // Record metrics per call.
                     let server = results[i]["server"].as_str().unwrap_or("").to_string();
                     let ok = results[i]["ok"].as_bool().unwrap_or(false);
+                    // If a previously-failed/cold backend succeeded, update health
+                    // so the TUI plugin clears the stale "connection lost" warning.
+                    if ok && was_cold {
+                        needs_health_update = true;
+                    }
                     let mut metrics = self.metrics.write().await;
                     metrics.total_calls += 1;
                     if !ok { metrics.total_errors += 1; }
@@ -854,6 +859,9 @@ impl Proxy {
                     tracing::error!("execute: task panicked: {e}");
                 }
             }
+        }
+        if needs_health_update {
+            self.publish_health().await;
         }
         Ok(text_result(json!(results)))
     }

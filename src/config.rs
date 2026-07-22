@@ -267,8 +267,8 @@ fn keychain_lookup(service: &str) -> Result<String> {
              $p=[IntPtr]::Zero;\
              if($t::CredReadW(\"{service}\",1,0,[ref]$p)){{\
              $base=$p.ToInt64();\
-             $cb=([Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]$base+52));\
-             $blob=[IntPtr]($base+64);\
+             $cb=([Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]$base+32));\
+             $blob=[IntPtr]($base+40);\
              $b=New-Object byte[] $cb;\
              [Marshal]::Copy($blob,$b,0,$cb);\
              $pw=[Text.Encoding]::Unicode.GetString($b);\

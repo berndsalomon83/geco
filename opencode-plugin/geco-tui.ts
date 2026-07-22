@@ -27,7 +27,7 @@ function healthPath(): string {
   }
   if (process.platform === "win32") {
     return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"),
-                     "dev.geco.geco", "health.json")
+                     "dev.geco.geco", "data", "health.json")
   }
   return path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
                    "dev.geco.geco", "health.json")
