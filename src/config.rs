@@ -258,26 +258,40 @@ fn keychain_lookup(service: &str) -> Result<String> {
         ])
     } else if cfg!(target_os = "windows") {
         // Windows Credential Manager via PowerShell + Win32 CredReadW.
-        // Reads CredentialBlobSize to avoid truncating long secrets.
-        let ps_script = format!(
-            "$sig='[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\
-             public static extern bool CredReadW(string t, uint ty, uint f, out System.IntPtr c);\
-             [DllImport(\"advapi32.dll\")] public static extern void CredFree(System.IntPtr c);';\
-             $t=Add-Type -MemberDefinition $sig -Name Cred -PassThru;\
-             $p=[IntPtr]::Zero;\
-             if($t::CredReadW(\"{service}\",1,0,[ref]$p)){{\
-             $base=$p.ToInt64();\
-             $cb=([Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]$base+32));\
-             $blob=[IntPtr]($base+40);\
-             $b=New-Object byte[] $cb;\
-             [Marshal]::Copy($blob,$b,0,$cb);\
-             $pw=[Text.Encoding]::Unicode.GetString($b);\
-             $t::CredFree($p);\
-             Write-Output $pw}}else{{exit 1}}'"
-        );
-        ("powershell".into(), vec![
-            "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), ps_script
-        ])
+        // The service name is passed via the GECO_KEYCHAIN_SERVICE env var
+        // to avoid PowerShell injection through string interpolation.
+        let ps_script = "\
+         $sig='[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\
+         public static extern bool CredReadW(string t, uint ty, uint f, out System.IntPtr c);\
+         [DllImport(\"advapi32.dll\")] public static extern void CredFree(System.IntPtr c);';\
+         $t=Add-Type -MemberDefinition $sig -Name Cred -PassThru;\
+         $p=[IntPtr]::Zero;\
+         $svc=$env:GECO_KEYCHAIN_SERVICE;\
+         if($t::CredReadW($svc,1,0,[ref]$p)){{\
+         $base=$p.ToInt64();\
+         $cb=([Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]$base+32));\
+         $blob=[IntPtr]($base+40);\
+         $b=New-Object byte[] $cb;\
+         [Marshal]::Copy($blob,$b,0,$cb);\
+         $pw=[Text.Encoding]::Unicode.GetString($b);\
+         $t::CredFree($p);\
+         Write-Output $pw}}else{{exit 1}}";
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_script]);
+        cmd.env("GECO_KEYCHAIN_SERVICE", service);
+        let out = cmd
+            .output()
+            .with_context(|| "cannot run 'powershell' to resolve keychain item '{service}'")?;
+        if !out.status.success() {
+            bail!("keychain item '{service}' not found ('powershell' exited {})", out.status);
+        }
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let secret = raw.strip_suffix("\r\n").or_else(|| raw.strip_suffix('\n')).unwrap_or(&raw);
+        let secret = secret.to_string();
+        if secret.is_empty() {
+            bail!("keychain item '{service}' resolved to an empty value");
+        }
+        return Ok(secret);
     } else {
         // Linux desktop: libsecret. Headless hosts should use plain env vars.
         ("secret-tool".into(), vec![

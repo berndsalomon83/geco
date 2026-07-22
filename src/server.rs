@@ -784,7 +784,7 @@ impl Proxy {
                         }), start.elapsed().as_millis() as u64, false);
                     }
                 };
-                let was_cold = matches!(backend.status().await, crate::backend::Status::Cold);
+                let was_down = !matches!(backend.status().await, crate::backend::Status::Up { .. });
                 match backend.call(&call.tool, call.arguments, &proxy_cfg).await {
                     Ok(result) => {
                         let elapsed = start.elapsed().as_millis() as u64;
@@ -817,7 +817,7 @@ impl Proxy {
                                 "message": text,
                             });
                         }
-                        (i, entry, elapsed, was_cold)
+                        (i, entry, elapsed, was_down)
                     }
                     Err(e) => {
                         let elapsed = start.elapsed().as_millis() as u64;
@@ -830,7 +830,7 @@ impl Proxy {
                             "tool": call.tool,
                             "ok": false,
                             "error": { "code": code, "message": msg },
-                        }), elapsed, was_cold)
+                        }), elapsed, was_down)
                     }
                 }
             });
@@ -850,15 +850,14 @@ impl Proxy {
         let mut needs_health_update = false;
         while let Some(joined) = join.join_next().await {
             match joined {
-                Ok((i, result, latency_ms, was_cold)) => {
-                    if i < n {
-                        results[i] = result;
-                    }
+                Ok((i, result, latency_ms, was_down)) => {
+                    if i >= n { continue; }
+                    results[i] = result;
                     let server = results[i]["server"].as_str().unwrap_or("").to_string();
                     let ok = results[i]["ok"].as_bool().unwrap_or(false);
-                    // If a previously-failed/cold backend succeeded, update health
+                    // If a previously-down backend succeeded, update health
                     // so the TUI plugin clears the stale "connection lost" warning.
-                    if ok && was_cold {
+                    if ok && was_down {
                         needs_health_update = true;
                     }
                     let mut metrics = self.metrics.write().await;
@@ -868,7 +867,7 @@ impl Proxy {
                         .or_default();
                     entry.calls += 1;
                     if !ok { entry.errors += 1; }
-                    if was_cold { entry.cold_starts += 1; }
+                    if was_down { entry.cold_starts += 1; }
                     entry.total_latency_ms += latency_ms;
                     entry.last_call_at = Some(crate::backend::now());
                 }

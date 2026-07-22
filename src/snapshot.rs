@@ -63,10 +63,12 @@ impl Snapshot {
             std::fs::create_dir_all(parent).ok();
         }
         let raw = serde_json::to_string_pretty(self)?;
-        // Atomic-ish write: tmp then rename, so a crash mid-write can't
-        // leave a corrupt snapshot (load would then serve empty). Mirrors
-        // the health.rs pattern.
-        let tmp = path.with_extension("json.tmp");
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::write(&tmp, &raw)
             .with_context(|| format!("cannot write {}", tmp.display()))?;
         std::fs::rename(&tmp, path)

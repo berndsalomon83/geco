@@ -445,7 +445,6 @@ dependencies = [
  "serde_norway",
  "sha2",
  "tempfile",
- "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
