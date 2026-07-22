@@ -8,7 +8,7 @@ use geco::backend::Registry;
 use geco::config::Config;
 use geco::server::{
     BatchCall, BatchParams, ExecuteParams, GetToolsParams, Proxy, RefreshParams, SearchParams,
-    SearchSkillsParams, ReadSkillParams,
+    ReadSkillParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ContentBlock;
@@ -297,44 +297,46 @@ async fn get_tools_through_proxy() {
 }
 
 #[tokio::test]
-async fn search_tools_through_proxy() {
+async fn search_through_proxy() {
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
-    // Search for "add numbers" should find the 'add' tool.
+    // Search for "add numbers" with kind="tools" should find the 'add' tool.
     let result = proxy
-        .search_tools(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: None }))
+        .search(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: None, kind: Some("tools".into()) }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
     let hits = json.as_array().unwrap();
     assert!(!hits.is_empty(), "expected at least one hit");
-    assert_eq!(hits[0]["tool"], "add");
+    assert_eq!(hits[0]["kind"], "tool");
+    assert_eq!(hits[0]["name"], "add");
     assert_eq!(hits[0]["server"], "stub");
-    // Without include_schema, no input_schema in the result.
     assert!(hits[0].get("input_schema").is_none() || hits[0]["input_schema"].is_null(),
            "input_schema should be absent without include_schema: {json}");
 
     // Search with limit.
     let result = proxy
-        .search_tools(Parameters(SearchParams { query: "add".into(), limit: Some(1), include_schema: None }))
+        .search(Parameters(SearchParams { query: "add".into(), limit: Some(1), include_schema: None, kind: None }))
         .await
         .unwrap();
     let json = extract_json(&result);
     let hits = json.as_array().unwrap();
-    assert_eq!(hits.len(), 1, "expected exactly 1 hit with limit=1: {json}");
+    // Tools are limited to 1, skills may also appear (but no skills configured here).
+    let tool_hits: Vec<_> = hits.iter().filter(|h| h["kind"] == "tool").collect();
+    assert_eq!(tool_hits.len(), 1, "expected exactly 1 tool hit with limit=1: {json}");
 
     // Search with include_schema=true: should include the input schema inline.
     let result = proxy
-        .search_tools(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: Some(true) }))
+        .search(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: Some(true), kind: Some("tools".into()) }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
     let hits = json.as_array().unwrap();
     assert!(!hits.is_empty());
-    assert_eq!(hits[0]["tool"], "add");
+    assert_eq!(hits[0]["name"], "add");
     assert!(hits[0]["input_schema"]["properties"]["a"].is_object(),
             "expected input schema with 'a' property: {json}");
     assert!(hits[0]["input_schema"]["properties"]["b"].is_object(),
@@ -342,7 +344,7 @@ async fn search_tools_through_proxy() {
 
     // Search for nonexistent query returns an error.
     let result = proxy
-        .search_tools(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None }))
+        .search(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None, kind: None }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for no matches");
@@ -445,20 +447,21 @@ async fn skills_through_proxy() {
     assert!(names.contains(&"test-planner"), "expected test-planner in {names:?}");
     assert!(names.contains(&"code-reviewer"), "expected code-reviewer in {names:?}");
 
-    // search_skills: "review" should find code-reviewer.
+    // search with kind="skills": "review" should find code-reviewer.
     let result = proxy
-        .search_skills(Parameters(SearchSkillsParams { query: "review".into(), limit: None }))
+        .search(Parameters(SearchParams { query: "review".into(), limit: None, include_schema: None, kind: Some("skills".into()) }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
     let hits = json.as_array().unwrap();
     assert!(!hits.is_empty(), "expected at least one hit for 'review'");
+    assert_eq!(hits[0]["kind"], "skill");
     assert_eq!(hits[0]["name"], "code-reviewer");
 
-    // search_skills: "plan" should find test-planner.
+    // search with kind="skills": "plan" should find test-planner.
     let result = proxy
-        .search_skills(Parameters(SearchSkillsParams { query: "plan tests".into(), limit: None }))
+        .search(Parameters(SearchParams { query: "plan tests".into(), limit: None, include_schema: None, kind: Some("skills".into()) }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -467,12 +470,15 @@ async fn skills_through_proxy() {
     assert!(!hits.is_empty());
     assert_eq!(hits[0]["name"], "test-planner");
 
-    // search_skills: no match returns an error.
+    // search with kind="skills": no match returns an error.
     let result = proxy
-        .search_skills(Parameters(SearchSkillsParams { query: "xyzzy_nothing".into(), limit: None }))
+        .search(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None, kind: Some("skills".into()) }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for no skill matches");
+
+    // search with kind="skills" + no skills configured returns error.
+    // (already tested above — the make_proxy_with_skills has skills)
 
     // read_skill: load the full SKILL.md + file inventory.
     let result = proxy

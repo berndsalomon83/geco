@@ -10,7 +10,7 @@ Rust toolchain (rustup.rs), `python3` (used by the scripts for JSON handling). B
 bash install.sh
 ```
 
-Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 10 meta-tools.
+Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 9 meta-tools.
 
 ## Migrate servers behind the proxy
 
@@ -65,7 +65,7 @@ geco inspect                  # snapshot: servers, tool counts, refresh status
 RUST_LOG=debug geco serve     # verbose logs on stderr (Ctrl-C to stop)
 ```
 
-In the agent: ask it to `search_tools` for something you know is behind the proxy, then execute it. First execution on a cold backend takes the backend's startup time (npx downloads on very first use); after that it's warm.
+In the agent: ask it to `search` for something you know is behind the proxy, then execute it. First execution on a cold backend takes the backend's startup time (npx downloads on very first use); after that it's warm.
 
 ## Config knobs
 
@@ -105,7 +105,7 @@ skills:
   dirs: ["~/.config/opencode/skills-library"]
 ```
 
-Restart the agent. `list_skills` shows the whole catalogue; `search_skills` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `refresh_tools` re-scans the library. Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
+Restart the agent. `list_skills` shows the whole catalogue; `search` with `kind="skills"` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `refresh_tools` re-scans the library. Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
 
 ### The absorb model (nothing is ever native)
 

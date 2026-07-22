@@ -268,7 +268,7 @@ impl Config {
         if cfg.servers.is_empty() {
             tracing::info!(
                 "config has no mcpServers — serving skills only \
-                 (list_skills / search_skills / read_skill)"
+                 (list_skills / search / read_skill)"
             );
         }
         Ok(cfg)

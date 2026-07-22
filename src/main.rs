@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
                 })
             };
             tracing::info!(
-                "geco up: {} servers, {} tools behind 10 meta-tools",
+                "geco up: {} servers, {} tools behind 9 meta-tools",
                 snapshot.servers.len(),
                 snapshot.tool_count()
             );

@@ -1,6 +1,6 @@
-//! The proxy's own MCP surface: ten small meta-tools instead of every
+//! The proxy's own MCP surface: nine small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~3.8 KB no matter how many tools hide behind the gate.
+//! ~3.6 KB no matter how many tools hide behind the gate.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -98,24 +98,28 @@ pub struct GetToolsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
-    /// What you're looking for, e.g. "store memory" or "create issue"
+    /// What you're looking for, e.g. "store memory", "create issue", "plan a project"
     pub query: String,
-    /// Max results (default 8)
+    /// Max results per kind (default 8 for tools, 5 for skills)
     #[serde(default, deserialize_with = "opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub limit: Option<u32>,
-    /// Include the full input schema for each hit so you can call
+    /// Include the full input schema for each tool hit so you can call
     /// execute_tool directly without a separate get_tools call.
     /// Default false — schemas are verbose, so only request when you
-    /// plan to execute immediately.
+    /// plan to execute immediately. (Skills don't have input schemas.)
     #[serde(default)]
     #[schemars(with = "bool")]
     pub include_schema: Option<bool>,
+    /// Filter to one kind: "tools", "skills", or omit for both (default).
+    #[serde(default)]
+    #[schemars(with = "String")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteParams {
-    /// Server name from list_servers / search_tools
+    /// Server name from list_servers / search
     pub server: String,
     /// Tool name on that server
     pub tool: String,
@@ -127,7 +131,7 @@ pub struct ExecuteParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchCall {
-    /// Server name from list_servers / search_tools
+    /// Server name from list_servers / search
     pub server: String,
     /// Tool name on that server
     pub tool: String,
@@ -146,18 +150,8 @@ pub struct BatchParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SearchSkillsParams {
-    /// What you're trying to do, e.g. "plan a project" or "organize files"
-    pub query: String,
-    /// Max results (default 5)
-    #[serde(default, deserialize_with = "opt_u32_lenient")]
-    #[schemars(with = "u32")]
-    pub limit: Option<u32>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSkillParams {
-    /// Skill name from search_skills
+    /// Skill name from search (kind="skills")
     pub name: String,
 }
 
@@ -501,28 +495,25 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Find tools across all servers by keywords in one call. Returns server + tool + description, best match first. Set include_schema=true to get each tool's full input schema inline — saves a get_tools call when you plan to execute immediately."
+        description = "Find tools AND skills by keywords in one call. Returns hits tagged by kind (\"tool\" or \"skill\"), best match first. For tool hits, set include_schema=true to get each tool's full input schema inline — saves a get_tools call. Use kind=\"tools\" or kind=\"skills\" to search only one surface."
     )]
-    pub async fn search_tools(
+    pub async fn search(
         &self,
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snap = self.snapshot.read().await;
+        let kind = p.kind.as_deref().unwrap_or("");
         let limit = p.limit.unwrap_or(8).clamp(1, 25) as usize;
-        let hits = search::search(&snap, &p.query, limit);
-        if hits.is_empty() {
-            return Ok(err(format!(
-                "no tools match '{}' — try list_servers or refresh_tools",
-                p.query
-            )));
-        }
         let include_schema = p.include_schema.unwrap_or(false);
-        let result: Vec<_> = hits
-            .iter()
-            .map(|h| {
+        let mut results = Vec::new();
+
+        if kind != "skills" {
+            let snap = self.snapshot.read().await;
+            let tool_hits = search::search(&snap, &p.query, limit);
+            for h in &tool_hits {
                 let mut entry = json!({
+                    "kind": "tool",
                     "server": h.server,
-                    "tool": h.tool,
+                    "name": h.tool,
                     "description": h.description,
                 });
                 if include_schema {
@@ -530,10 +521,34 @@ impl Proxy {
                         entry["input_schema"] = t.input_schema.clone();
                     }
                 }
-                entry
-            })
-            .collect();
-        Ok(text_result(json!(result)))
+                results.push(entry);
+            }
+            drop(snap);
+        }
+
+        if kind != "tools" {
+            let idx = self.skills.read().await;
+            if !idx.skills.is_empty() {
+                let skill_limit = if limit > 20 { 20 } else { limit };
+                let skill_hits = idx.search(&p.query, skill_limit);
+                for s in &skill_hits {
+                    results.push(json!({
+                        "kind": "skill",
+                        "name": s.name,
+                        "description": short_desc(&s.description, 160),
+                    }));
+                }
+            }
+        }
+
+        if results.is_empty() {
+            return Ok(err(format!(
+                "no matches for '{}'{} — try different keywords",
+                p.query,
+                if kind.is_empty() { String::new() } else { format!(" (kind={kind})") }
+            )));
+        }
+        Ok(text_result(json!(results)))
     }
 
     #[tool(
@@ -626,7 +641,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "List every available agent skill (name + one-line description). Use when asked what skills exist; use search_skills for targeted lookup."
+        description = "List every available agent skill (name + one-line description). Use when asked what skills exist; use search with kind=\"skills\" for targeted lookup."
     )]
     pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
         let idx = self.skills.read().await;
@@ -642,28 +657,6 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Find an agent skill (playbook + bundled scripts) by keywords. list_skills shows the whole library. Follow with read_skill."
-    )]
-    pub async fn search_skills(
-        &self,
-        Parameters(p): Parameters<SearchSkillsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let idx = self.skills.read().await;
-        if idx.skills.is_empty() {
-            return Ok(err("no skill libraries configured (config `skills.dirs`)".into()));
-        }
-        let limit = p.limit.unwrap_or(5).clamp(1, 20) as usize;
-        let hits = idx.search(&p.query, limit);
-        if hits.is_empty() {
-            return Ok(err(format!("no skills match '{}' ({} in library)", p.query, idx.skills.len())));
-        }
-        Ok(text_result(json!(hits
-            .iter()
-            .map(|s| json!({"name": s.name, "description": short_desc(&s.description, 160)}))
-            .collect::<Vec<_>>())))
-    }
-
-    #[tool(
         description = "Load a skill's full instructions (SKILL.md) and its file inventory. Follow the instructions; run bundled scripts via your shell at the listed absolute paths."
     )]
     pub async fn read_skill(
@@ -672,7 +665,7 @@ impl Proxy {
     ) -> Result<CallToolResult, McpError> {
         let idx = self.skills.read().await;
         let Some(meta) = idx.get(&p.name) else {
-            return Ok(err(format!("unknown skill '{}' — use search_skills", p.name)));
+            return Ok(err(format!("unknown skill '{}' — use search with kind=\"skills\"", p.name)));
         };
         match read_skill(meta) {
             Ok((body, files)) => {
@@ -786,10 +779,10 @@ impl ServerHandler for Proxy {
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 "Gateway to multiple MCP servers whose tools load on demand instead of \
-                 polluting your context. Flow: search_tools (with include_schema=true to \
-                 get input schemas inline) → execute_tool (or execute_batch for multiple \
-                 independent calls), or list_servers → get_tools → execute_tool. \
-                 Backends start lazily on first execution."
+                 polluting your context. Flow: search (with include_schema=true to get \
+                 input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute_tool \
+                 (or execute_batch for multiple independent calls), or list_servers → \
+                 get_tools → execute_tool. Backends start lazily on first execution."
                     .to_string(),
             )
     }
