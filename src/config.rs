@@ -287,9 +287,12 @@ fn keychain_lookup(service: &str) -> Result<String> {
     if !out.status.success() {
         bail!("keychain item '{service}' not found ('{bin}' exited {})", out.status);
     }
-    let secret = String::from_utf8_lossy(&out.stdout)
-        .trim_end_matches(['\n', '\r'])
-        .to_string();
+    let raw = String::from_utf8_lossy(&out.stdout);
+    // Strip the single trailing newline that CLI tools add — don't use
+    // trim_end_matches because it would strip legitimate trailing newlines
+    // in the secret itself.
+    let secret = raw.strip_suffix("\r\n").or_else(|| raw.strip_suffix('\n')).unwrap_or(&raw);
+    let secret = secret.to_string();
     if secret.is_empty() {
         bail!("keychain item '{service}' resolved to an empty value");
     }
@@ -425,6 +428,9 @@ impl Config {
             hasher.update([s.enabled as u8]);
             if let Some(d) = &s.description {
                 field(&mut hasher, d.as_bytes());
+            }
+            for p in &s.pass_env {
+                field(&mut hasher, p.as_bytes());
             }
         }
         hex(&hasher.finalize())

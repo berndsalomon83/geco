@@ -214,7 +214,7 @@ async fn main() -> Result<()> {
                 .serve(rmcp::transport::stdio())
                 .await
                 .context("failed to start stdio server")?;
-            service.waiting().await?;
+            let _ = service.waiting().await;
             proxy.shutdown_backends().await;
         }
     }
