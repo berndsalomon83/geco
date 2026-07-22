@@ -520,22 +520,32 @@ impl Proxy {
     /// status (a warm backend that crashed after a successful snapshot
     /// has refresh_status="ok" but Status::Failed).
     async fn all_issues(&self) -> Vec<Issue> {
-        let snap = self.snapshot.read().await;
-        let absorb = self.absorb_issues.read().await;
-        let registry = self.registry.read().await;
-        let mut issues = absorb.clone();
-        for (name, s) in &snap.servers {
-            let snapshot_ok = s.refresh_status == "ok";
+        // Clone what we need and drop locks before awaiting backend
+        // status() — holding the registry read lock across async status
+        // checks would block hot-reload (which needs a write lock).
+        let (servers, absorb) = {
+            let snap = self.snapshot.read().await;
+            let absorb = self.absorb_issues.read().await.clone();
+            let servers: Vec<_> = snap.servers.iter()
+                .map(|(n, s)| (n.clone(), s.refresh_status.clone()))
+                .collect();
+            (servers, absorb)
+        };
+        let registry = {
+            let guard = self.registry.read().await;
+            guard.clone()
+        };
+        let mut issues = absorb;
+        for (name, refresh_status) in &servers {
+            let snapshot_ok = refresh_status == "ok";
             if !snapshot_ok {
                 issues.push(Issue {
                     kind: "backend".into(),
                     subject: name.clone(),
-                    detail: s.refresh_status.clone(),
+                    detail: refresh_status.clone(),
                     severity: "error".into(),
                 });
             }
-            // Also check live status — a warm backend that died after
-            // snapshot time has Failed status but refresh_status="ok".
             if snapshot_ok {
                 if let Ok(backend) = registry.get(name) {
                     if matches!(backend.status().await, crate::backend::Status::Failed { .. }) {

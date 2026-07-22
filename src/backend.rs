@@ -107,6 +107,14 @@ impl Backend {
                 Ok(c)
             }
             Err(e) => {
+                // Only mark as Failed if no other task stored a connection
+                // while we were blocked. A concurrent connect may have
+                // succeeded — don't overwrite its Up status.
+                let guard = self.conn.lock().await;
+                if guard.is_some() {
+                    // Another task connected successfully — don't clobber.
+                    return Err(e);
+                }
                 *self.status.lock().await = Status::Failed {
                     error: e.to_string(),
                     at: now(),
