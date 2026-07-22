@@ -270,8 +270,12 @@ impl Registry {
             });
         }
         while let Some(joined) = join.join_next().await {
-            let Ok((name, description, result)) = joined else {
-                continue;
+            let (name, description, result) = match joined {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("build_snapshot: task panicked: {e}");
+                    continue;
+                }
             };
             let entry = match result {
                 Ok(tools) => ServerSnapshot {

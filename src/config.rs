@@ -258,6 +258,7 @@ fn keychain_lookup(service: &str) -> Result<String> {
         ])
     } else if cfg!(target_os = "windows") {
         // Windows Credential Manager via PowerShell + Win32 CredReadW.
+        // Reads CredentialBlobSize to avoid truncating long secrets.
         let ps_script = format!(
             "$sig='[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\
              public static extern bool CredReadW(string t, uint ty, uint f, out System.IntPtr c);\
@@ -265,9 +266,12 @@ fn keychain_lookup(service: &str) -> Result<String> {
              $t=Add-Type -MemberDefinition $sig -Name Cred -PassThru;\
              $p=[IntPtr]::Zero;\
              if($t::CredReadW(\"{service}\",1,0,[ref]$p)){{\
-             $b=New-Object byte[] 512;\
-             [Marshal]::Copy([IntPtr]($p.ToInt64()+16),$b,0,512);\
-             $pw=[Text.Encoding]::Unicode.GetString($b).TrimEnd([char]0);\
+             $base=$p.ToInt64();\
+             $cb=([Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]$base+52));\
+             $blob=[IntPtr]($base+64);\
+             $b=New-Object byte[] $cb;\
+             [Marshal]::Copy($blob,$b,0,$cb);\
+             $pw=[Text.Encoding]::Unicode.GetString($b);\
              $t::CredFree($p);\
              Write-Output $pw}}else{{exit 1}}'"
         );

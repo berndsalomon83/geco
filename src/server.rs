@@ -518,18 +518,37 @@ impl Proxy {
 
     /// The current full issue set (backends + absorb) — used by the
     /// `health` meta-tool and `publish_health` so they always agree.
+    /// Checks both the snapshot's refresh_status AND the live backend
+    /// status (a warm backend that crashed after a successful snapshot
+    /// has refresh_status="ok" but Status::Failed).
     async fn all_issues(&self) -> Vec<Issue> {
         let snap = self.snapshot.read().await;
         let absorb = self.absorb_issues.read().await;
+        let registry = self.registry.read().await;
         let mut issues = absorb.clone();
         for (name, s) in &snap.servers {
-            if s.refresh_status != "ok" {
+            let snapshot_ok = s.refresh_status == "ok";
+            if !snapshot_ok {
                 issues.push(Issue {
                     kind: "backend".into(),
                     subject: name.clone(),
                     detail: s.refresh_status.clone(),
                     severity: "error".into(),
                 });
+            }
+            // Also check live status — a warm backend that died after
+            // snapshot time has Failed status but refresh_status="ok".
+            if snapshot_ok {
+                if let Ok(backend) = registry.get(name) {
+                    if matches!(backend.status().await, crate::backend::Status::Failed { .. }) {
+                        issues.push(Issue {
+                            kind: "backend".into(),
+                            subject: name.clone(),
+                            detail: "connection lost (child process exited)".into(),
+                            severity: "error".into(),
+                        });
+                    }
+                }
             }
         }
         issues
@@ -845,7 +864,7 @@ impl Proxy {
     pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
         let idx = self.skills.read().await;
         if idx.skills.is_empty() {
-            return Ok(structured_err("no_skills", "no skill libraries configured (config `skills.dirs`)"));
+            return Ok(structured_err("no_skills", "no skill libraries configured (configure `skills.dirs`)"));
         }
         let out: Vec<_> = idx
             .skills
