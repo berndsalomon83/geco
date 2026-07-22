@@ -14,6 +14,23 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+/// Recursively copy a directory tree (used as a cross-filesystem fallback
+/// for `rename` in `absorb_into`).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let p = entry.path();
+        let target = dst.join(entry.file_name());
+        if p.is_dir() {
+            copy_dir_recursive(&p, &target)?;
+        } else {
+            std::fs::copy(&p, &target)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SkillMeta {
     pub name: String,
@@ -85,10 +102,25 @@ pub fn absorb_into(library: &str, absorb_dirs: &[String]) -> (Vec<String>, Vec<S
             }
             match std::fs::rename(&src, &dst) {
                 Ok(()) => moved.push(name.to_string_lossy().to_string()),
-                Err(e) => errors.push(format!(
-                    "absorb failed for '{}': {e}",
-                    name.to_string_lossy()
-                )),
+                Err(e) => {
+                    // rename fails with EXDEV across filesystems — fall back
+                    // to copy + remove so absorb works on cross-mounted dirs.
+                    if let Err(copy_err) = copy_dir_recursive(&src, &dst) {
+                        errors.push(format!(
+                            "absorb failed for '{}': rename: {e}; copy fallback: {copy_err}",
+                            name.to_string_lossy()
+                        ));
+                        continue;
+                    }
+                    if let Err(rm_err) = std::fs::remove_dir_all(&src) {
+                        errors.push(format!(
+                            "absorb partially failed for '{}': copied but could not remove source: {rm_err}",
+                            name.to_string_lossy()
+                        ));
+                        continue;
+                    }
+                    moved.push(name.to_string_lossy().to_string());
+                }
             }
         }
     }
