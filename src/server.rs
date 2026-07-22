@@ -163,6 +163,7 @@ pub struct Proxy {
     absorb_issues: Arc<RwLock<Vec<Issue>>>,
     client: Arc<RwLock<Option<String>>>,
     metrics: Arc<RwLock<crate::health::Metrics>>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
@@ -310,6 +311,7 @@ impl Proxy {
             absorb_issues: Arc::new(RwLock::new(absorb_issues)),
             client: Arc::new(RwLock::new(None)),
             metrics: Arc::new(RwLock::new(metrics)),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -364,6 +366,9 @@ impl Proxy {
         tokio::spawn(async move {
             let mut last_mtime: Option<std::time::SystemTime> = None;
             loop {
+                if proxy.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 if rx.recv().await.is_none() {
                     break;
                 }
@@ -406,6 +411,9 @@ impl Proxy {
         let proxy = self.clone();
         tokio::spawn(async move {
             loop {
+                if proxy.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let interval = {
                     let registry = proxy.registry.read().await;
                     registry.proxy.health_check_secs
@@ -497,6 +505,7 @@ impl Proxy {
 
     /// Shut down all backend processes. Called when the proxy is stopping.
     pub async fn shutdown_backends(&self) {
+        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         let registry = self.registry.read().await;
         registry.shutdown_all().await;
     }

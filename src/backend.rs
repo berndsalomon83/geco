@@ -96,14 +96,13 @@ impl Backend {
         // Connect without holding the lock.
         match self.connect_raw(startup).await {
             Ok(c) => {
-                // Re-acquire and double-check: another task may have
-                // connected while we were blocked.
                 let mut guard = self.conn.lock().await;
                 if let Some(existing) = guard.as_ref() {
                     return Ok(existing.clone());
                 }
-                *self.status.lock().await = Status::Up { since: now() };
                 *guard = Some(c.clone());
+                drop(guard);
+                *self.status.lock().await = Status::Up { since: now() };
                 Ok(c)
             }
             Err(e) => {
