@@ -1,13 +1,17 @@
 //! End-to-end: real child process (python stub), snapshot refresh, lazy
-//! execution, allow/deny enforcement. Skips gracefully when python3 is
-//! unavailable.
+//! execution, allow/deny enforcement, skills through Proxy. Skips gracefully
+//! when python3 is unavailable.
 
 use std::sync::Arc;
 
 use geco::backend::Registry;
 use geco::config::Config;
-use geco::server::{Proxy, RefreshParams};
+use geco::server::{
+    ExecuteParams, GetToolsParams, Proxy, RefreshParams, SearchParams, SearchSkillsParams,
+    ReadSkillParams,
+};
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::ContentBlock;
 use geco::snapshot::Snapshot;
 
 fn stub_config() -> Option<Config> {
@@ -29,6 +33,7 @@ fn stub_config() -> Option<Config> {
     Some(serde_json::from_str(&raw).unwrap())
 }
 
+/// Build a Proxy from a config, returning the proxy, registry, and snapshot.
 async fn make_proxy(cfg: &Config) -> (Proxy, Arc<Registry>, Snapshot) {
     let registry = Arc::new(Registry::from_config(cfg));
     let snapshot = registry
@@ -42,6 +47,62 @@ async fn make_proxy(cfg: &Config) -> (Proxy, Arc<Registry>, Snapshot) {
         vec![],
     );
     (proxy, registry, snapshot)
+}
+
+/// Build a Proxy with a skill library.
+async fn make_proxy_with_skills(cfg: &Config, skill_dirs: Vec<String>) -> (Proxy, Arc<Registry>) {
+    let registry = Arc::new(Registry::from_config(cfg));
+    let snapshot = registry
+        .build_snapshot(cfg.snapshot_hash(), None)
+        .await;
+    let proxy = Proxy::new(
+        registry.clone(),
+        snapshot.clone(),
+        Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json")),
+        skill_dirs,
+        vec![],
+    );
+    (proxy, registry)
+}
+
+/// Extract the first text block from a CallToolResult and parse it as JSON.
+fn extract_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+    let text = result.content.iter().find_map(|b| {
+        if let ContentBlock::Text(t) = b {
+            Some(t.text.as_str())
+        } else {
+            None
+        }
+    }).expect("no text block in result");
+    serde_json::from_str(text).unwrap_or_else(|_| {
+        panic!("failed to parse result as JSON: {text}")
+    })
+}
+
+/// Whether a CallToolResult is an error.
+fn is_error(result: &rmcp::model::CallToolResult) -> bool {
+    result.is_error == Some(true)
+}
+
+/// Create a temp skill library with two skills for testing.
+fn make_skill_library() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path();
+    // Skill 1: "test-planner"
+    let s1 = lib.join("test-planner");
+    std::fs::create_dir_all(&s1).unwrap();
+    std::fs::write(s1.join("SKILL.md"),
+        "---\nname: test-planner\ndescription: Plan tests systematically before writing them\n---\n\n# Test Planner\n\nBreak down test work.\n").unwrap();
+    std::fs::create_dir_all(s1.join("scripts")).unwrap();
+    std::fs::write(s1.join("scripts").join("run.sh"), "#!/bin/bash\necho planning\n").unwrap();
+
+    // Skill 2: "code-reviewer"
+    let s2 = lib.join("code-reviewer");
+    std::fs::create_dir_all(&s2).unwrap();
+    std::fs::write(s2.join("SKILL.md"),
+        "---\nname: code-reviewer\ndescription: Review code for bugs and improvements\n---\n\n# Code Reviewer\n\nCheck for bugs.\n").unwrap();
+
+    dir
 }
 
 #[tokio::test]
@@ -159,10 +220,293 @@ async fn health_reports_backend_failures() {
 
     // The health meta-tool should report the broken server as an issue.
     let result = proxy.health().await.unwrap();
-    let text = format!("{result:?}");
-    assert!(text.contains("broken"), "health tool should mention broken server: {text}");
-    assert!(text.contains("false") || text.contains("\"healthy\":false"),
-            "health tool should report unhealthy: {text}");
+    let json = extract_json(&result);
+    assert_eq!(json["healthy"], false, "health tool should report unhealthy: {json}");
+    let issues = json["issues"].as_array().unwrap();
+    assert!(issues.iter().any(|i| i["subject"] == "broken"),
+            "health tool should mention broken server: {json}");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn list_servers_through_proxy() {
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    let result = proxy.list_servers().await.unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let servers = json.as_array().unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0]["server"], "stub");
+    assert_eq!(servers[0]["tools"], 2);
+    assert_eq!(servers[0]["last_refresh"], "ok");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn get_tools_through_proxy() {
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // List all tools on the stub server.
+    let result = proxy
+        .get_tools(Parameters(GetToolsParams { server: "stub".into(), tool: None }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let tools = json["tools"].as_array().unwrap();
+    let names: Vec<_> = tools.iter().map(|t| t["tool"].as_str().unwrap()).collect();
+    assert!(names.contains(&"add"), "expected 'add' in {names:?}");
+    assert!(names.contains(&"echo"), "expected 'echo' in {names:?}");
+    // secret_tool must be hidden by the denylist.
+    assert!(!names.contains(&"secret_tool"), "secret_tool should be hidden");
+
+    // Get the full input schema for a specific tool.
+    let result = proxy
+        .get_tools(Parameters(GetToolsParams { server: "stub".into(), tool: Some("add".into()) }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    assert_eq!(json["tool"], "add");
+    assert!(json["input_schema"]["properties"]["a"].is_object(),
+            "expected input schema with 'a' property: {json}");
+
+    // Unknown server returns an error.
+    let result = proxy
+        .get_tools(Parameters(GetToolsParams { server: "nope".into(), tool: None }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "expected error for unknown server");
+
+    // Unknown tool returns an error.
+    let result = proxy
+        .get_tools(Parameters(GetToolsParams { server: "stub".into(), tool: Some("nope".into()) }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "expected error for unknown tool");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn search_tools_through_proxy() {
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // Search for "add numbers" should find the 'add' tool.
+    let result = proxy
+        .search_tools(Parameters(SearchParams { query: "add numbers".into(), limit: None }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let hits = json.as_array().unwrap();
+    assert!(!hits.is_empty(), "expected at least one hit");
+    assert_eq!(hits[0]["tool"], "add");
+    assert_eq!(hits[0]["server"], "stub");
+
+    // Search with limit.
+    let result = proxy
+        .search_tools(Parameters(SearchParams { query: "add".into(), limit: Some(1) }))
+        .await
+        .unwrap();
+    let json = extract_json(&result);
+    let hits = json.as_array().unwrap();
+    assert_eq!(hits.len(), 1, "expected exactly 1 hit with limit=1: {json}");
+
+    // Search for nonexistent query returns an error.
+    let result = proxy
+        .search_tools(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "expected error for no matches");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn execute_tool_through_proxy() {
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // Execute 'add' with arguments through the Proxy meta-tool.
+    let args = serde_json::json!({"a": 17, "b": 25})
+        .as_object()
+        .unwrap()
+        .clone();
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "stub".into(),
+            tool: "add".into(),
+            arguments: Some(args),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "execute_tool should succeed");
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("42"), "expected 42 in {text}");
+
+    // Execute 'echo' with a text argument.
+    let args = serde_json::json!({"text": "hello geco"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "stub".into(),
+            tool: "echo".into(),
+            arguments: Some(args),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("hello geco"), "expected echoed text in {text}");
+
+    // Denylist: secret_tool is blocked at execute time even if guessed.
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "stub".into(),
+            tool: "secret_tool".into(),
+            arguments: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "denied tool should error");
+
+    // Unknown server.
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "nope".into(),
+            tool: "add".into(),
+            arguments: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "unknown server should error");
+
+    // Unknown tool on a valid server.
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "stub".into(),
+            tool: "nonexistent".into(),
+            arguments: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "unknown tool should error");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn skills_through_proxy() {
+    let Some(cfg) = stub_config() else { return };
+    let lib = make_skill_library();
+    let (proxy, registry) = make_proxy_with_skills(
+        &cfg,
+        vec![lib.path().display().to_string()],
+    )
+    .await;
+
+    // list_skills: should show both skills.
+    let result = proxy.list_skills().await.unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let skills = json["skills"].as_array().unwrap();
+    assert_eq!(json["count"], 2, "expected 2 skills: {json}");
+    let names: Vec<_> = skills.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"test-planner"), "expected test-planner in {names:?}");
+    assert!(names.contains(&"code-reviewer"), "expected code-reviewer in {names:?}");
+
+    // search_skills: "review" should find code-reviewer.
+    let result = proxy
+        .search_skills(Parameters(SearchSkillsParams { query: "review".into(), limit: None }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let hits = json.as_array().unwrap();
+    assert!(!hits.is_empty(), "expected at least one hit for 'review'");
+    assert_eq!(hits[0]["name"], "code-reviewer");
+
+    // search_skills: "plan" should find test-planner.
+    let result = proxy
+        .search_skills(Parameters(SearchSkillsParams { query: "plan tests".into(), limit: None }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let hits = json.as_array().unwrap();
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0]["name"], "test-planner");
+
+    // search_skills: no match returns an error.
+    let result = proxy
+        .search_skills(Parameters(SearchSkillsParams { query: "xyzzy_nothing".into(), limit: None }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "expected error for no skill matches");
+
+    // read_skill: load the full SKILL.md + file inventory.
+    let result = proxy
+        .read_skill(Parameters(ReadSkillParams { name: "test-planner".into() }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("Test Planner"), "expected SKILL.md body in result");
+    assert!(text.contains("run.sh"), "expected bundled script in file inventory");
+
+    // read_skill: unknown skill returns an error.
+    let result = proxy
+        .read_skill(Parameters(ReadSkillParams { name: "nonexistent".into() }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "expected error for unknown skill");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn execute_tool_on_warm_backend_reuses_connection() {
+    // Verify that a second execute_tool call reuses the warm backend
+    // connection (no re-spawn) and still returns correct results.
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // First call: cold start.
+    let args = serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone();
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "stub".into(),
+            tool: "add".into(),
+            arguments: Some(args),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("3"), "expected 3 in {text}");
+
+    // Second call: warm — should reuse connection.
+    let args = serde_json::json!({"a": 40, "b": 2}).as_object().unwrap().clone();
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "stub".into(),
+            tool: "add".into(),
+            arguments: Some(args),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("42"), "expected 42 in {text}");
 
     registry.shutdown_all().await;
 }

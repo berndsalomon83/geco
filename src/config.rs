@@ -414,4 +414,27 @@ mcpServers:
             assert!(s.contains(key), "schema missing {key}");
         }
     }
+
+    #[test]
+    fn snapshot_hash_includes_description() {
+        // Regression: editing only a server's description must change the
+        // hash so the snapshot refreshes. Previously description was excluded.
+        let mk = |desc: Option<&str>| -> String {
+            let d = match desc {
+                Some(s) => format!(r#","description":"{s}""#),
+                None => String::new(),
+            };
+            let raw = format!(r#"{{"mcpServers":{{"s":{{"command":["npx"]{d}}}}}}}"#);
+            let cfg: Config = serde_json::from_str(&raw).unwrap();
+            cfg.snapshot_hash()
+        };
+
+        let h_none = mk(None);
+        let h_a = mk(Some("first description"));
+        let h_b = mk(Some("second description"));
+
+        assert_ne!(h_none, h_a, "hash must change when description is added");
+        assert_ne!(h_a, h_b, "hash must change when description is edited");
+        assert_ne!(h_none, h_b, "hash must differ between no-desc and a desc");
+    }
 }
