@@ -71,8 +71,10 @@ impl Snapshot {
         ));
         std::fs::write(&tmp, &raw)
             .with_context(|| format!("cannot write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("cannot rename {} -> {}", tmp.display(), path.display()))?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("cannot rename {} -> {}", tmp.display(), path.display()));
+        }
         Ok(())
     }
 

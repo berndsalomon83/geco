@@ -138,8 +138,12 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: 
             std::process::id(),
             HEALTH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        if std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, path).is_ok() {
-            commit_hash(path, hash);
+        if std::fs::write(&tmp, &json).is_ok() {
+            if std::fs::rename(&tmp, path).is_ok() {
+                commit_hash(path, hash);
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 }

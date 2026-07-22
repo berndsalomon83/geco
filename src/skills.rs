@@ -218,31 +218,37 @@ impl SkillIndex {
 pub fn read_skill(meta: &SkillMeta) -> std::io::Result<(String, Vec<String>)> {
     let body = std::fs::read_to_string(meta.dir.join("SKILL.md"))?;
     let mut files = Vec::new();
-    collect_files(&meta.dir, &meta.dir, &mut files, 0);
+    let truncated = collect_files(&meta.dir, &meta.dir, &mut files, 0);
     files.sort();
+    if truncated {
+        files.push("[truncated: depth or file limit exceeded]".into());
+    }
     Ok((body, files))
 }
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) {
+/// Returns true if the file list was truncated (depth > 4 or > 200 files).
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) -> bool {
     if depth > 4 || out.len() > 200 {
-        return;
+        return true;
     }
+    let mut truncated = false;
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
-            // Skip symlinks entirely — a skill's file inventory should be
-            // real files, and symlink cycles could loop even within the
-            // depth limit.
             if std::fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
                 continue;
             }
             if p.is_dir() {
-                collect_files(root, &p, out, depth + 1);
+                truncated |= collect_files(root, &p, out, depth + 1);
             } else if p.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") || dir != root {
                 out.push(p.display().to_string());
+                if out.len() > 200 {
+                    return true;
+                }
             }
         }
     }
+    truncated
 }
 
 #[cfg(test)]

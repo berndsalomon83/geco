@@ -322,13 +322,16 @@ impl Proxy {
     pub fn spawn_hot_reload(self) {
         let config_path = self.config_path.clone();
         let proxy = self.clone();
+        let shutdown = self.shutdown.clone();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
         let tx_clone = tx.clone();
 
-        // File watcher → notify on channel.
         let mut watcher = match RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
+                if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
                 if let Ok(event) = res {
                     if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                         let _ = tx_clone.blocking_send(());
