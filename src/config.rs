@@ -33,7 +33,7 @@ pub struct ProxyConfig {
     pub refresh_on_start: bool,
     /// How often to check if warm backends are still alive (seconds).
     /// 0 = disabled. When a dead connection is detected, it is reset
-    /// so the next execute_tool reconnects fresh.
+    /// so the next execute reconnects fresh.
     pub health_check_secs: u64,
 }
 

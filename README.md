@@ -2,25 +2,24 @@
 
 *the generic connector*
 
-geco is an MCP gateway that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees nine small meta-tools (~3.6 KB total) instead of every schema on every request.
+geco is an MCP gateway that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools (~3.4 KB total) instead of every schema on every request.
 
 Rust, single static binary, no runtime dependencies. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
 
 ## Why
 
-Every MCP server you connect injects its full tool catalogue into every model call. A handful of servers easily costs 20–50k tokens before the conversation starts — and measurably degrades tool selection. geco flattens that to a constant ~3.6 KB, no matter how many tools hide behind it.
+Every MCP server you connect injects its full tool catalogue into every model call. A handful of servers easily costs 20–50k tokens before the conversation starts — and measurably degrades tool selection. geco flattens that to a constant ~3.4 KB, no matter how many tools hide behind it.
 
 ## How it works
 
-The agent sees exactly nine meta-tools:
+The agent sees exactly eight meta-tools:
 
 | Meta-tool | Purpose |
 |---|---|
 | `list_mcp_servers` | Name, description, tool count, running state of each backend |
 | `list_tools` | A server's tools (name + description); with `tool`: the full input schema |
 | `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
-| `execute_tool` | Run a backend tool — the backend process starts on first use |
-| `execute_batch` | Run up to 10 tool calls in one round-trip; cross-backend calls run in parallel |
+| `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
 | `refresh_tools` | Re-scan backends after installing/reconfiguring one |
 | `health` | Report which backends failed their last refresh and why |
 | `list_skills` | Every skill in the library (name + one-line description) |

@@ -1,5 +1,5 @@
 //! Backend lifecycle: each configured MCP server stays COLD (no process)
-//! until the first `execute_tool` touches it. Snapshot refreshes use a
+//! until the first `execute` touches it. Snapshot refreshes use a
 //! short-lived connection that is torn down immediately afterwards.
 
 use std::collections::BTreeMap;
@@ -155,7 +155,7 @@ impl Backend {
         let startup = Duration::from_secs(proxy.startup_timeout_secs);
         // Check for a live connection under the lock, but don't hold it
         // across connect_raw — that can take up to startup_timeout_secs and
-        // would block any concurrent execute_tool on the same cold backend.
+        // would block any concurrent execute on the same cold backend.
         let (conn, ephemeral) = {
             let guard = self.conn.lock().await;
             match guard.as_ref() {

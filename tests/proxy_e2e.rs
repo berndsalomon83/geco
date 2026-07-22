@@ -7,7 +7,7 @@ use std::sync::Arc;
 use geco::backend::Registry;
 use geco::config::Config;
 use geco::server::{
-    BatchCall, BatchParams, ExecuteParams, ListToolsParams, Proxy, RefreshParams, SearchParams,
+    ExecuteCall, ExecuteParams, ListToolsParams, Proxy, RefreshParams, SearchParams,
     ReadSkillParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -353,76 +353,66 @@ async fn search_through_proxy() {
 }
 
 #[tokio::test]
-async fn execute_tool_through_proxy() {
+async fn execute_through_proxy() {
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
-    // Execute 'add' with arguments through the Proxy meta-tool.
-    let args = serde_json::json!({"a": 17, "b": 25})
-        .as_object()
-        .unwrap()
-        .clone();
+    // Single call: add(17 + 25 = 42).
+    let args = serde_json::json!({"a": 17, "b": 25}).as_object().unwrap().clone();
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "stub".into(),
-            tool: "add".into(),
-            arguments: Some(args),
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
         }))
         .await
         .unwrap();
-    assert!(!is_error(&result), "execute_tool should succeed");
-    let text = format!("{:?}", result.content);
-    assert!(text.contains("42"), "expected 42 in {text}");
+    assert!(!is_error(&result), "execute should succeed");
+    let json = extract_json(&result);
+    let results = json.as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["ok"], true);
+    assert!(results[0]["result"].as_str().unwrap_or("").contains("42"), "expected 42: {json}");
 
-    // Execute 'echo' with a text argument.
-    let args = serde_json::json!({"text": "hello geco"})
-        .as_object()
-        .unwrap()
-        .clone();
+    // Single call: echo.
+    let args = serde_json::json!({"text": "hello geco"}).as_object().unwrap().clone();
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "stub".into(),
-            tool: "echo".into(),
-            arguments: Some(args),
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "echo".into(), arguments: Some(args) }],
         }))
         .await
         .unwrap();
     assert!(!is_error(&result));
-    let text = format!("{:?}", result.content);
-    assert!(text.contains("hello geco"), "expected echoed text in {text}");
+    let json = extract_json(&result);
+    assert!(json[0]["result"].as_str().unwrap_or("").contains("hello geco"), "expected echo: {json}");
 
     // Denylist: secret_tool is blocked at execute time even if guessed.
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "stub".into(),
-            tool: "secret_tool".into(),
-            arguments: None,
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "secret_tool".into(), arguments: None }],
         }))
         .await
         .unwrap();
-    assert!(is_error(&result), "denied tool should error");
+    let json = extract_json(&result);
+    assert!(json[0]["ok"] == false, "denied tool should fail: {json}");
 
     // Unknown server.
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "nope".into(),
-            tool: "add".into(),
-            arguments: None,
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "nope".into(), tool: "add".into(), arguments: None }],
         }))
         .await
         .unwrap();
-    assert!(is_error(&result), "unknown server should error");
+    let json = extract_json(&result);
+    assert!(json[0]["ok"] == false, "unknown server should fail: {json}");
 
     // Unknown tool on a valid server.
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "stub".into(),
-            tool: "nonexistent".into(),
-            arguments: None,
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "nonexistent".into(), arguments: None }],
         }))
         .await
         .unwrap();
-    assert!(is_error(&result), "unknown tool should error");
+    let json = extract_json(&result);
+    assert!(json[0]["ok"] == false, "unknown tool should fail: {json}");
 
     registry.shutdown_all().await;
 }
@@ -501,39 +491,33 @@ async fn skills_through_proxy() {
 }
 
 #[tokio::test]
-async fn execute_tool_on_warm_backend_reuses_connection() {
-    // Verify that a second execute_tool call reuses the warm backend
-    // connection (no re-spawn) and still returns correct results.
+async fn execute_on_warm_backend_reuses_connection() {
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
     // First call: cold start.
     let args = serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone();
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "stub".into(),
-            tool: "add".into(),
-            arguments: Some(args),
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
         }))
         .await
         .unwrap();
     assert!(!is_error(&result));
-    let text = format!("{:?}", result.content);
-    assert!(text.contains("3"), "expected 3 in {text}");
+    let json = extract_json(&result);
+    assert!(json[0]["result"].as_str().unwrap_or("").contains("3"), "expected 3: {json}");
 
     // Second call: warm — should reuse connection.
     let args = serde_json::json!({"a": 40, "b": 2}).as_object().unwrap().clone();
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "stub".into(),
-            tool: "add".into(),
-            arguments: Some(args),
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
         }))
         .await
         .unwrap();
     assert!(!is_error(&result));
-    let text = format!("{:?}", result.content);
-    assert!(text.contains("42"), "expected 42 in {text}");
+    let json = extract_json(&result);
+    assert!(json[0]["result"].as_str().unwrap_or("").contains("42"), "expected 42: {json}");
 
     registry.shutdown_all().await;
 }
@@ -591,16 +575,14 @@ async fn hot_reload_updates_snapshot() {
     // Execute through the reloaded proxy — should still work.
     let args = serde_json::json!({"a": 10, "b": 5}).as_object().unwrap().clone();
     let result = proxy
-        .execute_tool(Parameters(ExecuteParams {
-            server: "stub".into(),
-            tool: "add".into(),
-            arguments: Some(args),
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
         }))
         .await
         .unwrap();
-    assert!(!is_error(&result), "execute_tool should work after reload");
-    let text = format!("{:?}", result.content);
-    assert!(text.contains("15"), "expected 15 in {text}");
+    assert!(!is_error(&result), "execute should work after reload");
+    let json = extract_json(&result);
+    assert!(json[0]["result"].as_str().unwrap_or("").contains("15"), "expected 15: {json}");
 
     proxy.shutdown_backends().await;
 }
@@ -642,27 +624,27 @@ async fn check_health_detects_dead_backend() {
 
 #[tokio::test]
 async fn execute_batch_through_proxy() {
-    // Test batch execution: multiple calls in one round-trip, results
+    // Test multi-call execution: multiple calls in one round-trip, results
     // in input order, errors don't abort the whole batch.
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
-    // Batch with 3 calls to the same backend (serializes naturally):
+    // 3 calls to the same backend (serializes naturally):
     // add(1+2), echo("hello"), add(40+2).
     let result = proxy
-        .execute_batch(Parameters(BatchParams {
+        .execute(Parameters(ExecuteParams {
             calls: vec![
-                BatchCall {
+                ExecuteCall {
                     server: "stub".into(),
                     tool: "add".into(),
                     arguments: Some(serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone()),
                 },
-                BatchCall {
+                ExecuteCall {
                     server: "stub".into(),
                     tool: "echo".into(),
                     arguments: Some(serde_json::json!({"text": "hello batch"}).as_object().unwrap().clone()),
                 },
-                BatchCall {
+                ExecuteCall {
                     server: "stub".into(),
                     tool: "add".into(),
                     arguments: Some(serde_json::json!({"a": 40, "b": 2}).as_object().unwrap().clone()),
@@ -683,16 +665,16 @@ async fn execute_batch_through_proxy() {
     assert!(results[2]["result"].as_str().unwrap_or("").contains("42"), "expected 42: {json}");
     assert!(results.iter().all(|r| r["ok"] == true), "all calls should succeed: {json}");
 
-    // Batch with an error (unknown tool) — the other call should still succeed.
+    // Mixed success/error (unknown tool) — the other call should still succeed.
     let result = proxy
-        .execute_batch(Parameters(BatchParams {
+        .execute(Parameters(ExecuteParams {
             calls: vec![
-                BatchCall {
+                ExecuteCall {
                     server: "stub".into(),
                     tool: "add".into(),
                     arguments: Some(serde_json::json!({"a": 10, "b": 5}).as_object().unwrap().clone()),
                 },
-                BatchCall {
+                ExecuteCall {
                     server: "stub".into(),
                     tool: "nonexistent".into(),
                     arguments: None,
@@ -711,10 +693,10 @@ async fn execute_batch_through_proxy() {
             || results[1].get("error").is_some(),
             "expected error for unknown tool: {json}");
 
-    // Batch with an unknown server — error, not a crash.
+    // Unknown server — error, not a crash.
     let result = proxy
-        .execute_batch(Parameters(BatchParams {
-            calls: vec![BatchCall {
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
                 server: "nope".into(),
                 tool: "add".into(),
                 arguments: None,
@@ -724,28 +706,26 @@ async fn execute_batch_through_proxy() {
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    let results = json.as_array().unwrap();
-    assert_eq!(results.len(), 1);
-    assert!(results[0]["ok"] == false, "unknown server should fail: {json}");
+    assert!(json[0]["ok"] == false, "unknown server should fail: {json}");
 
-    // Empty batch returns an error.
+    // Empty calls returns an error.
     let result = proxy
-        .execute_batch(Parameters(BatchParams { calls: vec![] }))
+        .execute(Parameters(ExecuteParams { calls: vec![] }))
         .await
         .unwrap();
-    assert!(is_error(&result), "empty batch should error");
+    assert!(is_error(&result), "empty calls should error");
 
     // Too many calls (>10) returns an error.
-    let calls: Vec<_> = (0..11).map(|_| BatchCall {
+    let calls: Vec<_> = (0..11).map(|_| ExecuteCall {
         server: "stub".into(),
         tool: "echo".into(),
         arguments: Some(serde_json::json!({"text": "x"}).as_object().unwrap().clone()),
     }).collect();
     let result = proxy
-        .execute_batch(Parameters(BatchParams { calls }))
+        .execute(Parameters(ExecuteParams { calls }))
         .await
         .unwrap();
-    assert!(is_error(&result), "batch >10 should error");
+    assert!(is_error(&result), ">10 calls should error");
 
     registry.shutdown_all().await;
 }

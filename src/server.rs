@@ -1,6 +1,6 @@
-//! The proxy's own MCP surface: nine small meta-tools instead of every
+//! The proxy's own MCP surface: eight small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~3.6 KB no matter how many tools hide behind the gate.
+//! ~3.4 KB no matter how many tools hide behind the gate.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,7 +105,7 @@ pub struct SearchParams {
     #[schemars(with = "u32")]
     pub limit: Option<u32>,
     /// Include the full input schema for each tool hit so you can call
-    /// execute_tool directly without a separate list_tools call.
+    /// execute directly without a separate list_tools call.
     /// Default false — schemas are verbose, so only request when you
     /// plan to execute immediately. (Skills don't have input schemas.)
     #[serde(default)]
@@ -118,19 +118,7 @@ pub struct SearchParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ExecuteParams {
-    /// Server name from list_mcp_servers / search
-    pub server: String,
-    /// Tool name on that server
-    pub tool: String,
-    /// Arguments for the tool as a JSON object, matching its input schema
-    #[serde(default, deserialize_with = "opt_args_lenient")]
-    #[schemars(with = "JsonObject")]
-    pub arguments: Option<JsonObject>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct BatchCall {
+pub struct ExecuteCall {
     /// Server name from list_mcp_servers / search
     pub server: String,
     /// Tool name on that server
@@ -142,11 +130,11 @@ pub struct BatchCall {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct BatchParams {
-    /// Up to 10 tool calls to execute in parallel across backends.
-    /// Same-backend calls serialize naturally; cross-backend calls run
-    /// concurrently. Results are returned in the same order as the input.
-    pub calls: Vec<BatchCall>,
+pub struct ExecuteParams {
+    /// 1–10 tool calls to execute. Cross-backend calls run in parallel;
+    /// same-backend calls serialize. Results are returned in input order.
+    /// A single call is just `execute({calls: [{server, tool, arguments}]})`.
+    pub calls: Vec<ExecuteCall>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -293,7 +281,7 @@ impl Proxy {
 
     /// Spawn a background task that periodically checks if warm backends
     /// are still alive. When a dead connection is detected (child process
-    /// exited), the connection is reset so the next `execute_tool` reconnects
+    /// exited), the connection is reset so the next `execute` reconnects
     /// fresh instead of erroring. Interval is `proxy.health_check_secs`;
     /// 0 disables the check entirely.
     pub fn spawn_health_check(self) {
@@ -488,7 +476,7 @@ impl Proxy {
                 Ok(text_result(json!({
                     "server": p.server,
                     "tools": tools,
-                    "hint": "list_tools with `tool` gives the input schema; execute_tool runs it",
+                    "hint": "list_tools with `tool` gives the input schema; execute runs it",
                 })))
             }
         }
@@ -552,42 +540,21 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Execute a tool on a backend server (started on demand). Get the schema via list_tools first if unsure about arguments."
+        description = "Execute 1–10 tool calls. Cross-backend calls run in parallel; same-backend calls serialize. Results returned in input order as {server, tool, ok, result/error}. A single call: execute({calls: [{server, tool, arguments}]})."
     )]
-    pub async fn execute_tool(
+    pub async fn execute(
         &self,
         Parameters(p): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
-        let registry = self.registry.read().await;
-        let backend = match registry.get(&p.server) {
-            Ok(b) => b,
-            Err(e) => return Ok(err(e.to_string())),
-        };
-        match backend.call(&p.tool, p.arguments, &registry.proxy).await {
-            Ok(result) => Ok(result),
-            Err(e) => Ok(err(format!("{e:#}"))),
-        }
-    }
-
-    #[tool(
-        description = "Execute multiple tool calls in one round-trip. Calls to different backends run in parallel; same-backend calls serialize. Results are returned in input order. Max 10 calls."
-    )]
-    pub async fn execute_batch(
-        &self,
-        Parameters(p): Parameters<BatchParams>,
-    ) -> Result<CallToolResult, McpError> {
         if p.calls.is_empty() {
-            return Ok(err("no calls in batch".into()));
+            return Ok(err("no calls — pass at least one {server, tool, arguments}".into()));
         }
         if p.calls.len() > 10 {
-            return Ok(err(format!("batch too large: {} calls (max 10)", p.calls.len())));
+            return Ok(err(format!("too many calls: {} (max 10)", p.calls.len())));
         }
         let registry = self.registry.read().await;
         let proxy_cfg = registry.proxy.clone();
 
-        // Spawn one task per call. Same-backend calls share the same
-        // Arc<Backend> and its conn Mutex, so they serialize naturally;
-        // cross-backend calls run concurrently.
         let mut join = tokio::task::JoinSet::new();
         for (i, call) in p.calls.into_iter().enumerate() {
             let registry = registry.clone();
@@ -780,9 +747,9 @@ impl ServerHandler for Proxy {
             .with_instructions(
                 "Gateway to multiple MCP servers whose tools load on demand instead of \
                  polluting your context. Flow: search (with include_schema=true to get \
-                 input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute_tool \
-                 (or execute_batch for multiple independent calls), or list_mcp_servers → \
-                 list_tools → execute_tool. Backends start lazily on first execution."
+                 input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute \
+                 (1–10 calls in one round-trip, cross-backend parallel), or \
+                 list_mcp_servers → list_tools → execute. Backends start lazily on first execution."
                     .to_string(),
             )
     }
@@ -815,19 +782,19 @@ mod param_tests {
     #[test]
     fn arguments_accept_object_and_stringified_object() {
         let p: ExecuteParams =
-            serde_json::from_str(r#"{"server":"s","tool":"t","arguments":{"q":"hi"}}"#).unwrap();
-        assert_eq!(p.arguments.unwrap()["q"], "hi");
+            serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t","arguments":{"q":"hi"}}]}"#).unwrap();
+        assert_eq!(p.calls[0].arguments.clone().unwrap()["q"], "hi");
         let p: ExecuteParams =
-            serde_json::from_str(r#"{"server":"s","tool":"t","arguments":"{\"q\": \"hi\"}"}"#)
+            serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t","arguments":"{\"q\": \"hi\"}"}]}"#)
                 .unwrap();
-        assert_eq!(p.arguments.unwrap()["q"], "hi");
-        let p: ExecuteParams = serde_json::from_str(r#"{"server":"s","tool":"t"}"#).unwrap();
-        assert!(p.arguments.is_none());
+        assert_eq!(p.calls[0].arguments.clone().unwrap()["q"], "hi");
+        let p: ExecuteParams = serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t"}]}"#).unwrap();
+        assert!(p.calls[0].arguments.is_none());
     }
 
     #[test]
     fn stringified_non_object_arguments_rejected() {
-        let r = serde_json::from_str::<ExecuteParams>(r#"{"server":"s","tool":"t","arguments":"[1,2]"}"#);
+        let r = serde_json::from_str::<ExecuteParams>(r#"{"calls":[{"server":"s","tool":"t","arguments":"[1,2]"}]}"#);
         assert!(r.is_err());
     }
 
@@ -839,7 +806,7 @@ mod param_tests {
         assert_eq!(schema["properties"]["limit"]["type"], "integer");
         assert_eq!(schema["properties"]["include_schema"]["type"], "boolean");
         let schema = serde_json::to_value(schemars::schema_for!(ExecuteParams)).unwrap();
-        assert_eq!(schema["properties"]["arguments"]["type"], "object");
+        assert_eq!(schema["properties"]["calls"]["type"], "array");
         let schema = serde_json::to_value(schemars::schema_for!(ListToolsParams)).unwrap();
         assert_eq!(schema["properties"]["tool"]["type"], "string");
     }
