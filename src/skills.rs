@@ -1,8 +1,9 @@
-//! Skills on demand — the same disease ondemand-mcp cures for tools, cured
+//! Skills on demand — the same disease geco cures for tools, cured
 //! for agent skills. opencode (and Claude) load every skill's name and
 //! description into the system context at startup: 36 skills measured at
 //! ~9.2 KB ≈ 2,300 tokens per session, used or not. Behind the gateway the
-//! cost is two small meta-tools, and the library can grow without bound.
+//! cost is three small meta-tools (list / search / read), and the library
+//! can grow without bound.
 //!
 //! A skill is a directory with a SKILL.md whose YAML frontmatter carries
 //! `name` and `description`. `read_skill` returns the full body plus the
@@ -130,25 +131,9 @@ impl SkillIndex {
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<&SkillMeta> {
         let q = query.to_lowercase();
-        let tokens: Vec<&str> = q.split_whitespace().filter(|t| t.len() > 1).collect();
         let mut hits: Vec<(i64, &SkillMeta)> = Vec::new();
         for s in &self.skills {
-            let name = s.name.to_lowercase();
-            let desc = s.description.to_lowercase();
-            let mut score = 0i64;
-            if name == q {
-                score += 100;
-            } else if name.contains(&q) {
-                score += 60;
-            }
-            for t in &tokens {
-                if name.contains(t) {
-                    score += 20;
-                }
-                if desc.contains(t) {
-                    score += 8;
-                }
-            }
+            let score = crate::search::score_match(&q, &s.name, &s.description, None);
             if score > 0 {
                 hits.push((score, s));
             }
@@ -178,6 +163,12 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
+            // Skip symlinks entirely — a skill's file inventory should be
+            // real files, and symlink cycles could loop even within the
+            // depth limit.
+            if std::fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                continue;
+            }
             if p.is_dir() {
                 collect_files(root, &p, out, depth + 1);
             } else if p.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") || dir != root {
@@ -261,5 +252,23 @@ mod tests {
         assert!(moved2.is_empty());
         assert_eq!(errors2.len(), 1);
         assert!(native.join("stray-skill").exists());   // left for the human
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_files_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        mk_skill(tmp.path(), "cyclical", Some("cyclical"), "tests symlink skip");
+        // a real bundled file
+        std::fs::write(tmp.path().join("cyclical").join("real.sh"), "#!/bin/bash\n").unwrap();
+        // a symlink to a file (should be skipped)
+        symlink(tmp.path().join("cyclical").join("real.sh"),
+                tmp.path().join("cyclical").join("link.sh")).unwrap();
+
+        let idx = SkillIndex::scan(&[tmp.path().display().to_string()]);
+        let (_body, files) = read_skill(idx.get("cyclical").unwrap()).unwrap();
+        assert!(files.iter().any(|f| f.ends_with("real.sh")));
+        assert!(!files.iter().any(|f| f.ends_with("link.sh")), "symlink leaked into inventory: {files:?}");
     }
 }

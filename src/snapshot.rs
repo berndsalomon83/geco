@@ -39,7 +39,7 @@ impl Snapshot {
     pub fn cache_path(config_path: &Path) -> PathBuf {
         let dir = directories::ProjectDirs::from("dev", "geco", "geco")
             .map(|d| d.cache_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".ondemand-mcp-cache"));
+            .unwrap_or_else(|| PathBuf::from(".geco-cache"));
         // One snapshot per config file location.
         let mut h = sha2::Sha256::new();
         use sha2::Digest;
@@ -63,7 +63,15 @@ impl Snapshot {
             std::fs::create_dir_all(parent).ok();
         }
         let raw = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, raw).with_context(|| format!("cannot write {}", path.display()))
+        // Atomic-ish write: tmp then rename, so a crash mid-write can't
+        // leave a corrupt snapshot (load would then serve empty). Mirrors
+        // the health.rs pattern.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &raw)
+            .with_context(|| format!("cannot write {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("cannot rename {} -> {}", tmp.display(), path.display()))?;
+        Ok(())
     }
 
     pub fn tool_count(&self) -> usize {

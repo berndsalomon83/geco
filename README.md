@@ -1,18 +1,18 @@
 # geco
 
-*the generic connector — formerly ondemand-mcp*
+*the generic connector*
 
-geco is an MCP gateway that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees five tiny meta-tools (~2.2 KB total) instead of every schema on every request.
+geco is an MCP gateway that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees nine small meta-tools (~3.6 KB total) instead of every schema on every request.
 
 Rust, single static binary, no runtime dependencies. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
 
 ## Why
 
-Every MCP server you connect injects its full tool catalogue into every model call. A handful of servers easily costs 20–50k tokens before the conversation starts — and measurably degrades tool selection. geco flattens that to a constant ~2.2 KB, no matter how many tools hide behind it.
+Every MCP server you connect injects its full tool catalogue into every model call. A handful of servers easily costs 20–50k tokens before the conversation starts — and measurably degrades tool selection. geco flattens that to a constant ~3.6 KB, no matter how many tools hide behind it.
 
 ## How it works
 
-The agent sees exactly five tools:
+The agent sees exactly nine meta-tools:
 
 | Meta-tool | Purpose |
 |---|---|
@@ -22,6 +22,9 @@ The agent sees exactly five tools:
 | `execute_tool` | Run a backend tool — the backend process starts on first use |
 | `refresh_tools` | Re-scan backends after installing/reconfiguring one |
 | `health` | Report which backends failed their last refresh and why |
+| `list_skills` | Every skill in the library (name + one-line description) |
+| `search_skills` | Find a skill (playbook + bundled scripts) by intent |
+| `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute_tool` first touches it, and is reused afterwards.
 
@@ -77,7 +80,7 @@ skills:
   dirs: ["~/.config/opencode/skills-library"]
 ```
 
-Two meta-tools appear: `search_skills` (find a playbook by intent) and `read_skill` (full SKILL.md + bundled file paths — the agent runs scripts via its shell exactly as a native skill would instruct). Migration: move skills out of the auto-loaded dir into the library; keep your few daily drivers native if you like:
+Three meta-tools appear: `list_skills` (the whole catalogue), `search_skills` (find a playbook by intent) and `read_skill` (full SKILL.md + bundled file paths — the agent runs scripts via its shell exactly as a native skill would instruct). Migration: move skills out of the auto-loaded dir into the library; keep your few daily drivers native if you like:
 
 ```bash
 mkdir -p ~/.config/opencode/skills-library
@@ -110,6 +113,7 @@ Store it once: `security add-generic-password -a "$USER" -s github_token -w '<to
 geco serve [--refresh|--no-refresh]   # run the proxy (default command)
 geco refresh                          # rebuild the snapshot and exit
 geco inspect                          # show the cached snapshot
+geco schema                           # print the config JSON Schema (YAML + JSON)
 ```
 
 `RUST_LOG=debug` for verbose logging (always stderr — stdout is the protocol).

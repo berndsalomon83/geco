@@ -10,7 +10,7 @@
  * persistent problem is shown once, not every tick.
  *
  * Install: copy to ~/.config/opencode/plugin/geco-tui.ts
- * Requires: the `ondemand` MCP server configured in opencode.
+ * Requires: the geco MCP server configured in opencode.
  */
 
 import type { TuiPlugin } from "@opencode-ai/plugin/tui"
@@ -25,7 +25,7 @@ function healthPath(): string {
   const mac = path.join(home, "Library", "Application Support",
                         "dev.geco.geco", "health.json")
   const linux = path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
-                          "geco", "health.json")
+                          "dev.geco.geco", "health.json")
   return process.platform === "darwin" ? mac : linux
 }
 
@@ -81,7 +81,7 @@ const tuiPlugin: TuiPlugin = async (api) => {
     const worst = r.issues.some((i) => i.severity === "error") ? "error" : "warning"
     ui.toast({
       variant: worst,
-      title: `ondemand: ${r.issues.length} issue${r.issues.length > 1 ? "s" : ""}`,
+      title: `geco: ${r.issues.length} issue${r.issues.length > 1 ? "s" : ""}`,
       message: summarize(r.issues) +
                "\n\nRun `geco inspect` or the health tool for detail.",
     })

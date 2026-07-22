@@ -45,14 +45,13 @@ pub struct HealthReport {
 pub fn health_path() -> PathBuf {
     let dir = directories::ProjectDirs::from("dev", "geco", "geco")
         .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".ondemand-mcp"));
+        .unwrap_or_else(|| PathBuf::from(".geco"));
     dir.join("health.json")
 }
 
-/// Write the current problem set. Empty issues == healthy (and that itself is
-/// worth writing, so the plugin can clear a stale warning).
-pub fn write(client: Option<&str>, issues: Vec<Issue>) {
-    let path = health_path();
+/// Write the current problem set to a specific path (test-friendly; the
+/// production path is `health_path()`). Empty issues == healthy.
+pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -72,6 +71,12 @@ pub fn write(client: Option<&str>, issues: Vec<Issue>) {
     }
 }
 
+/// Write the current problem set. Empty issues == healthy (and that itself is
+/// worth writing, so the plugin can clear a stale warning).
+pub fn write(client: Option<&str>, issues: Vec<Issue>) {
+    write_to(&health_path(), client, issues);
+}
+
 pub fn read(path: &Path) -> Option<HealthReport> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
@@ -82,21 +87,22 @@ mod tests {
 
     #[test]
     fn roundtrip_and_generation_increments() {
+        // Write to an explicit temp path — no process-global HOME mutation.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", dir.path()); // ProjectDirs data dir under HOME on linux
+        let path = dir.path().join("health.json");
         let issues = vec![Issue {
             kind: "backend".into(),
             subject: "github".into(),
             detail: "endpoint down".into(),
             severity: "error".into(),
         }];
-        write(Some("opencode"), issues.clone());
-        let r1 = read(&health_path()).unwrap();
+        write_to(&path, Some("opencode"), issues.clone());
+        let r1 = read(&path).unwrap();
         assert_eq!(r1.client.as_deref(), Some("opencode"));
         assert!(!r1.healthy);
         assert_eq!(r1.issues.len(), 1);
-        write(Some("opencode"), vec![]);
-        let r2 = read(&health_path()).unwrap();
+        write_to(&path, Some("opencode"), vec![]);
+        let r2 = read(&path).unwrap();
         assert!(r2.healthy);
         assert!(r2.generation > r1.generation);
     }

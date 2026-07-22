@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# geco installer (formerly ondemand-mcp)
+# geco installer
 #   1. cargo build --release
 #   2. install the binary (existing install > /opt/homebrew/bin > ~/.local/bin)
 #      — remove-then-copy, never overwrite in place (macOS signature cache)
@@ -9,7 +9,6 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_DIR="$HOME/.config/geco"
-LEGACY_CFG_DIR="$HOME/.config/ondemand-mcp"
 CFG="$CFG_DIR/config.yaml"
 CFG_LEGACY="$CFG_DIR/config.json"
 
@@ -21,12 +20,6 @@ die()  { printf '\033[1;31mERROR\033[0m %s\n' "$*" >&2; exit 1; }
 command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust first: https://rustup.rs"
 [ -f "$REPO_DIR/Cargo.toml" ] || die "run this from the geco checkout"
 
-# One-time migration from the ondemand-mcp name.
-if [ -d "$LEGACY_CFG_DIR" ] && [ ! -d "$CFG_DIR" ]; then
-    say "Migrating config: ~/.config/ondemand-mcp -> ~/.config/geco"
-    mv "$LEGACY_CFG_DIR" "$CFG_DIR"
-    ln -s "$CFG_DIR" "$LEGACY_CFG_DIR" 2>/dev/null || true
-fi
 say "Building geco (release)…"
 ( cd "$REPO_DIR" && cargo build --release )
 NEW_BIN="$REPO_DIR/target/release/geco"
@@ -80,7 +73,7 @@ TOOLS=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protoco
 for l in sys.stdin:
     m=json.loads(l)
     if m.get("id")==2: print(len(m["result"]["tools"]))' || echo 0)
-# 0.5.0: 5 gateway + 3 skills + health
+# 9 meta-tools: 5 gateway + 3 skills + health
 [ "$TOOLS" = "9" ] && say "Proxy OK: 9 meta-tools (5 gateway + 3 skills + health)" || warn "expected 9 meta-tools, got: $TOOLS"
 
 # Companion opencode TUI plugin: toasts gateway health problems in-app.

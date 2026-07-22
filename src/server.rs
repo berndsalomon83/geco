@@ -1,6 +1,6 @@
-//! The proxy's own MCP surface: five tiny meta-tools instead of every
+//! The proxy's own MCP surface: nine small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~2 KB no matter how many tools hide behind the gate.
+//! ~3.6 KB no matter how many tools hide behind the gate.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -147,6 +147,7 @@ pub struct Proxy {
     skills: Arc<RwLock<SkillIndex>>,
     skill_dirs: Vec<String>,
     absorb_dirs: Vec<String>,
+    absorb_issues: Arc<RwLock<Vec<Issue>>>,
     client: Arc<RwLock<Option<String>>>,
 }
 
@@ -163,7 +164,7 @@ fn err(msg: String) -> CallToolResult {
 impl Proxy {
     pub fn new(registry: Arc<Registry>, snapshot: Snapshot, snapshot_path: PathBuf,
                skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
-        let _ = Self::absorb(&skill_dirs, &absorb_dirs);
+        let absorb_issues = Self::absorb(&skill_dirs, &absorb_dirs);
         let skills = SkillIndex::scan(&skill_dirs);
         Self {
             registry,
@@ -172,17 +173,20 @@ impl Proxy {
             skills: Arc::new(RwLock::new(skills)),
             skill_dirs,
             absorb_dirs,
+            absorb_issues: Arc::new(RwLock::new(absorb_issues)),
             client: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Recompute the full problem set and publish it to the health file.
     /// Level-triggered: called after every refresh (and at startup), empty
-    /// set == healthy. Backends that failed their last snapshot, plus any
-    /// absorb collisions surfaced during the sweep, become issues.
-    pub async fn publish_health(&self, extra: Vec<Issue>) {
+    /// set == healthy. Merges backend failures from the snapshot with the
+    /// persisted absorb-issues list, so both surfaces (health.json and the
+    /// `health` meta-tool) agree.
+    pub async fn publish_health(&self) {
         let snap = self.snapshot.read().await;
-        let mut issues = extra;
+        let absorb = self.absorb_issues.read().await;
+        let mut issues = absorb.clone();
         for (name, s) in &snap.servers {
             if s.refresh_status != "ok" {
                 issues.push(Issue {
@@ -195,6 +199,25 @@ impl Proxy {
         }
         let client = self.client.read().await.clone();
         health::write(client.as_deref(), issues);
+    }
+
+    /// The current full issue set (backends + absorb) — used by the
+    /// `health` meta-tool so it agrees with health.json.
+    async fn all_issues(&self) -> Vec<Issue> {
+        let snap = self.snapshot.read().await;
+        let absorb = self.absorb_issues.read().await;
+        let mut issues = absorb.clone();
+        for (name, s) in &snap.servers {
+            if s.refresh_status != "ok" {
+                issues.push(Issue {
+                    kind: "backend".into(),
+                    subject: name.clone(),
+                    detail: s.refresh_status.clone(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        issues
     }
 
     fn absorb(skill_dirs: &[String], absorb_dirs: &[String]) -> Vec<Issue> {
@@ -396,17 +419,16 @@ impl Proxy {
     )]
     pub async fn health(&self) -> Result<CallToolResult, McpError> {
         let snap = self.snapshot.read().await;
-        let mut issues = Vec::new();
-        for (name, s) in &snap.servers {
-            if s.refresh_status != "ok" {
-                issues.push(json!({"server": name, "status": s.refresh_status}));
-            }
-        }
+        let issues = self.all_issues().await;
+        let issue_view: Vec<_> = issues
+            .iter()
+            .map(|i| json!({"kind": i.kind, "subject": i.subject, "detail": i.detail, "severity": i.severity}))
+            .collect();
         Ok(text_result(json!({
             "healthy": issues.is_empty(),
             "servers": snap.servers.len(),
             "tools": snap.tool_count(),
-            "issues": issues,
+            "issues": issue_view,
         })))
     }
 
@@ -427,6 +449,18 @@ impl Proxy {
             Some(ref name) => {
                 if let Some(entry) = fresh.servers.get(name) {
                     snap.servers.insert(name.clone(), entry.clone());
+                } else if snap.servers.contains_key(name) {
+                    // Server no longer in config — evict the stale entry so
+                    // a single-server refresh can clean up a removal without
+                    // needing a full refresh.
+                    snap.servers.remove(name);
+                    tracing::info!("refresh_tools: '{}' removed from config, evicted from snapshot", name);
+                } else {
+                    // Neither in config nor in the snapshot — typo, not a
+                    // removal. Surface it instead of silently doing nothing.
+                    return Ok(err(format!(
+                        "unknown server '{name}' — see list_servers"
+                    )));
                 }
             }
             None => {
@@ -437,9 +471,10 @@ impl Proxy {
         if let Err(e) = snap.save(&self.snapshot_path) {
             tracing::warn!("cannot persist snapshot: {e:#}");
         }
-        let absorb_issues = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
+        let fresh_absorb = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
+        *self.absorb_issues.write().await = fresh_absorb;
         *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
-        self.publish_health(absorb_issues).await;
+        self.publish_health().await;
         let summary: Vec<_> = snap
             .servers
             .iter()
@@ -461,7 +496,7 @@ impl ServerHandler for Proxy {
         *self.client.write().await = Some(params.client_info.name.clone());
         // Re-publish health now that we know who we serve, so the file is
         // tagged for the companion plugin's client filter.
-        self.publish_health(Vec::new()).await;
+        self.publish_health().await;
         Ok(self.get_info())
     }
 

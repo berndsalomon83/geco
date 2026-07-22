@@ -1,6 +1,9 @@
 //! One-call tool discovery across every backend — the feature lazy-mcp
 //! lacks. Scoring is deliberately simple and dependency-free: exact name,
 //! substring, then token hits in name/description/server.
+//!
+//! `score_match` is the shared scoring helper used by both tool search here
+//! and skill search in `skills.rs` — same ranking, no duplication.
 
 use crate::snapshot::Snapshot;
 
@@ -13,34 +16,50 @@ pub struct Hit {
     pub score: i64,
 }
 
+/// Score a candidate against a query. `server` is an optional extra surface
+/// (tool search counts server-name hits; skills have none).
+///
+/// Ranking: exact name (100) > name substring (60) > per-token hits in
+/// name (20) / server (10) / description (8). Tokens shorter than 2 chars
+/// are dropped — they'd match everything.
+pub fn score_match(query_lower: &str, name: &str, description: &str, server: Option<&str>) -> i64 {
+    let tokens: Vec<&str> = query_lower
+        .split_whitespace()
+        .filter(|t| t.len() > 1)
+        .collect();
+    let name_l = name.to_lowercase();
+    let desc_l = description.to_lowercase();
+    let server_l = server.map(|s| s.to_lowercase());
+    let mut score = 0i64;
+
+    if name_l == query_lower {
+        score += 100;
+    } else if name_l.contains(query_lower) {
+        score += 60;
+    }
+    for t in &tokens {
+        if name_l.contains(t) {
+            score += 20;
+        }
+        if desc_l.contains(t) {
+            score += 8;
+        }
+        if let Some(sl) = &server_l {
+            if sl.contains(t) {
+                score += 10;
+            }
+        }
+    }
+    score
+}
+
 pub fn search(snapshot: &Snapshot, query: &str, limit: usize) -> Vec<Hit> {
     let q = query.to_lowercase();
-    let tokens: Vec<&str> = q.split_whitespace().filter(|t| t.len() > 1).collect();
     let mut hits: Vec<Hit> = Vec::new();
 
     for (server, snap) in &snapshot.servers {
-        let server_l = server.to_lowercase();
         for tool in &snap.tools {
-            let name = tool.name.to_lowercase();
-            let desc = tool.description.to_lowercase();
-            let mut score = 0i64;
-
-            if name == q {
-                score += 100;
-            } else if name.contains(&q) {
-                score += 60;
-            }
-            for t in &tokens {
-                if name.contains(t) {
-                    score += 20;
-                }
-                if desc.contains(t) {
-                    score += 8;
-                }
-                if server_l.contains(t) {
-                    score += 10;
-                }
-            }
+            let score = score_match(&q, &tool.name, &tool.description, Some(server));
             if score > 0 {
                 hits.push(Hit {
                     server: server.clone(),

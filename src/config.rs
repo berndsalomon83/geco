@@ -243,8 +243,17 @@ impl Config {
             serde_json::from_str(&raw)
                 .with_context(|| format!("cannot parse JSON config {}", path.display()))?
         };
+        if cfg.servers.is_empty() && cfg.skills.dirs.is_empty() {
+            bail!(
+                "config has no mcpServers entries and no skills.dirs — \
+                 nothing for the proxy to serve"
+            );
+        }
         if cfg.servers.is_empty() {
-            bail!("config has no mcpServers entries");
+            tracing::info!(
+                "config has no mcpServers — serving skills only \
+                 (list_skills / search_skills / read_skill)"
+            );
         }
         Ok(cfg)
     }
@@ -256,16 +265,24 @@ impl Config {
         serde_json::to_string_pretty(&schema).unwrap_or_default()
     }
 
-    /// Stable hash over everything that affects the tool snapshot.
+    /// Stable hash over everything that affects the tool snapshot. Uses
+    /// the raw (unexpanded) command/args/env strings — expanding `${...}`
+    /// here would trigger keychain lookups as a side effect of hashing,
+    /// which is wrong for `geco inspect` and other read-only subcommands.
     pub fn snapshot_hash(&self) -> String {
         let mut hasher = Sha256::new();
         for (name, s) in &self.servers {
             hasher.update(name.as_bytes());
-            if let Ok((bin, argv)) = s.command_line() {
-                hasher.update(bin.as_bytes());
-                for a in &argv {
-                    hasher.update(a.as_bytes());
+            match &s.command {
+                CommandField::Bin(b) => hasher.update(b.as_bytes()),
+                CommandField::Line(l) => {
+                    for part in l {
+                        hasher.update(part.as_bytes());
+                    }
                 }
+            }
+            for a in &s.args {
+                hasher.update(a.as_bytes());
             }
             for (k, v) in &s.env {
                 hasher.update(k.as_bytes());
@@ -275,6 +292,9 @@ impl Config {
                 hasher.update(p.as_bytes());
             }
             hasher.update([s.enabled as u8]);
+            if let Some(d) = &s.description {
+                hasher.update(d.as_bytes());
+            }
         }
         hex(&hasher.finalize())
     }

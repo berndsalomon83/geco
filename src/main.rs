@@ -12,8 +12,8 @@ use geco::snapshot::Snapshot;
 #[derive(Parser)]
 #[command(name = "geco", version, about = "geco — the generic connector: tools, skills & more on demand, out of context until summoned")]
 struct Cli {
-    /// Path to the config file (default: ./ondemand-mcp.json, then
-    /// ~/.config/ondemand-mcp/config.json)
+    /// Path to the config file (default: ./geco.yaml or
+    /// ~/.config/geco/config.yaml; JSON also accepted)
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -43,23 +43,20 @@ fn find_config(cli: &Cli) -> Result<PathBuf> {
     if let Some(p) = &cli.config {
         return Ok(p.clone());
     }
-    for name in ["geco.yaml", "geco.yml", "geco.json",
-                 "ondemand-mcp.yaml", "ondemand-mcp.yml", "ondemand-mcp.json"] {
+    for name in ["geco.yaml", "geco.yml", "geco.json"] {
         let local = PathBuf::from(name);
         if local.exists() {
             return Ok(local);
         }
     }
-    // ~/.config/ondemand-mcp/config.json on every platform (predictable),
+    // ~/.config/geco/config.{yaml,yml,json} on every platform (predictable),
     // then the platform-native config dir as a fallback.
     if let Some(home) = std::env::var_os("HOME") {
-        for sub in [".config/geco", ".config/ondemand-mcp"] {  // legacy fallback
-            let dir = PathBuf::from(&home).join(sub);
-            for name in ["config.yaml", "config.yml", "config.json"] {
-                let p = dir.join(name);
-                if p.exists() {
-                    return Ok(p);
-                }
+        let dir = PathBuf::from(&home).join(".config/geco");
+        for name in ["config.yaml", "config.yml", "config.json"] {
+            let p = dir.join(name);
+            if p.exists() {
+                return Ok(p);
             }
         }
     }
@@ -110,7 +107,9 @@ async fn main() -> Result<()> {
             eprintln!("snapshot: {}", snapshot_path.display());
         }
         Cmd::Schema => {
-            println!("{}", Config::schema_json());
+            // Handled above before config loading — unreachable here, but
+            // kept for match exhaustiveness.
+            unreachable!()
         }
         Cmd::Inspect => {
             match Snapshot::load(&snapshot_path) {
@@ -125,7 +124,7 @@ async fn main() -> Result<()> {
                         eprintln!("{name:24} {:4} tools  {}", s.tools.len(), s.refresh_status);
                     }
                 }
-                None => eprintln!("no snapshot yet — run: ondemand-mcp refresh"),
+                None => eprintln!("no snapshot yet — run: geco refresh"),
             }
         }
         Cmd::Serve { refresh, no_refresh } => {
@@ -149,13 +148,13 @@ async fn main() -> Result<()> {
                 })
             };
             tracing::info!(
-                "geco up: {} servers, {} tools behind 5 meta-tools",
+                "geco up: {} servers, {} tools behind 9 meta-tools",
                 snapshot.servers.len(),
                 snapshot.tool_count()
             );
             let proxy = Proxy::new(registry.clone(), snapshot, snapshot_path,
                                    cfg.skills.dirs.clone(), cfg.skills.absorb.clone());
-            proxy.publish_health(Vec::new()).await;
+            proxy.publish_health().await;
             let service = proxy
                 .serve(rmcp::transport::stdio())
                 .await

@@ -53,18 +53,28 @@ impl Backend {
         self.status.lock().await.clone()
     }
 
-    fn transport(&self) -> Result<TokioChildProcess> {
-        let (bin, argv) = self.cfg.command_line()?;
-        let envs = self.cfg.env_expanded()?;
+    /// Resolve command + env off the async thread — `env_expanded` may run a
+    /// keychain subprocess (`security`/`secret-tool`), which is blocking I/O
+    /// that shouldn't stall a tokio worker. Building the `TokioChildProcess`
+    /// itself is cheap and stays on the async side.
+    async fn resolve_and_spawn(&self) -> Result<TokioChildProcess> {
+        let cfg = self.cfg.clone();
+        let name = self.name.clone();
+        let (bin, argv, envs) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let (bin, argv) = cfg.command_line()?;
+            let envs = cfg.env_expanded()?;
+            Ok((bin, argv, envs))
+        })
+        .await??;
         TokioChildProcess::new(Command::new(&bin).configure(|c| {
             c.args(&argv);
             c.envs(&envs);
         }))
-        .with_context(|| format!("cannot spawn backend '{}' ({bin})", self.name))
+        .with_context(|| format!("cannot spawn backend '{}' ({bin})", name))
     }
 
     async fn connect_raw(&self, startup: Duration) -> Result<Conn> {
-        let transport = self.transport()?;
+        let transport = self.resolve_and_spawn().await?;
         let svc = tokio::time::timeout(startup, ().serve(transport))
             .await
             .map_err(|_| anyhow!("backend '{}' did not initialize within {startup:?}", self.name))?
