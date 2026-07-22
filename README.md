@@ -25,7 +25,7 @@ The agent sees exactly eight meta-tools:
 | `list_skills` | Every skill in the library (name + one-line description) |
 | `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
 
-Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute_tool` first touches it, and is reused afterwards.
+Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
 
 ## Quickstart
 
@@ -123,7 +123,7 @@ The gateway watches its config file and auto-refreshes when it changes — add a
 
 ## Self-healing backends
 
-Warm backends that crash silently (child process exits) are detected by a background health check every 30 seconds (configurable via `health_check_secs`, 0 to disable). The dead connection is reset so the next `execute_tool` reconnects fresh instead of erroring — the agent never sees a stale failure.
+Warm backends that crash silently (child process exits) are detected by a background health check every 30 seconds (configurable via `health_check_secs`, 0 to disable). The dead connection is reset so the next `execute` reconnects fresh instead of erroring — the agent never sees a stale failure.
 
 ## Health — failures are loud, not logged
 

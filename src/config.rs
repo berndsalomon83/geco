@@ -64,7 +64,7 @@ pub struct SkillsConfig {
 /// "command": "npx" + "args": [...]  (Claude style)  — or —
 /// "command": ["npx", "-y", "server"] (OpenCode style)
 /// Both forms deserialize to Vec<String>: a bare string becomes ["string"].
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
 pub struct CommandField(Vec<String>);
 
@@ -80,6 +80,21 @@ impl<'de> Deserialize<'de> for CommandField {
             Raw::Line(l) => Ok(CommandField(l)),
             Raw::Bin(b) => Ok(CommandField(vec![b])),
         }
+    }
+}
+
+impl schemars::JsonSchema for CommandField {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CommandField".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut map = serde_json::Map::new();
+        map.insert("oneOf".into(), serde_json::json!([
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}}
+        ]));
+        map.into()
     }
 }
 

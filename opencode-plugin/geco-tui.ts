@@ -63,6 +63,9 @@ const tuiPlugin: TuiPlugin = async (api) => {
       return
     }
 
+    // Only toast for our own client — health.json is shared across agents.
+    if (r.client && r.client !== "opencode") return
+
     const key = fingerprint(r)
     if (key === lastKey) return // same problem set, already shown
     const wasUnhealthy = lastKey !== ""

@@ -624,10 +624,22 @@ impl Proxy {
                 };
                 match backend.call(&call.tool, call.arguments, &proxy_cfg).await {
                     Ok(result) => {
-                        let text = result.content.iter().find_map(|b| {
-                            if let ContentBlock::Text(t) = b { Some(t.text.as_str()) }
-                            else { None }
-                        }).unwrap_or("");
+                        // Concatenate all text blocks; note non-text blocks.
+                        let mut text = result.content.iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text(t) = b { Some(t.text.as_str()) }
+                                else { None }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let has_non_text = result.content.iter().any(|b| {
+                            !matches!(b, ContentBlock::Text(_))
+                        });
+                        if has_non_text && !text.is_empty() {
+                            text.push_str("\n[non-text content omitted]");
+                        } else if has_non_text {
+                            text = "[non-text content omitted]".to_string();
+                        }
                         let ok = !result.is_error.unwrap_or(false);
                         let mut entry = json!({
                             "server": call.server,
@@ -788,15 +800,16 @@ impl Proxy {
                 snap.generated_at = fresh.generated_at;
             }
         }
-        if let Err(e) = snap.save(&self.snapshot_path) {
-            tracing::warn!("cannot persist snapshot: {e:#}");
-        }
         let summary: Vec<_> = snap
             .servers
             .iter()
             .map(|(n, s)| json!({"server": n, "tools": s.tools.len(), "status": s.refresh_status}))
             .collect();
-        drop(snap); // release write lock before publish_health (which reads)
+        let snapshot_to_save = snap.clone();
+        drop(snap); // release write lock before disk I/O and publish_health
+        if let Err(e) = snapshot_to_save.save(&self.snapshot_path) {
+            tracing::warn!("cannot persist snapshot: {e:#}");
+        }
         let skill_dirs = self.skill_dirs.read().await.clone();
         let absorb_dirs = self.absorb_dirs.read().await.clone();
         let fresh_absorb = Self::absorb(&skill_dirs, &absorb_dirs);
