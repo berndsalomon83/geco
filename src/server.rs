@@ -101,6 +101,13 @@ pub struct SearchParams {
     #[serde(default, deserialize_with = "opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub limit: Option<u32>,
+    /// Include the full input schema for each hit so you can call
+    /// execute_tool directly without a separate get_tools call.
+    /// Default false — schemas are verbose, so only request when you
+    /// plan to execute immediately.
+    #[serde(default)]
+    #[schemars(with = "bool")]
+    pub include_schema: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -300,7 +307,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Find tools across all servers by keywords in one call. Returns server + tool + description, best match first."
+        description = "Find tools across all servers by keywords in one call. Returns server + tool + description, best match first. Set include_schema=true to get each tool's full input schema inline — saves a get_tools call when you plan to execute immediately."
     )]
     pub async fn search_tools(
         &self,
@@ -315,10 +322,24 @@ impl Proxy {
                 p.query
             )));
         }
-        Ok(text_result(json!(hits
+        let include_schema = p.include_schema.unwrap_or(false);
+        let result: Vec<_> = hits
             .iter()
-            .map(|h| json!({"server": h.server, "tool": h.tool, "description": h.description}))
-            .collect::<Vec<_>>())))
+            .map(|h| {
+                let mut entry = json!({
+                    "server": h.server,
+                    "tool": h.tool,
+                    "description": h.description,
+                });
+                if include_schema {
+                    if let Some(t) = snap.find_tool(&h.server, &h.tool) {
+                        entry["input_schema"] = t.input_schema.clone();
+                    }
+                }
+                entry
+            })
+            .collect();
+        Ok(text_result(json!(result)))
     }
 
     #[tool(
@@ -499,9 +520,9 @@ impl ServerHandler for Proxy {
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 "Gateway to multiple MCP servers whose tools load on demand instead of \
-                 polluting your context. Flow: search_tools (or list_servers → get_tools) \
-                 to discover, get_tools with `tool` for the schema, execute_tool to run it. \
-                 Backends start lazily on first execution."
+                 polluting your context. Flow: search_tools (with include_schema=true to \
+                 get input schemas inline) → execute_tool, or list_servers → get_tools \
+                 → execute_tool. Backends start lazily on first execution."
                     .to_string(),
             )
     }
@@ -519,6 +540,16 @@ mod param_tests {
         assert_eq!(p.limit, Some(3));
         let p: SearchParams = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
         assert_eq!(p.limit, None);
+    }
+
+    #[test]
+    fn include_schema_defaults_none() {
+        let p: SearchParams = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
+        assert_eq!(p.include_schema, None);
+        let p: SearchParams = serde_json::from_str(r#"{"query":"x","include_schema":true}"#).unwrap();
+        assert_eq!(p.include_schema, Some(true));
+        let p: SearchParams = serde_json::from_str(r#"{"query":"x","include_schema":false}"#).unwrap();
+        assert_eq!(p.include_schema, Some(false));
     }
 
     #[test]
@@ -546,6 +577,7 @@ mod param_tests {
         // type unions that client bridges drop. Pin concrete types.
         let schema = serde_json::to_value(schemars::schema_for!(SearchParams)).unwrap();
         assert_eq!(schema["properties"]["limit"]["type"], "integer");
+        assert_eq!(schema["properties"]["include_schema"]["type"], "boolean");
         let schema = serde_json::to_value(schemars::schema_for!(ExecuteParams)).unwrap();
         assert_eq!(schema["properties"]["arguments"]["type"], "object");
         let schema = serde_json::to_value(schemars::schema_for!(GetToolsParams)).unwrap();

@@ -300,7 +300,7 @@ async fn search_tools_through_proxy() {
 
     // Search for "add numbers" should find the 'add' tool.
     let result = proxy
-        .search_tools(Parameters(SearchParams { query: "add numbers".into(), limit: None }))
+        .search_tools(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: None }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -309,19 +309,37 @@ async fn search_tools_through_proxy() {
     assert!(!hits.is_empty(), "expected at least one hit");
     assert_eq!(hits[0]["tool"], "add");
     assert_eq!(hits[0]["server"], "stub");
+    // Without include_schema, no input_schema in the result.
+    assert!(hits[0].get("input_schema").is_none() || hits[0]["input_schema"].is_null(),
+           "input_schema should be absent without include_schema: {json}");
 
     // Search with limit.
     let result = proxy
-        .search_tools(Parameters(SearchParams { query: "add".into(), limit: Some(1) }))
+        .search_tools(Parameters(SearchParams { query: "add".into(), limit: Some(1), include_schema: None }))
         .await
         .unwrap();
     let json = extract_json(&result);
     let hits = json.as_array().unwrap();
     assert_eq!(hits.len(), 1, "expected exactly 1 hit with limit=1: {json}");
 
+    // Search with include_schema=true: should include the input schema inline.
+    let result = proxy
+        .search_tools(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: Some(true) }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let hits = json.as_array().unwrap();
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0]["tool"], "add");
+    assert!(hits[0]["input_schema"]["properties"]["a"].is_object(),
+            "expected input schema with 'a' property: {json}");
+    assert!(hits[0]["input_schema"]["properties"]["b"].is_object(),
+            "expected input schema with 'b' property: {json}");
+
     // Search for nonexistent query returns an error.
     let result = proxy
-        .search_tools(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None }))
+        .search_tools(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for no matches");
