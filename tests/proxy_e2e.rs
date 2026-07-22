@@ -843,3 +843,55 @@ async fn refresh_tools_returns_diff() {
 
     registry.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn refresh_tools_diff_shows_added_server() {
+    // Regression: compute_diff missed newly added servers in a full refresh
+    // because the iterator only covered servers in both old and new.
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("snapshot.json");
+    let cfg_path = dir.path().join("config.yaml");
+    std::mem::forget(dir);
+
+    // Config with two servers, but initial snapshot only has one.
+    // (Simulates: user added a server to config, then calls refresh_tools
+    // manually without hot-reload having fired yet.)
+    let cfg: Config = serde_json::from_str(&format!(
+        r#"{{"mcpServers":{{
+            "stub":{{"command":"python3","args":["{stub}"],"description":"stub","deny":["secret_*"]}},
+            "stub2":{{"command":"python3","args":["{stub}"],"description":"second stub"}}
+        }}}}"#
+    )).unwrap();
+    let registry = Arc::new(Registry::from_config(&cfg));
+
+    // Build a snapshot with only "stub" (not stub2).
+    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), Some("stub")).await;
+    // build_snapshot with a filter only builds that one server.
+    let proxy = Proxy::new(
+        (*registry).clone(),
+        snapshot,
+        snap_path,
+        cfg_path,
+        vec![],
+        vec![],
+    );
+
+    // Now refresh_tools (full) — should build both servers and diff
+    // against the old snapshot (which only had stub).
+    let result = proxy
+        .refresh_tools(Parameters(RefreshParams { server: None }))
+        .await
+        .unwrap();
+    let json = extract_json(&result);
+    let diff = &json["diff"];
+    let added = diff["added"].as_array().unwrap();
+    assert!(!added.is_empty(), "expected added tools from new server: {diff}");
+    assert!(added.iter().any(|a| a["server"] == "stub2"),
+            "expected stub2 tools in added: {added:?}");
+
+    proxy.shutdown_backends().await;
+}

@@ -266,12 +266,19 @@ fn compute_diff(
         }
     }
 
-    // For a full refresh, also check for removed servers.
+    // For a full refresh, also check for removed and added servers.
     if server_filter.is_none() {
         for (name, old_entry) in &old.servers {
             if !new.servers.contains_key(name) {
                 for t in &old_entry.tools {
                     removed.push(json!({"server": name, "tool": t.name}));
+                }
+            }
+        }
+        for (name, new_entry) in &new.servers {
+            if !old.servers.contains_key(name) {
+                for t in &new_entry.tools {
+                    added.push(json!({"server": name, "tool": t.name}));
                 }
             }
         }
