@@ -117,6 +117,12 @@ pub struct ServerConfig {
     pub deny: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Environment variables to forward from the proxy's own environment
+    /// to the backend at spawn time. Shortcut for `env: { KEY: "${KEY}" }`
+    /// — useful when multiple backends share the same secret that's already
+    /// in the proxy's env (e.g. `pass_env: ["GITHUB_TOKEN"]`).
+    #[serde(default)]
+    pub pass_env: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -143,12 +149,24 @@ impl ServerConfig {
     }
 
     /// Env map with `${VAR}` / `${keychain:...}` expansion, resolved at
-    /// spawn time.
+    /// spawn time. Also forwards `pass_env` variables from the proxy's own
+    /// environment — missing vars are silently skipped (the backend will
+    /// see them as unset, which is the correct behavior for optional vars).
     pub fn env_expanded(&self) -> Result<BTreeMap<String, String>> {
-        self.env
+        let mut envs: BTreeMap<String, String> = self
+            .env
             .iter()
             .map(|(k, v)| Ok((k.clone(), expand_value(v)?)))
-            .collect()
+            .collect::<Result<_>>()?;
+        for key in &self.pass_env {
+            if envs.contains_key(key) {
+                continue; // explicit env wins over pass_env
+            }
+            if let Ok(val) = std::env::var(key) {
+                envs.insert(key.clone(), val);
+            }
+        }
+        Ok(envs)
     }
 
     /// Allow/deny filter for a backend tool name. Deny wins.
@@ -459,5 +477,34 @@ mcpServers:
         assert_ne!(h_none, h_a, "hash must change when description is added");
         assert_ne!(h_a, h_b, "hash must change when description is edited");
         assert_ne!(h_none, h_b, "hash must differ between no-desc and a desc");
+    }
+
+    #[test]
+    fn pass_env_forwards_from_process_env() {
+        std::env::set_var("GECO_TEST_PASS_ENV", "secret123");
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_TEST_PASS_ENV"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let envs = cfg.servers["s"].env_expanded().unwrap();
+        assert_eq!(envs["GECO_TEST_PASS_ENV"], "secret123");
+        std::env::remove_var("GECO_TEST_PASS_ENV");
+    }
+
+    #[test]
+    fn pass_env_missing_var_is_silently_skipped() {
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_NONEXISTENT_VAR_XYZ"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let envs = cfg.servers["s"].env_expanded().unwrap();
+        assert!(!envs.contains_key("GECO_NONEXISTENT_VAR_XYZ"));
+    }
+
+    #[test]
+    fn pass_env_does_not_override_explicit_env() {
+        std::env::set_var("GECO_TEST_OVERRIDE", "from_process");
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"GECO_TEST_OVERRIDE":"from_config"},"pass_env":["GECO_TEST_OVERRIDE"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let envs = cfg.servers["s"].env_expanded().unwrap();
+        // Explicit env wins over pass_env.
+        assert_eq!(envs["GECO_TEST_OVERRIDE"], "from_config");
+        std::env::remove_var("GECO_TEST_OVERRIDE");
     }
 }

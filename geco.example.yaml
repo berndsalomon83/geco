@@ -30,6 +30,7 @@ mcpServers:
       GITHUB_TOOLSETS: "repos,issues,pull_requests"
     description: "GitHub: repos, issues, pull requests."
     deny: ["delete_*"]
+    # pass_env: ["GITHUB_TOKEN"]  # alternative: forward from proxy's env
 
   websearch:
     command: [npx, -y, mcp-searxng]

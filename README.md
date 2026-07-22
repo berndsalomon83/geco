@@ -92,7 +92,7 @@ Add one line to your global AGENTS.md so models reach for it: *Before specialize
 
 **Format:** YAML is the standard (`config.yaml`); JSON works identically for paste-compat with agent configs. A JSON Schema — generated from the binary's own structs, so it can't drift — powers editor validation and autocomplete: `geco schema > ~/.config/geco/geco.schema.json`, referenced from the YAML via the `# yaml-language-server: $schema=…` header (see the example file).
 
-Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `description` (shown in `list_mcp_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`.
+Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `pass_env` (forward vars from the proxy's environment — shortcut for `env: { KEY: "${KEY}" }`), `description` (shown in `list_mcp_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`.
 
 `proxy` section: `call_timeout_secs` (default 120), `startup_timeout_secs` (30), `refresh_on_start` (true), `health_check_secs` (30; 0 disables dead-backend detection).
 
