@@ -132,7 +132,12 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: 
         metrics: body.metrics,
     };
     if let Ok(json) = serde_json::to_string_pretty(&report) {
-        let tmp = path.with_extension("json.tmp");
+        static HEALTH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            HEALTH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         if std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, path).is_ok() {
             commit_hash(path, hash);
         }

@@ -267,7 +267,7 @@ fn keychain_lookup(service: &str) -> Result<String> {
          $t=Add-Type -MemberDefinition $sig -Name Cred -PassThru;\
          $p=[IntPtr]::Zero;\
          $svc=$env:GECO_KEYCHAIN_SERVICE;\
-         if($t::CredReadW($svc,1,0,[ref]$p)){{\
+         if($t::CredReadW($svc,1,0,[ref]$p)){\
          $base=$p.ToInt64();\
          $cb=([Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]$base+32));\
          $blob=[IntPtr]($base+40);\
@@ -275,13 +275,13 @@ fn keychain_lookup(service: &str) -> Result<String> {
          [Marshal]::Copy($blob,$b,0,$cb);\
          $pw=[Text.Encoding]::Unicode.GetString($b);\
          $t::CredFree($p);\
-         Write-Output $pw}}else{{exit 1}}";
+         Write-Output $pw}else{exit 1}";
         let mut cmd = std::process::Command::new("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_script]);
         cmd.env("GECO_KEYCHAIN_SERVICE", service);
         let out = cmd
             .output()
-            .with_context(|| "cannot run 'powershell' to resolve keychain item '{service}'")?;
+            .with_context(|| format!("cannot run 'powershell' to resolve keychain item '{service}'"))?;
         if !out.status.success() {
             bail!("keychain item '{service}' not found ('powershell' exited {})", out.status);
         }
@@ -366,7 +366,7 @@ impl Config {
                 findings.push(("error".into(),
                     format!("server '{name}': empty command array")));
             }
-            // Try keychain lookups — report missing items without spawning.
+            // Try keychain lookups — verifies the item exists at validate time.
             // Loop through all ${keychain:...} occurrences in each value.
             for (k, v) in &s.env {
                 let mut search = 0;

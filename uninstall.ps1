@@ -55,8 +55,8 @@ foreach ($p in @(
 if ($Purge) {
     $paths = @(
         (Join-Path $env:USERPROFILE ".config\geco"),
-        (Join-Path $env:LOCALAPPDATA "dev.geco.geco"),
-        (Join-Path $env:APPDATA "dev.geco.geco")
+        (Join-Path $env:LOCALAPPDATA "geco\geco"),
+        (Join-Path $env:APPDATA "geco\geco")
     )
     foreach ($p in $paths) {
         if (Test-Path $p) {

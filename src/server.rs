@@ -705,6 +705,13 @@ impl Proxy {
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let kind = p.kind.as_deref().unwrap_or("");
+        if !kind.is_empty() && kind != "tools" && kind != "skills" {
+            return Ok(structured_err_ctx(
+                "invalid_kind",
+                &format!("kind must be \"tools\", \"skills\", or omitted (got \"{}\")", kind),
+                json!({ "kind": kind }),
+            ));
+        }
         let limit = p.limit.unwrap_or(8).clamp(1, 25) as usize;
         let include_schema = p.include_schema.unwrap_or(false);
         let mut results = Vec::new();
@@ -864,9 +871,9 @@ impl Proxy {
                     results[i] = result;
                     let server = results[i]["server"].as_str().unwrap_or("").to_string();
                     let ok = results[i]["ok"].as_bool().unwrap_or(false);
-                    // If a previously-down backend succeeded, update health
-                    // so the TUI plugin clears the stale "connection lost" warning.
-                    if ok && was_down {
+                    // If a previously-down backend's status changed (success
+                    // or failure), update health so the TUI plugin stays in sync.
+                    if was_down {
                         needs_health_update = true;
                     }
                     let mut metrics = self.metrics.write().await;
