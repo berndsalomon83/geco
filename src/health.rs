@@ -35,10 +35,19 @@ fn fnv1a(data: &[u8]) -> u64 {
     hash
 }
 
+/// Check if the content hash for `path` matches the last successful write.
+/// Does NOT update the hash — call `commit_hash` after the write succeeds.
 fn should_skip_write(path: &Path, hash: u64) -> bool {
+    let guard = LAST_CONTENT_HASHES.lock().unwrap();
+    let map = guard.as_ref();
+    map.and_then(|m| m.get(path)) == Some(&hash)
+}
+
+/// Record the hash after a successful write to disk.
+fn commit_hash(path: &Path, hash: u64) {
     let mut guard = LAST_CONTENT_HASHES.lock().unwrap();
     let map = guard.get_or_insert_with(HashMap::new);
-    map.insert(path.to_path_buf(), hash) == Some(hash)
+    map.insert(path.to_path_buf(), hash);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,8 +133,8 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: 
     };
     if let Ok(json) = serde_json::to_string_pretty(&report) {
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(tmp, path);
+        if std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+            commit_hash(path, hash);
         }
     }
 }

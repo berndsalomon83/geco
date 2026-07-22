@@ -58,21 +58,33 @@ struct Frontmatter {
 
 fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
     let rest = text.strip_prefix("---")?;
+    // Try each candidate closing delimiter. A YAML literal block scalar
+    // can contain lines starting with ---, so we can't just find the first
+    // match — we try parsing at each candidate and return the first that
+    // yields valid frontmatter.
     let mut search_from = 0;
     loop {
         let pos = rest[search_from..].find("\n---")?;
         let abs = search_from + pos;
+        // Candidate: text before this \n--- is the YAML frontmatter.
+        let candidate = &rest[..abs];
+        // The --- must be at the start of a line (followed by EOF/whitespace).
         let after = &rest[abs + 4..];
-        let is_closing = after.is_empty()
+        let looks_like_delimiter = after.is_empty()
             || after.starts_with('\n')
             || after.starts_with('\r')
             || after.starts_with(' ')
             || after.starts_with('\t');
-        if is_closing {
-            return serde_norway::from_str(&rest[..abs]).ok();
-        } else {
+        if !looks_like_delimiter {
             search_from = abs + 4;
+            continue;
         }
+        // Try parsing — if it works, this is the real closing delimiter.
+        if let Ok(fm) = serde_norway::from_str::<Frontmatter>(candidate) {
+            return Some(fm);
+        }
+        // Parse failed — this --- was inside a block scalar. Keep searching.
+        search_from = abs + 4;
     }
 }
 
