@@ -2,15 +2,25 @@
 
 ## Requirements
 
-Rust toolchain (rustup.rs), `python3` (used by the scripts for JSON handling). Backends need whatever they always needed (`npx`, `uvx`, binaries…) — the proxy just spawns them later instead of your agent spawning them at startup.
+Rust toolchain (rustup.rs). On macOS/Linux: `python3` (used by the install script for JSON verification). Backends need whatever they always needed (`npx`, `uvx`, binaries…) — the proxy just spawns them later instead of your agent spawning them at startup.
 
 ## Install
+
+### macOS / Linux
 
 ```bash
 bash install.sh
 ```
 
 Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 8 meta-tools.
+
+### Windows
+
+```powershell
+.\install.ps1
+```
+
+Builds the release binary, installs it to `~/.local/bin/geco.exe` (adds to PATH if needed), scaffolds `~/.config/geco/config.yaml`, builds the first snapshot, and verifies 8 meta-tools.
 
 ## Migrate servers behind the proxy
 
@@ -73,9 +83,18 @@ In the agent: ask it to `search` for something you know is behind the proxy, the
 
 ## Uninstall
 
+### macOS / Linux
+
 ```bash
 bash uninstall.sh          # removes binary + geco entries from agent configs (with .bak backups)
 bash uninstall.sh --purge  # …and config + snapshot cache
+```
+
+### Windows
+
+```powershell
+.\uninstall.ps1            # removes binary + geco entries from agent configs
+.\uninstall.ps1 -Purge     # …and config + cache
 ```
 
 Re-add any servers you still want directly to your agent config afterwards.

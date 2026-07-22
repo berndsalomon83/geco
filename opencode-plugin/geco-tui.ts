@@ -18,15 +18,19 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 
-// geco's data dir (macOS + Linux). Override with GECO_HEALTH.
+// geco's data dir (macOS + Linux + Windows). Override with GECO_HEALTH.
 function healthPath(): string {
   if (process.env.GECO_HEALTH) return process.env.GECO_HEALTH
   const home = os.homedir()
-  const mac = path.join(home, "Library", "Application Support",
-                        "dev.geco.geco", "health.json")
-  const linux = path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
-                          "dev.geco.geco", "health.json")
-  return process.platform === "darwin" ? mac : linux
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "dev.geco.geco", "health.json")
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"),
+                     "dev.geco.geco", "health.json")
+  }
+  return path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
+                   "dev.geco.geco", "health.json")
 }
 
 const POLL_MS = 5000

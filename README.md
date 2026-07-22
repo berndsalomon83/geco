@@ -4,7 +4,7 @@
 
 geco is an MCP gateway that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools (~3.4 KB total) instead of every schema on every request.
 
-Rust, single static binary, no runtime dependencies. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
+Rust, single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
 
 ## Why
 
@@ -104,7 +104,12 @@ Don't put tokens in the config or your shell rc. `${keychain:SERVICE}` resolves 
 "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${keychain:github_token}" }
 ```
 
-Store it once: `security add-generic-password -a "$USER" -s github_token -w '<token>'` (macOS Keychain; Linux uses `secret-tool` / libsecret). A missing keychain item fails the spawn loudly — plain `${VAR}` env references still expand to "" like shell. There is deliberately no `${cmd:...}`: arbitrary command execution from a config file is an injection surface.
+Store it once:
+- **macOS:** `security add-generic-password -a "$USER" -s github_token -w '<token>'`
+- **Linux:** `secret-tool store --label='geco' service github_token` (libsecret / `secret-tool`)
+- **Windows:** `cmdkey /generic:github_token /user:geco /pass:<token>` (Credential Manager via PowerShell CredReadW)
+
+A missing keychain item fails the spawn loudly — plain `${VAR}` env references still expand to "" like shell. There is deliberately no `${cmd:...}`: arbitrary command execution from a config file is an injection surface.
 
 ## CLI
 

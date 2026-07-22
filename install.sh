@@ -95,4 +95,5 @@ Done. Wire it into your agent (and REMOVE the servers you moved behind it):
     "mcpServers": { "geco": { "command": "$DEST", "args": ["serve"] } }
 
 Uninstall:  bash $REPO_DIR/uninstall.sh [--purge]
+Windows:    .\install.ps1  /  .\uninstall.ps1 -Purge
 EOT

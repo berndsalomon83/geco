@@ -252,13 +252,35 @@ fn keychain_lookup(service: &str) -> Result<String> {
     if service.is_empty() {
         bail!("empty keychain service name in ${{keychain:}}");
     }
-    let (bin, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
-        ("security", vec!["find-generic-password", "-s", service, "-w"])
+    let (bin, args): (String, Vec<String>) = if cfg!(target_os = "macos") {
+        ("security".into(), vec![
+            "find-generic-password".into(), "-s".into(), service.into(), "-w".into()
+        ])
+    } else if cfg!(target_os = "windows") {
+        // Windows Credential Manager via PowerShell + Win32 CredReadW.
+        let ps_script = format!(
+            "$sig='[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\
+             public static extern bool CredReadW(string t, uint ty, uint f, out System.IntPtr c);\
+             [DllImport(\"advapi32.dll\")] public static extern void CredFree(System.IntPtr c);';\
+             $t=Add-Type -MemberDefinition $sig -Name Cred -PassThru;\
+             $p=[IntPtr]::Zero;\
+             if($t::CredReadW(\"{service}\",1,0,[ref]$p)){{\
+             $b=New-Object byte[] 512;\
+             [Marshal]::Copy([IntPtr]($p.ToInt64()+16),$b,0,512);\
+             $pw=[Text.Encoding]::Unicode.GetString($b).TrimEnd([char]0);\
+             $t::CredFree($p);\
+             Write-Output $pw}}else{{exit 1}}'"
+        );
+        ("powershell".into(), vec![
+            "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), ps_script
+        ])
     } else {
         // Linux desktop: libsecret. Headless hosts should use plain env vars.
-        ("secret-tool", vec!["lookup", "service", service])
+        ("secret-tool".into(), vec![
+            "lookup".into(), "service".into(), service.into()
+        ])
     };
-    let out = std::process::Command::new(bin)
+    let out = std::process::Command::new(&bin)
         .args(&args)
         .output()
         .with_context(|| format!("cannot run '{bin}' to resolve keychain item '{service}'"))?;
