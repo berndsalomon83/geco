@@ -246,7 +246,7 @@ impl Registry {
         self.backends
             .get(name)
             .cloned()
-            .ok_or_else(|| anyhow!("unknown server '{name}' — see list_servers"))
+            .ok_or_else(|| anyhow!("unknown server '{name}' — see list_mcp_servers"))
     }
 
     /// Build a fresh snapshot by asking every backend (in parallel) for its

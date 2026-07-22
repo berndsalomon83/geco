@@ -7,7 +7,7 @@ use std::sync::Arc;
 use geco::backend::Registry;
 use geco::config::Config;
 use geco::server::{
-    BatchCall, BatchParams, ExecuteParams, GetToolsParams, Proxy, RefreshParams, SearchParams,
+    BatchCall, BatchParams, ExecuteParams, ListToolsParams, Proxy, RefreshParams, SearchParams,
     ReadSkillParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -233,11 +233,11 @@ async fn health_reports_backend_failures() {
 }
 
 #[tokio::test]
-async fn list_servers_through_proxy() {
+async fn list_mcp_servers_through_proxy() {
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
-    let result = proxy.list_servers().await.unwrap();
+    let result = proxy.list_mcp_servers().await.unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
     let servers = json.as_array().unwrap();
@@ -250,13 +250,13 @@ async fn list_servers_through_proxy() {
 }
 
 #[tokio::test]
-async fn get_tools_through_proxy() {
+async fn list_tools_through_proxy() {
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
     // List all tools on the stub server.
     let result = proxy
-        .get_tools(Parameters(GetToolsParams { server: "stub".into(), tool: None }))
+        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: None }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -270,7 +270,7 @@ async fn get_tools_through_proxy() {
 
     // Get the full input schema for a specific tool.
     let result = proxy
-        .get_tools(Parameters(GetToolsParams { server: "stub".into(), tool: Some("add".into()) }))
+        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: Some("add".into()) }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -281,14 +281,14 @@ async fn get_tools_through_proxy() {
 
     // Unknown server returns an error.
     let result = proxy
-        .get_tools(Parameters(GetToolsParams { server: "nope".into(), tool: None }))
+        .list_tools(Parameters(ListToolsParams { server: "nope".into(), tool: None }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown server");
 
     // Unknown tool returns an error.
     let result = proxy
-        .get_tools(Parameters(GetToolsParams { server: "stub".into(), tool: Some("nope".into()) }))
+        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: Some("nope".into()) }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown tool");
@@ -544,7 +544,7 @@ async fn hot_reload_updates_snapshot() {
     // OS-dependent and hard to test reliably). Verify that after a reload:
     // 1. New servers appear in the snapshot
     // 2. Removed servers disappear
-    // 3. list_servers reflects the new state
+    // 3. list_mcp_servers reflects the new state
     // 4. execute_tool works on the new server
     if std::process::Command::new("python3").arg("--version").output().is_err() {
         return;
@@ -568,7 +568,7 @@ async fn hot_reload_updates_snapshot() {
     );
 
     // Verify initial state: 1 server.
-    let result = proxy.list_servers().await.unwrap();
+    let result = proxy.list_mcp_servers().await.unwrap();
     let json = extract_json(&result);
     let servers = json.as_array().unwrap();
     assert_eq!(servers.len(), 1, "expected 1 server initially: {json}");
@@ -582,7 +582,7 @@ async fn hot_reload_updates_snapshot() {
     proxy.reload_from_config(cfg2).await.unwrap();
 
     // After reload: still 1 server, but description changed.
-    let result = proxy.list_servers().await.unwrap();
+    let result = proxy.list_mcp_servers().await.unwrap();
     let json = extract_json(&result);
     let servers = json.as_array().unwrap();
     assert_eq!(servers.len(), 1);

@@ -87,8 +87,8 @@ where
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetToolsParams {
-    /// Server name from list_servers
+pub struct ListToolsParams {
+    /// Server name from list_mcp_servers
     pub server: String,
     /// Optional: a tool name to get the full input schema for
     #[serde(default)]
@@ -105,7 +105,7 @@ pub struct SearchParams {
     #[schemars(with = "u32")]
     pub limit: Option<u32>,
     /// Include the full input schema for each tool hit so you can call
-    /// execute_tool directly without a separate get_tools call.
+    /// execute_tool directly without a separate list_tools call.
     /// Default false — schemas are verbose, so only request when you
     /// plan to execute immediately. (Skills don't have input schemas.)
     #[serde(default)]
@@ -119,7 +119,7 @@ pub struct SearchParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteParams {
-    /// Server name from list_servers / search
+    /// Server name from list_mcp_servers / search
     pub server: String,
     /// Tool name on that server
     pub tool: String,
@@ -131,7 +131,7 @@ pub struct ExecuteParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchCall {
-    /// Server name from list_servers / search
+    /// Server name from list_mcp_servers / search
     pub server: String,
     /// Tool name on that server
     pub tool: String,
@@ -432,7 +432,7 @@ impl Proxy {
     #[tool(
         description = "List the MCP servers behind this proxy: name, what it's for, tool count, running state. Start here."
     )]
-    pub async fn list_servers(&self) -> Result<CallToolResult, McpError> {
+    pub async fn list_mcp_servers(&self) -> Result<CallToolResult, McpError> {
         let snap = self.snapshot.read().await;
         let registry = self.registry.read().await;
         let mut out = Vec::new();
@@ -455,14 +455,14 @@ impl Proxy {
     #[tool(
         description = "List a server's tools (name + one-line description). Pass `tool` to get that tool's full input schema before executing it."
     )]
-    pub async fn get_tools(
+    pub async fn list_tools(
         &self,
-        Parameters(p): Parameters<GetToolsParams>,
+        Parameters(p): Parameters<ListToolsParams>,
     ) -> Result<CallToolResult, McpError> {
         let snap = self.snapshot.read().await;
         let Some(server) = snap.servers.get(&p.server) else {
             return Ok(err(format!(
-                "unknown server '{}' — see list_servers",
+                "unknown server '{}' — see list_mcp_servers",
                 p.server
             )));
         };
@@ -475,7 +475,7 @@ impl Proxy {
                     "input_schema": t.input_schema,
                 }))),
                 None => Ok(err(format!(
-                    "no tool '{tool_name}' on '{}' — call get_tools without `tool` to list",
+                    "no tool '{tool_name}' on '{}' — call list_tools without `tool` to list",
                     p.server
                 ))),
             },
@@ -488,14 +488,14 @@ impl Proxy {
                 Ok(text_result(json!({
                     "server": p.server,
                     "tools": tools,
-                    "hint": "get_tools with `tool` gives the input schema; execute_tool runs it",
+                    "hint": "list_tools with `tool` gives the input schema; execute_tool runs it",
                 })))
             }
         }
     }
 
     #[tool(
-        description = "Find tools AND skills by keywords in one call. Returns hits tagged by kind (\"tool\" or \"skill\"), best match first. For tool hits, set include_schema=true to get each tool's full input schema inline — saves a get_tools call. Use kind=\"tools\" or kind=\"skills\" to search only one surface."
+        description = "Find tools AND skills by keywords in one call. Returns hits tagged by kind (\"tool\" or \"skill\"), best match first. For tool hits, set include_schema=true to get each tool's full input schema inline — saves a list_tools call. Use kind=\"tools\" or kind=\"skills\" to search only one surface."
     )]
     pub async fn search(
         &self,
@@ -552,7 +552,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Execute a tool on a backend server (started on demand). Get the schema via get_tools first if unsure about arguments."
+        description = "Execute a tool on a backend server (started on demand). Get the schema via list_tools first if unsure about arguments."
     )]
     pub async fn execute_tool(
         &self,
@@ -732,7 +732,7 @@ impl Proxy {
                     // Neither in config nor in the snapshot — typo, not a
                     // removal. Surface it instead of silently doing nothing.
                     return Ok(err(format!(
-                        "unknown server '{name}' — see list_servers"
+                        "unknown server '{name}' — see list_mcp_servers"
                     )));
                 }
             }
@@ -781,8 +781,8 @@ impl ServerHandler for Proxy {
                 "Gateway to multiple MCP servers whose tools load on demand instead of \
                  polluting your context. Flow: search (with include_schema=true to get \
                  input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute_tool \
-                 (or execute_batch for multiple independent calls), or list_servers → \
-                 get_tools → execute_tool. Backends start lazily on first execution."
+                 (or execute_batch for multiple independent calls), or list_mcp_servers → \
+                 list_tools → execute_tool. Backends start lazily on first execution."
                     .to_string(),
             )
     }
@@ -840,7 +840,7 @@ mod param_tests {
         assert_eq!(schema["properties"]["include_schema"]["type"], "boolean");
         let schema = serde_json::to_value(schemars::schema_for!(ExecuteParams)).unwrap();
         assert_eq!(schema["properties"]["arguments"]["type"], "object");
-        let schema = serde_json::to_value(schemars::schema_for!(GetToolsParams)).unwrap();
+        let schema = serde_json::to_value(schemars::schema_for!(ListToolsParams)).unwrap();
         assert_eq!(schema["properties"]["tool"]["type"], "string");
     }
 }

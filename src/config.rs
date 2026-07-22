@@ -90,7 +90,7 @@ pub struct ServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// One-line description shown in `list_servers`. Optional but worth
+    /// One-line description shown in `list_mcp_servers`. Optional but worth
     /// writing: it is the only thing the agent sees before drilling in.
     #[serde(default)]
     pub description: Option<String>,
