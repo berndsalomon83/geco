@@ -256,6 +256,12 @@ async fn list_mcp_servers_through_proxy() {
     assert_eq!(servers[0]["server"], "stub");
     assert_eq!(servers[0]["tools"], 2);
     assert_eq!(servers[0]["last_refresh"], "ok");
+    // Tool preview should include both tools (add + echo, sorted alphabetically).
+    let preview = servers[0]["tool_preview"].as_array().unwrap();
+    assert_eq!(preview.len(), 2, "expected 2 tools in preview: {json}");
+    let names: Vec<_> = preview.iter().map(|t| t["tool"].as_str().unwrap()).collect();
+    assert!(names.contains(&"add"), "expected 'add' in preview: {names:?}");
+    assert!(names.contains(&"echo"), "expected 'echo' in preview: {names:?}");
 
     registry.shutdown_all().await;
 }

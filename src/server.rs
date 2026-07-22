@@ -485,13 +485,18 @@ impl Proxy {
     }
 
     #[tool(
-        description = "List the MCP servers behind this proxy: name, what it's for, tool count, running state. Start here."
+        description = "List the MCP servers behind this proxy: name, what it's for, tool count, running state, and a preview of up to 5 tool names. Start here."
     )]
     pub async fn list_mcp_servers(&self) -> Result<CallToolResult, McpError> {
         let servers: Vec<_> = {
             let snap = self.snapshot.read().await;
             snap.servers.iter()
-                .map(|(name, s)| (name.clone(), s.description.clone(), s.tools.len(), s.refresh_status.clone()))
+                .map(|(name, s)| {
+                    let tool_preview: Vec<_> = s.tools.iter().take(5)
+                        .map(|t| json!({"tool": t.name, "description": short_desc(&t.description, 80)}))
+                        .collect();
+                    (name.clone(), s.description.clone(), s.tools.len(), s.refresh_status.clone(), tool_preview)
+                })
                 .collect()
         };
         let registry = {
@@ -499,7 +504,7 @@ impl Proxy {
             guard.clone()
         };
         let mut out = Vec::new();
-        for (name, desc, tools, last_refresh) in &servers {
+        for (name, desc, tools, last_refresh, tool_preview) in &servers {
             let status = match registry.get(name) {
                 Ok(b) => serde_json::to_value(b.status().await).unwrap_or(json!("unknown")),
                 Err(_) => json!("removed from config"),
@@ -508,6 +513,7 @@ impl Proxy {
                 "server": name,
                 "description": desc,
                 "tools": tools,
+                "tool_preview": tool_preview,
                 "status": status,
                 "last_refresh": last_refresh,
             }));
