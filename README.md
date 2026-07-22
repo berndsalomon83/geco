@@ -122,6 +122,10 @@ geco schema                           # print the config JSON Schema (YAML + JSO
 
 The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. No restart, no manual `refresh_tools` call. Removed backends are shut down; new ones are snapshotted and available immediately.
 
+## Self-healing backends
+
+Warm backends that crash silently (child process exits) are detected by a background health check every 30 seconds (configurable via `health_check_secs`, 0 to disable). The dead connection is reset so the next `execute_tool` reconnects fresh instead of erroring — the agent never sees a stale failure.
+
 ## Health — failures are loud, not logged
 
 The gateway is headless, so a dead backend or a partial refresh would otherwise live only in a stderr log. Instead it writes its current problem set to `<data-dir>/health.json` (level-triggered: empty = healthy, tagged with the MCP client name). Two ways to see it:

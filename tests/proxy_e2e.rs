@@ -598,3 +598,38 @@ async fn hot_reload_updates_snapshot() {
 
     proxy.shutdown_backends().await;
 }
+
+#[tokio::test]
+async fn check_health_detects_dead_backend() {
+    // Verify check_health returns true for cold and warm backends, and
+    // that after shutdown the backend can reconnect fresh.
+    let Some(cfg) = stub_config() else { return };
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+
+    // Cold backend: check_health returns true (nothing to check).
+    assert!(backend.check_health().await, "cold backend should be healthy");
+
+    // Start the backend by calling a tool.
+    let args = serde_json::json!({"a": 1, "b": 1}).as_object().unwrap().clone();
+    let _ = backend.call("add", Some(args), &registry.proxy).await.unwrap();
+    assert!(matches!(backend.status().await, geco::backend::Status::Up { .. }));
+
+    // Warm backend: check_health returns true.
+    assert!(backend.check_health().await, "warm backend should be healthy");
+
+    // Shut down — simulates the child process dying.
+    backend.shutdown().await;
+    assert!(matches!(backend.status().await, geco::backend::Status::Cold));
+
+    // After shutdown, conn is None — check_health is a no-op (returns true).
+    assert!(backend.check_health().await, "after shutdown, check_health is a no-op");
+
+    // Reconnect: call should work again (new connection).
+    let args = serde_json::json!({"a": 2, "b": 3}).as_object().unwrap().clone();
+    let result = backend.call("add", Some(args), &registry.proxy).await.unwrap();
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("5"), "expected 5 after reconnect: {text}");
+
+    registry.shutdown_all().await;
+}

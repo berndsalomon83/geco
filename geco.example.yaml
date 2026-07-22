@@ -12,6 +12,7 @@ proxy:
   call_timeout_secs: 120
   startup_timeout_secs: 60     # first npx run downloads — be generous
   refresh_on_start: true       # re-scan when this file's hash changes
+  health_check_secs: 30        # 0 to disable dead-backend detection
 
 mcpServers:
   playwright:

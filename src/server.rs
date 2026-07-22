@@ -277,6 +277,42 @@ impl Proxy {
         });
     }
 
+    /// Spawn a background task that periodically checks if warm backends
+    /// are still alive. When a dead connection is detected (child process
+    /// exited), the connection is reset so the next `execute_tool` reconnects
+    /// fresh instead of erroring. Interval is `proxy.health_check_secs`;
+    /// 0 disables the check entirely.
+    pub fn spawn_health_check(self) {
+        let proxy = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let interval = {
+                    let registry = proxy.registry.read().await;
+                    registry.proxy.health_check_secs
+                };
+                if interval == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+
+                let registry = proxy.registry.read().await;
+                let backends: Vec<_> = registry.backends.values().cloned().collect();
+                drop(registry);
+
+                let mut dead = Vec::new();
+                for backend in &backends {
+                    if !backend.check_health().await {
+                        dead.push(backend.name.clone());
+                    }
+                }
+                if !dead.is_empty() {
+                    proxy.publish_health().await;
+                    tracing::info!("health check: reset {} dead backend(s): {:?}", dead.len(), dead);
+                }
+            }
+        });
+    }
+
     /// Reload config: rebuild registry, snapshot, skills, and health.
     /// Called by `spawn_hot_reload` when the config file changes, but also
     /// testable in isolation.

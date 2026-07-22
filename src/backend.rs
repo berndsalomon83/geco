@@ -195,6 +195,26 @@ impl Backend {
         *guard = None;
         *self.status.lock().await = Status::Cold;
     }
+
+    /// Check if a warm backend's connection is still alive. If the child
+    /// process has died, `RunningService::is_closed()` returns true and we
+    /// reset the connection so the next `call` reconnects fresh.
+    pub async fn check_health(&self) -> bool {
+        let guard = self.conn.lock().await;
+        if let Some(conn) = guard.as_ref() {
+            if conn.is_closed() {
+                tracing::warn!("backend '{}' connection is dead — resetting", self.name);
+                drop(guard);
+                *self.conn.lock().await = None;
+                *self.status.lock().await = Status::Failed {
+                    error: "connection lost (child process exited)".into(),
+                    at: now(),
+                };
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[derive(Clone)]

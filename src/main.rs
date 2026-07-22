@@ -162,6 +162,7 @@ async fn main() -> Result<()> {
             );
             proxy.publish_health().await;
             proxy.clone().spawn_hot_reload();
+            proxy.clone().spawn_health_check();
             let service = proxy
                 .clone()
                 .serve(rmcp::transport::stdio())

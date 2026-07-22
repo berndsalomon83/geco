@@ -31,6 +31,10 @@ pub struct ProxyConfig {
     pub startup_timeout_secs: u64,
     /// Refresh the tool snapshot at startup when the config changed.
     pub refresh_on_start: bool,
+    /// How often to check if warm backends are still alive (seconds).
+    /// 0 = disabled. When a dead connection is detected, it is reset
+    /// so the next execute_tool reconnects fresh.
+    pub health_check_secs: u64,
 }
 
 impl Default for ProxyConfig {
@@ -39,6 +43,7 @@ impl Default for ProxyConfig {
             call_timeout_secs: 120,
             startup_timeout_secs: 30,
             refresh_on_start: true,
+            health_check_secs: 30,
         }
     }
 }
