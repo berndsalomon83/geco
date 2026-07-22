@@ -196,6 +196,95 @@ fn structured_err_ctx(code: &str, message: &str, context: serde_json::Value) -> 
     CallToolResult::error(vec![ContentBlock::text(body)])
 }
 
+/// Compute the diff between the old and new snapshots for the refresh_tools
+/// response. If `server_filter` is set, only that server is diffed.
+fn compute_diff(
+    old: &Snapshot,
+    new: &Snapshot,
+    server_filter: &Option<String>,
+) -> serde_json::Value {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    let mut unchanged = 0u64;
+
+    let servers: Box<dyn Iterator<Item = (&String, &crate::snapshot::ServerSnapshot, &crate::snapshot::ServerSnapshot)>> =
+        if let Some(name) = server_filter {
+            match (old.servers.get(name), new.servers.get(name)) {
+                (Some(o), Some(n)) => Box::new(std::iter::once((name, o, n))),
+                (None, Some(n)) => {
+                    // New server — all tools are "added".
+                    for t in &n.tools {
+                        added.push(json!({"server": name, "tool": t.name}));
+                    }
+                    return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
+                }
+                (Some(_), None) => {
+                    // Removed server — all tools are "removed".
+                    if let Some(o) = old.servers.get(name) {
+                        for t in &o.tools {
+                            removed.push(json!({"server": name, "tool": t.name}));
+                        }
+                    }
+                    return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
+                }
+                (None, None) => return json!({"added": [], "removed": [], "changed": [], "unchanged": 0}),
+            }
+        } else {
+            Box::new(new.servers.iter().filter_map(|(name, n)| {
+                old.servers.get(name).map(|o| (name, o, n))
+            }))
+        };
+
+    for (name, old_entry, new_entry) in servers {
+        let old_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> =
+            old_entry.tools.iter().map(|t| (t.name.as_str(), t)).collect();
+        let new_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> =
+            new_entry.tools.iter().map(|t| (t.name.as_str(), t)).collect();
+
+        // Tools in new but not old = added.
+        for tname in new_tools.keys() {
+            if !old_tools.contains_key(tname) {
+                added.push(json!({"server": name, "tool": tname}));
+            }
+        }
+        // Tools in old but not new = removed.
+        for tname in old_tools.keys() {
+            if !new_tools.contains_key(tname) {
+                removed.push(json!({"server": name, "tool": tname}));
+            }
+        }
+        // Tools in both = check for changes.
+        for (tname, old_t) in &old_tools {
+            if let Some(new_t) = new_tools.get(tname) {
+                if old_t.description != new_t.description || old_t.input_schema != new_t.input_schema {
+                    changed.push(json!({"server": name, "tool": tname}));
+                } else {
+                    unchanged += 1;
+                }
+            }
+        }
+    }
+
+    // For a full refresh, also check for removed servers.
+    if server_filter.is_none() {
+        for (name, old_entry) in &old.servers {
+            if !new.servers.contains_key(name) {
+                for t in &old_entry.tools {
+                    removed.push(json!({"server": name, "tool": t.name}));
+                }
+            }
+        }
+    }
+
+    json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "unchanged": unchanged,
+    })
+}
+
 #[tool_router]
 impl Proxy {
     pub fn new(registry: Registry, snapshot: Snapshot, snapshot_path: PathBuf,
@@ -815,7 +904,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Re-scan backend servers for their current tools (all, or one via `server`). Use after installing or reconfiguring a backend."
+        description = "Re-scan backend servers for their current tools (all, or one via `server`). Returns a diff (added/removed/changed/unchanged) so you can see what's new without comparing against a previous call. Use after installing or reconfiguring a backend."
     )]
     pub async fn refresh_tools(
         &self,
@@ -827,6 +916,8 @@ impl Proxy {
             registry.build_snapshot(hash, p.server.as_deref()).await
         };
         let mut snap = self.snapshot.write().await;
+        // Compute diff before the match (which moves fresh.generated_at).
+        let diff = compute_diff(&snap, &fresh, &p.server);
         match p.server {
             Some(ref name) => {
                 if let Some(entry) = fresh.servers.get(name) {
@@ -870,7 +961,10 @@ impl Proxy {
         *self.absorb_issues.write().await = issues;
         *self.skills.write().await = scanned;
         self.publish_health().await;
-        Ok(text_result(json!(summary)))
+        Ok(text_result(json!({
+            "summary": summary,
+            "diff": diff,
+        })))
     }
 }
 

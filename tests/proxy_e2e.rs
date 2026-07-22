@@ -798,3 +798,42 @@ async fn execute_records_metrics() {
 
     registry.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn refresh_tools_returns_diff() {
+    // Verify refresh_tools returns a diff: after the first refresh, all
+    // tools are "unchanged". After a second refresh with no changes, the
+    // diff should show 0 added, 0 removed, 0 changed.
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // First full refresh — everything is either added or unchanged
+    // (depends on whether the snapshot already had the tools).
+    let result = proxy
+        .refresh_tools(Parameters(RefreshParams { server: None }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    assert!(json["diff"].is_object(), "expected diff in response: {json}");
+    // The stub has 2 tools (add, echo). On the first refresh after snapshot
+    // build, they should be unchanged (same snapshot data).
+    let diff = &json["diff"];
+    assert!(diff["unchanged"].as_u64().unwrap_or(0) >= 2,
+            "expected at least 2 unchanged tools: {diff}");
+
+    // Second refresh — nothing changed.
+    let result = proxy
+        .refresh_tools(Parameters(RefreshParams { server: None }))
+        .await
+        .unwrap();
+    let json = extract_json(&result);
+    let diff = &json["diff"];
+    assert_eq!(diff["added"].as_array().unwrap().len(), 0, "expected 0 added: {diff}");
+    assert_eq!(diff["removed"].as_array().unwrap().len(), 0, "expected 0 removed: {diff}");
+    assert_eq!(diff["changed"].as_array().unwrap().len(), 0, "expected 0 changed: {diff}");
+    assert!(diff["unchanged"].as_u64().unwrap_or(0) >= 2,
+            "expected at least 2 unchanged: {diff}");
+
+    registry.shutdown_all().await;
+}
