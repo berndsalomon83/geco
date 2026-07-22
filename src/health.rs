@@ -13,21 +13,19 @@
 //! (the set goes empty). A monotonically increasing `generation` lets the
 //! plugin detect a fresh write cheaply.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Hash of the last content written to disk. If the next write has the
-/// same hash, we skip the disk I/O entirely — avoids SSD wear when the
-/// problem set hasn't changed (e.g. repeated publish_health calls during
-/// a session with no backend failures).
-static LAST_CONTENT_HASH: AtomicU64 = AtomicU64::new(0);
+/// Hash of the last content written to each path. Keyed by path so
+/// parallel tests with different temp dirs don't clobber each other.
+static LAST_CONTENT_HASHES: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
 
-/// FNV-1a 64-bit hash — fast, no dependencies, good enough for change
-/// detection (not cryptographic).
 fn fnv1a(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -35,6 +33,12 @@ fn fnv1a(data: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn should_skip_write(path: &Path, hash: u64) -> bool {
+    let mut guard = LAST_CONTENT_HASHES.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(path.to_path_buf(), hash) == Some(hash)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,8 +106,8 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: 
     let body_json = serde_json::to_string(&body).unwrap_or_default();
     let hash = fnv1a(body_json.as_bytes());
 
-    // Skip the write if nothing changed since last time.
-    if LAST_CONTENT_HASH.swap(hash, Ordering::SeqCst) == hash {
+    // Skip the write if nothing changed since last time (per-path).
+    if should_skip_write(path, hash) {
         return;
     }
 

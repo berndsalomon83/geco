@@ -751,8 +751,9 @@ impl Proxy {
             return Ok(structured_err("too_many_calls", &format!("{} calls (max 10)", p.calls.len())));
         }
         let n = p.calls.len();
-        // Clone what we need and drop the read lock so execute doesn't
-        // block hot reload (which needs a write lock) during long calls.
+        let call_names: Vec<(String, String)> = p.calls.iter()
+            .map(|c| (c.server.clone(), c.tool.clone()))
+            .collect();
         let (registry, proxy_cfg) = {
             let guard = self.registry.read().await;
             (guard.clone(), guard.proxy.clone())
@@ -828,7 +829,15 @@ impl Proxy {
         }
 
         let mut results: Vec<serde_json::Value> = (0..n)
-            .map(|_| json!({"ok": false, "error": {"code": "internal_error", "message": "task panicked"}}))
+            .map(|i| {
+                let (server, tool) = &call_names[i];
+                json!({
+                    "server": server,
+                    "tool": tool,
+                    "ok": false,
+                    "error": {"code": "internal_error", "message": "task panicked"}
+                })
+            })
             .collect();
         let mut needs_health_update = false;
         while let Some(joined) = join.join_next().await {
