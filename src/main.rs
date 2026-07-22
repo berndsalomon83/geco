@@ -39,6 +39,8 @@ enum Cmd {
     Schema,
     /// Print runtime metrics from the last health.json write
     Stats,
+    /// Validate the config for common mistakes (missing keychain items, missing dirs, etc.)
+    Validate,
 }
 
 fn find_config(cli: &Cli) -> Result<PathBuf> {
@@ -107,6 +109,23 @@ async fn main() -> Result<()> {
                 eprintln!("{name:24} {:4} tools  {}", s.tools.len(), s.refresh_status);
             }
             eprintln!("snapshot: {}", snapshot_path.display());
+        }
+        Cmd::Validate => {
+            let findings = cfg.validate();
+            if findings.is_empty() {
+                eprintln!("config OK — no issues found");
+            } else {
+                let errors = findings.iter().filter(|(s, _)| s == "error").count();
+                let warnings = findings.iter().filter(|(s, _)| s == "warning").count();
+                for (severity, msg) in &findings {
+                    let icon = if severity == "error" { "ERROR" } else { "WARN " };
+                    eprintln!("{icon}: {msg}");
+                }
+                eprintln!("\n{} error(s), {} warning(s)", errors, warnings);
+                if errors > 0 {
+                    std::process::exit(1);
+                }
+            }
         }
         Cmd::Schema => {
             // Handled above before config loading — unreachable here, but

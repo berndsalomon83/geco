@@ -843,7 +843,13 @@ impl Proxy {
         let out: Vec<_> = idx
             .skills
             .iter()
-            .map(|s| json!({"name": s.name, "description": short_desc(&s.description, 100)}))
+            .map(|s| {
+                let mut entry = json!({"name": s.name, "description": short_desc(&s.description, 100)});
+                if let Some(v) = &s.version {
+                    entry["version"] = json!(v);
+                }
+                entry
+            })
             .collect();
         Ok(text_result(json!({"skills": out, "count": out.len()})))
     }

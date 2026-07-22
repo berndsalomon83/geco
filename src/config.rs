@@ -311,6 +311,68 @@ impl Config {
         serde_json::to_string_pretty(&schema).unwrap_or_default()
     }
 
+    /// Validate the config for common mistakes. Returns a list of
+    /// (severity, message) tuples — "error" means the proxy will fail
+    /// at runtime, "warning" means something might not work as expected.
+    pub fn validate(&self) -> Vec<(String, String)> {
+        let mut findings = Vec::new();
+
+        // Per-server checks.
+        for (name, s) in &self.servers {
+            if s.command.0.is_empty() {
+                findings.push(("error".into(),
+                    format!("server '{name}': empty command array")));
+            }
+            // Try keychain lookups — report missing items without spawning.
+            for (k, v) in &s.env {
+                if let Some(start) = v.find("${keychain:") {
+                    if let Some(end) = v[start..].find('}') {
+                        let service = &v[start + 11..start + end];
+                        if service.is_empty() {
+                            findings.push(("error".into(),
+                                format!("server '{name}': env '{k}' has empty keychain service name")));
+                        } else if keychain_lookup(service).is_err() {
+                            findings.push(("error".into(),
+                                format!("server '{name}': keychain item '{service}' not found (will fail at spawn)")));
+                        }
+                    }
+                }
+            }
+            // pass_env vars not in the proxy's env (warning).
+            for var in &s.pass_env {
+                if std::env::var(var).is_err() {
+                    findings.push(("warning".into(),
+                        format!("server '{name}': pass_env '{var}' not set in proxy environment")));
+                }
+            }
+            // Empty glob patterns.
+            for p in s.allow.iter().chain(s.deny.iter()) {
+                if p.is_empty() {
+                    findings.push(("warning".into(),
+                        format!("server '{name}': empty glob pattern in allow/deny")));
+                }
+            }
+        }
+
+        // Skills dir checks.
+        for dir in &self.skills.dirs {
+            let expanded = crate::skills::expand_tilde(dir);
+            if !expanded.exists() {
+                findings.push(("warning".into(),
+                    format!("skills.dirs: '{}' does not exist", dir)));
+            }
+        }
+        for dir in &self.skills.absorb {
+            let expanded = crate::skills::expand_tilde(dir);
+            if !expanded.exists() {
+                findings.push(("warning".into(),
+                    format!("skills.absorb: '{}' does not exist", dir)));
+            }
+        }
+
+        findings
+    }
+
     /// Stable hash over everything that affects the tool snapshot. Uses
     /// the raw (unexpanded) command/args/env strings — expanding `${...}`
     /// here would trigger keychain lookups as a side effect of hashing,
@@ -506,5 +568,41 @@ mcpServers:
         // Explicit env wins over pass_env.
         assert_eq!(envs["GECO_TEST_OVERRIDE"], "from_config");
         std::env::remove_var("GECO_TEST_OVERRIDE");
+    }
+
+    #[test]
+    fn validate_catches_missing_keychain() {
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${keychain:nonexistent-xyz-123}"}}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "error" && m.contains("nonexistent-xyz-123")),
+                "expected error about missing keychain item: {findings:?}");
+    }
+
+    #[test]
+    fn validate_warns_missing_pass_env() {
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_NONEXISTENT_XYZ"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("GECO_NONEXISTENT_XYZ")),
+                "expected warning about missing pass_env: {findings:?}");
+    }
+
+    #[test]
+    fn validate_warns_missing_skills_dir() {
+        let raw = r#"{"skills":{"dirs":["/nonexistent/path/xyz"]},"mcpServers":{"s":{"command":["npx"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("does not exist")),
+                "expected warning about missing skills dir: {findings:?}");
+    }
+
+    #[test]
+    fn validate_passes_clean_config() {
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"FOO":"bar"}}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        let errors: Vec<_> = findings.iter().filter(|(s, _)| s == "error").collect();
+        assert!(errors.is_empty(), "expected no errors for clean config: {findings:?}");
     }
 }

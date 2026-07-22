@@ -35,6 +35,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 pub struct SkillMeta {
     pub name: String,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     #[serde(skip)]
     pub dir: PathBuf,
 }
@@ -50,6 +52,8 @@ struct Frontmatter {
     name: Option<String>,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
@@ -153,8 +157,11 @@ impl SkillIndex {
                     .unwrap_or_else(|| {
                         path.file_name().unwrap_or_default().to_string_lossy().to_string()
                     });
-                let description = fm.map(|f| f.description).unwrap_or_default();
-                idx.skills.push(SkillMeta { name, description, dir: path });
+                let (description, version) = match fm {
+                    Some(f) => (f.description, f.version),
+                    None => (String::new(), None),
+                };
+                idx.skills.push(SkillMeta { name, description, version, dir: path });
             }
         }
         idx.skills.sort_by(|a, b| a.name.cmp(&b.name));

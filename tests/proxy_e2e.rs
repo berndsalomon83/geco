@@ -102,7 +102,7 @@ fn make_skill_library() -> tempfile::TempDir {
     let s1 = lib.join("test-planner");
     std::fs::create_dir_all(&s1).unwrap();
     std::fs::write(s1.join("SKILL.md"),
-        "---\nname: test-planner\ndescription: Plan tests systematically before writing them\n---\n\n# Test Planner\n\nBreak down test work.\n").unwrap();
+        "---\nname: test-planner\ndescription: Plan tests systematically before writing them\nversion: 1.2.0\n---\n\n# Test Planner\n\nBreak down test work.\n").unwrap();
     std::fs::create_dir_all(s1.join("scripts")).unwrap();
     std::fs::write(s1.join("scripts").join("run.sh"), "#!/bin/bash\necho planning\n").unwrap();
 
@@ -461,6 +461,12 @@ async fn skills_through_proxy() {
     let names: Vec<_> = skills.iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"test-planner"), "expected test-planner in {names:?}");
     assert!(names.contains(&"code-reviewer"), "expected code-reviewer in {names:?}");
+    // test-planner has a version in frontmatter; code-reviewer doesn't.
+    let planner = skills.iter().find(|s| s["name"] == "test-planner").unwrap();
+    assert_eq!(planner["version"], "1.2.0", "expected version 1.2.0: {planner}");
+    let reviewer = skills.iter().find(|s| s["name"] == "code-reviewer").unwrap();
+    assert!(reviewer.get("version").is_none() || reviewer["version"].is_null(),
+            "code-reviewer should have no version: {reviewer}");
 
     // search with kind="skills": "review" should find code-reviewer.
     let result = proxy

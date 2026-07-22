@@ -113,6 +113,7 @@ geco serve [--refresh|--no-refresh]   # run the proxy (default command)
 geco refresh                          # rebuild the snapshot and exit
 geco inspect                          # show the cached snapshot
 geco stats                            # show runtime metrics (calls, errors, latency)
+geco validate                         # check config for common mistakes
 geco schema                           # print the config JSON Schema (YAML + JSON)
 ```
 
