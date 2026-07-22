@@ -98,6 +98,12 @@ impl Backend {
             Ok(c) => {
                 let mut guard = self.conn.lock().await;
                 if let Some(existing) = guard.as_ref() {
+                    // Another task won the race — our child process will be
+                    // dropped (killed by Drop on the Conn). Log it.
+                    tracing::info!(
+                        "backend '{}': concurrent connect race — discarding our connection, using winner's",
+                        self.name
+                    );
                     return Ok(existing.clone());
                 }
                 *guard = Some(c.clone());
@@ -106,14 +112,18 @@ impl Backend {
                 Ok(c)
             }
             Err(e) => {
-                // Only mark as Failed if no other task stored a connection
-                // while we were blocked. A concurrent connect may have
-                // succeeded — don't overwrite its Up status.
                 let guard = self.conn.lock().await;
-                if guard.is_some() {
-                    // Another task connected successfully — don't clobber.
-                    return Err(e);
+                if let Some(existing) = guard.as_ref() {
+                    // Another task connected successfully while we failed.
+                    // Return their connection instead of the error — the
+                    // agent sees success, not a spurious backend_error.
+                    tracing::info!(
+                        "backend '{}': concurrent connect won after our failure — using winner's connection",
+                        self.name
+                    );
+                    return Ok(existing.clone());
                 }
+                drop(guard);
                 *self.status.lock().await = Status::Failed {
                     error: e.to_string(),
                     at: now(),

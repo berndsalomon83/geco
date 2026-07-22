@@ -887,7 +887,7 @@ impl Proxy {
                     entry.calls += 1;
                     if !ok { entry.errors += 1; }
                     if was_down { entry.cold_starts += 1; }
-                    entry.total_latency_ms += latency_ms;
+                    entry.total_latency_ms = entry.total_latency_ms.saturating_add(latency_ms);
                     entry.last_call_at = Some(crate::backend::now());
                 }
                 Err(e) => {

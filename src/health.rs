@@ -131,7 +131,14 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: 
         issues: body.issues,
         metrics: body.metrics,
     };
-    if let Ok(json) = serde_json::to_string_pretty(&report) {
+    let json = match serde_json::to_string_pretty(&report) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::error!("health: cannot serialize report: {e}");
+            return;
+        }
+    };
+    {
         static HEALTH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = path.with_extension(format!(
             "json.tmp.{}.{}",
