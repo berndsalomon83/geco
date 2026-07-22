@@ -199,17 +199,7 @@ fn structured_err_ctx(code: &str, message: &str, context: serde_json::Value) -> 
 impl Proxy {
     pub fn new(registry: Registry, snapshot: Snapshot, snapshot_path: PathBuf,
                config_path: PathBuf, skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
-        let mut absorb_issues = Self::absorb(&skill_dirs, &absorb_dirs);
-        let skills = SkillIndex::scan(&skill_dirs);
-        for e in &skills.errors {
-            tracing::warn!("skill scan error: {e}");
-            absorb_issues.push(Issue {
-                kind: "skills".into(),
-                subject: "scan".into(),
-                detail: e.clone(),
-                severity: "warning".into(),
-            });
-        }
+        let (skills, absorb_issues) = Self::absorb_and_scan(&skill_dirs, &absorb_dirs);
         Self {
             registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -352,23 +342,31 @@ impl Proxy {
         let new_hash = cfg.snapshot_hash();
         let new_registry = crate::backend::Registry::from_config(&cfg);
 
-        // Identify and shut down removed backends.
-        {
+        // Collect removed backends' Arcs before swapping the registry.
+        // We shut them down after the swap to avoid a TOCTOU window where
+        // execute could re-obtain a just-shut-down backend from the old registry.
+        let removed_backends: Vec<(String, std::sync::Arc<crate::backend::Backend>)> = {
             let old_registry = self.registry.read().await;
-            for (name, backend) in &old_registry.backends {
-                if !new_registry.backends.contains_key(name) {
-                    backend.shutdown().await;
-                    tracing::info!("hot-reload: shut down removed backend '{name}'");
-                }
-            }
-        }
+            old_registry.backends.iter()
+                .filter(|(name, _)| !new_registry.backends.contains_key(*name))
+                .map(|(n, b)| (n.clone(), b.clone()))
+                .collect()
+        };
 
         // Update skill dirs from the new config so hot-reload picks up
         // changes to skills.dirs / skills.absorb.
         *self.skill_dirs.write().await = cfg.skills.dirs.clone();
         *self.absorb_dirs.write().await = cfg.skills.absorb.clone();
 
+        // Swap the registry atomically.
         *self.registry.write().await = new_registry;
+
+        // Shut down removed backends after the swap. In-flight execute calls
+        // holding old Arcs will reconnect on their next call (conn was reset).
+        for (name, backend) in &removed_backends {
+            backend.shutdown().await;
+            tracing::info!("hot-reload: shut down removed backend '{name}'");
+        }
 
         // Rebuild snapshot — clone the registry and drop the read lock so
         // execute / list_mcp_servers aren't blocked during the build.
@@ -389,18 +387,7 @@ impl Proxy {
 
         let skill_dirs = self.skill_dirs.read().await.clone();
         let absorb_dirs = self.absorb_dirs.read().await.clone();
-        let fresh_absorb = Self::absorb(&skill_dirs, &absorb_dirs);
-        let mut issues = fresh_absorb;
-        let scanned = SkillIndex::scan(&skill_dirs);
-        for e in &scanned.errors {
-            tracing::warn!("skill scan error: {e}");
-            issues.push(Issue {
-                kind: "skills".into(),
-                subject: "scan".into(),
-                detail: e.clone(),
-                severity: "warning".into(),
-            });
-        }
+        let (scanned, issues) = Self::absorb_and_scan(&skill_dirs, &absorb_dirs);
         *self.absorb_issues.write().await = issues;
         *self.skills.write().await = scanned;
 
@@ -465,6 +452,24 @@ impl Proxy {
                 }
             })
             .collect()
+    }
+
+    /// Run absorb + skill scan and return (SkillIndex, issues).
+    /// Used by new(), reload_from_config(), and refresh_tools() to avoid
+    /// duplicating the absorb-then-scan-then-collect-errors pattern.
+    fn absorb_and_scan(skill_dirs: &[String], absorb_dirs: &[String]) -> (SkillIndex, Vec<Issue>) {
+        let mut issues = Self::absorb(skill_dirs, absorb_dirs);
+        let scanned = SkillIndex::scan(skill_dirs);
+        for e in &scanned.errors {
+            tracing::warn!("skill scan error: {e}");
+            issues.push(Issue {
+                kind: "skills".into(),
+                subject: "scan".into(),
+                detail: e.clone(),
+                severity: "warning".into(),
+            });
+        }
+        (scanned, issues)
     }
 
     #[tool(
@@ -671,7 +676,7 @@ impl Proxy {
                     }
                     Err(e) => {
                         let msg = format!("{e:#}");
-                        let code = if msg.contains("not allowed") { "not_allowed" }
+                        let code = if msg.starts_with("DENY:") { "not_allowed" }
                                    else if msg.contains("timed out") { "timeout" }
                                    else { "backend_error" };
                         (i, json!({
@@ -826,18 +831,7 @@ impl Proxy {
         }
         let skill_dirs = self.skill_dirs.read().await.clone();
         let absorb_dirs = self.absorb_dirs.read().await.clone();
-        let fresh_absorb = Self::absorb(&skill_dirs, &absorb_dirs);
-        let mut issues = fresh_absorb;
-        let scanned = SkillIndex::scan(&skill_dirs);
-        for e in &scanned.errors {
-            tracing::warn!("skill scan error: {e}");
-            issues.push(Issue {
-                kind: "skills".into(),
-                subject: "scan".into(),
-                detail: e.clone(),
-                severity: "warning".into(),
-            });
-        }
+        let (scanned, issues) = Self::absorb_and_scan(&skill_dirs, &absorb_dirs);
         *self.absorb_issues.write().await = issues;
         *self.skills.write().await = scanned;
         self.publish_health().await;

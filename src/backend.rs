@@ -113,7 +113,7 @@ impl Backend {
         proxy: &ProxyConfig,
     ) -> Result<CallToolResult> {
         if !self.cfg.tool_allowed(tool) {
-            bail!("tool '{tool}' is not allowed on server '{}' (allow/deny config)", self.name);
+            bail!("DENY: tool '{tool}' is not allowed on server '{}' (allow/deny config)", self.name);
         }
         let conn = self
             .connection(Duration::from_secs(proxy.startup_timeout_secs))

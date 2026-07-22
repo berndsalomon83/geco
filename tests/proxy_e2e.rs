@@ -146,7 +146,7 @@ async fn snapshot_execute_and_denylist() {
         .call("secret_tool", None, &registry.proxy)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("not allowed"));
+    assert!(err.to_string().contains("DENY:"));
 
     registry.shutdown_all().await;
 }
