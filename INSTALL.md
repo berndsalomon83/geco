@@ -54,7 +54,7 @@ The entries are the same shape — copy, paste, add a `description` (that's what
 geco refresh     # snapshot the moved servers once
 ```
 
-Restart the agent. Context cost for those servers drops to ~3.6 KB flat.
+Restart the agent. Context cost for those servers drops to ~3.4 KB flat.
 
 **Rule of thumb:** keep proactive-use servers (memory, core workflow) direct; gate everything you use occasionally.
 
@@ -69,7 +69,7 @@ In the agent: ask it to `search` for something you know is behind the proxy, the
 
 ## Config knobs
 
-`proxy.call_timeout_secs` (120), `proxy.startup_timeout_secs` (30 — raise for slow `npx` first-runs), `proxy.refresh_on_start` (true; refresh only happens when the config hash changed). Per server: `allow`/`deny` glob lists (deny wins, enforced at listing *and* execution), `enabled`, `${VAR}` expansion in `command`/`args`/`env`, and `${keychain:SERVICE}` for secrets resolved from the OS keychain at spawn time (see README → Secrets).
+`proxy.call_timeout_secs` (120), `proxy.startup_timeout_secs` (30 — raise for slow `npx` first-runs), `proxy.refresh_on_start` (true; refresh only happens when the config hash changed), `proxy.health_check_secs` (30; 0 disables). Per server: `allow`/`deny` glob lists (deny wins, enforced at listing *and* execution), `enabled`, `${VAR}` expansion in `command`/`args`/`env`, and `${keychain:SERVICE}` for secrets resolved from the OS keychain at spawn time (see README → Secrets).
 
 ## Uninstall
 
@@ -83,7 +83,7 @@ Re-add any servers you still want directly to your agent config afterwards.
 ## Troubleshooting
 
 - **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing env var or binary. Fix, then `geco refresh`.
-- **First `execute_tool` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm: `geco refresh`.
+- **First `execute` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm: `geco refresh`.
 - **Agent can't see a newly installed backend tool** — `refresh_tools` meta-tool, or `geco refresh`.
 - **Where are logs?** stderr of the proxy process (your agent's MCP log view), `RUST_LOG=debug` for detail.
 

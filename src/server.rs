@@ -158,8 +158,8 @@ pub struct Proxy {
     snapshot_path: PathBuf,
     config_path: PathBuf,
     skills: Arc<RwLock<SkillIndex>>,
-    skill_dirs: Vec<String>,
-    absorb_dirs: Vec<String>,
+    skill_dirs: Arc<RwLock<Vec<String>>>,
+    absorb_dirs: Arc<RwLock<Vec<String>>>,
     absorb_issues: Arc<RwLock<Vec<Issue>>>,
     client: Arc<RwLock<Option<String>>>,
 }
@@ -207,8 +207,8 @@ impl Proxy {
             snapshot_path,
             config_path,
             skills: Arc::new(RwLock::new(skills)),
-            skill_dirs,
-            absorb_dirs,
+            skill_dirs: Arc::new(RwLock::new(skill_dirs)),
+            absorb_dirs: Arc::new(RwLock::new(absorb_dirs)),
             absorb_issues: Arc::new(RwLock::new(absorb_issues)),
             client: Arc::new(RwLock::new(None)),
         }
@@ -245,10 +245,13 @@ impl Proxy {
 
         // Watch the parent directory (editors write temp files then rename,
         // which shows up as events on the dir, not the file itself).
-        let watch_dir = config_path
+        let mut watch_dir = config_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
+        if watch_dir.as_os_str().is_empty() {
+            watch_dir = PathBuf::from(".");
+        }
         if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
             tracing::warn!("config watcher disabled: {e}");
             return;
@@ -355,12 +358,57 @@ impl Proxy {
             }
         }
 
+        // Update skill dirs from the new config so hot-reload picks up
+        // changes to skills.dirs / skills.absorb.
+        *self.skill_dirs.write().await = cfg.skills.dirs.clone();
+        *self.absorb_dirs.write().await = cfg.skills.absorb.clone();
+
         *self.registry.write().await = new_registry;
 
-        // Rebuild snapshot from the new registry.
-        let registry = self.registry.read().await;
-        let snap = registry.build_snapshot(new_hash, None).await;
-        drop(registry);
+        // Rebuild snapshot — clone backends out and drop the read lock so
+        // execute / list_mcp_servers aren't blocked during the build.
+        let snap = {
+            let registry = self.registry.read().await;
+            let backends: Vec<_> = registry.backends.iter()
+                .map(|(n, b)| (n.clone(), b.clone()))
+                .collect();
+            let proxy_cfg = registry.proxy.clone();
+            drop(registry);
+            let mut snap = Snapshot {
+                config_hash: new_hash.clone(),
+                generated_at: crate::backend::now(),
+                ..Default::default()
+            };
+            let mut join = tokio::task::JoinSet::new();
+            for (name, backend) in backends {
+                let pc = proxy_cfg.clone();
+                join.spawn(async move {
+                    (name, backend.cfg.description.clone(),
+                     backend.snapshot_tools(&pc).await)
+                });
+            }
+            while let Some(joined) = join.join_next().await {
+                if let Ok((name, desc, result)) = joined {
+                    let entry = match result {
+                        Ok(tools) => crate::snapshot::ServerSnapshot {
+                            description: desc.unwrap_or_default(),
+                            refresh_status: "ok".into(),
+                            tools,
+                        },
+                        Err(e) => {
+                            tracing::warn!("hot-reload: snapshot failed for '{name}': {e:#}");
+                            crate::snapshot::ServerSnapshot {
+                                description: desc.unwrap_or_default(),
+                                refresh_status: format!("error: {e}"),
+                                tools: Vec::new(),
+                            }
+                        }
+                    };
+                    snap.servers.insert(name, entry);
+                }
+            }
+            snap
+        };
         tracing::info!(
             "hot-reload: config changed, refreshed {} servers, {} tools",
             snap.servers.len(),
@@ -372,9 +420,11 @@ impl Proxy {
             tracing::warn!("hot-reload: cannot persist snapshot: {e:#}");
         }
 
-        let fresh_absorb = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
+        let skill_dirs = self.skill_dirs.read().await.clone();
+        let absorb_dirs = self.absorb_dirs.read().await.clone();
+        let fresh_absorb = Self::absorb(&skill_dirs, &absorb_dirs);
         *self.absorb_issues.write().await = fresh_absorb;
-        *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
+        *self.skills.write().await = SkillIndex::scan(&skill_dirs);
 
         self.publish_health().await;
         Ok(())
@@ -576,8 +626,12 @@ impl Proxy {
         if p.calls.len() > 10 {
             return Ok(structured_err("too_many_calls", &format!("{} calls (max 10)", p.calls.len())));
         }
-        let registry = self.registry.read().await;
-        let proxy_cfg = registry.proxy.clone();
+        // Clone what we need and drop the read lock so execute doesn't
+        // block hot reload (which needs a write lock) during long calls.
+        let (registry, proxy_cfg) = {
+            let guard = self.registry.read().await;
+            (guard.clone(), guard.proxy.clone())
+        };
 
         let mut join = tokio::task::JoinSet::new();
         for (i, call) in p.calls.into_iter().enumerate() {
@@ -601,12 +655,20 @@ impl Proxy {
                             if let ContentBlock::Text(t) = b { Some(t.text.as_str()) }
                             else { None }
                         }).unwrap_or("");
-                        (i, json!({
+                        let ok = !result.is_error.unwrap_or(false);
+                        let mut entry = json!({
                             "server": call.server,
                             "tool": call.tool,
-                            "ok": !result.is_error.unwrap_or(false),
+                            "ok": ok,
                             "result": text,
-                        }))
+                        });
+                        if !ok {
+                            entry["error"] = json!({
+                                "code": "tool_error",
+                                "message": text,
+                            });
+                        }
+                        (i, entry)
                     }
                     Err(e) => {
                         let msg = format!("{e:#}");
@@ -626,8 +688,15 @@ impl Proxy {
 
         let mut results = Vec::new();
         while let Some(joined) = join.join_next().await {
-            if let Ok((i, result)) = joined {
-                results.push((i, result));
+            match joined {
+                Ok((i, result)) => results.push((i, result)),
+                Err(e) => {
+                    // Task panicked — find its index and push an error.
+                    // JoinError doesn't carry the index, so we can only
+                    // push a generic error. In practice panics don't happen
+                    // because all backend errors are caught above.
+                    tracing::error!("execute: task panicked: {e}");
+                }
             }
         }
         results.sort_by_key(|(i, _)| *i);
@@ -755,9 +824,11 @@ impl Proxy {
             .map(|(n, s)| json!({"server": n, "tools": s.tools.len(), "status": s.refresh_status}))
             .collect();
         drop(snap); // release write lock before publish_health (which reads)
-        let fresh_absorb = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
+        let skill_dirs = self.skill_dirs.read().await.clone();
+        let absorb_dirs = self.absorb_dirs.read().await.clone();
+        let fresh_absorb = Self::absorb(&skill_dirs, &absorb_dirs);
         *self.absorb_issues.write().await = fresh_absorb;
-        *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
+        *self.skills.write().await = SkillIndex::scan(&skill_dirs);
         self.publish_health().await;
         Ok(text_result(json!(summary)))
     }

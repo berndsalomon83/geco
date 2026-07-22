@@ -94,7 +94,7 @@ Add one line to your global AGENTS.md so models reach for it: *Before specialize
 
 Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `description` (shown in `list_mcp_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`.
 
-`proxy` section: `call_timeout_secs` (default 120), `startup_timeout_secs` (30), `refresh_on_start` (true).
+`proxy` section: `call_timeout_secs` (default 120), `startup_timeout_secs` (30), `refresh_on_start` (true), `health_check_secs` (30; 0 disables dead-backend detection).
 
 ### Secrets
 

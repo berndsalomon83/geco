@@ -35,7 +35,7 @@ pub struct Backend {
     status: Mutex<Status>,
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
