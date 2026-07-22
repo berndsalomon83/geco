@@ -10,7 +10,7 @@ Rust toolchain (rustup.rs), `python3` (used by the scripts for JSON handling). B
 bash install.sh
 ```
 
-Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 9 meta-tools.
+Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 10 meta-tools.
 
 ## Migrate servers behind the proxy
 

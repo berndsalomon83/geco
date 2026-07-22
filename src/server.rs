@@ -1,6 +1,6 @@
-//! The proxy's own MCP surface: nine small meta-tools instead of every
+//! The proxy's own MCP surface: ten small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~3.6 KB no matter how many tools hide behind the gate.
+//! ~3.8 KB no matter how many tools hide behind the gate.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -123,6 +123,26 @@ pub struct ExecuteParams {
     #[serde(default, deserialize_with = "opt_args_lenient")]
     #[schemars(with = "JsonObject")]
     pub arguments: Option<JsonObject>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BatchCall {
+    /// Server name from list_servers / search_tools
+    pub server: String,
+    /// Tool name on that server
+    pub tool: String,
+    /// Arguments for the tool as a JSON object
+    #[serde(default, deserialize_with = "opt_args_lenient")]
+    #[schemars(with = "JsonObject")]
+    pub arguments: Option<JsonObject>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BatchParams {
+    /// Up to 10 tool calls to execute in parallel across backends.
+    /// Same-backend calls serialize naturally; cross-backend calls run
+    /// concurrently. Results are returned in the same order as the input.
+    pub calls: Vec<BatchCall>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -535,6 +555,77 @@ impl Proxy {
     }
 
     #[tool(
+        description = "Execute multiple tool calls in one round-trip. Calls to different backends run in parallel; same-backend calls serialize. Results are returned in input order. Max 10 calls."
+    )]
+    pub async fn execute_batch(
+        &self,
+        Parameters(p): Parameters<BatchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.calls.is_empty() {
+            return Ok(err("no calls in batch".into()));
+        }
+        if p.calls.len() > 10 {
+            return Ok(err(format!("batch too large: {} calls (max 10)", p.calls.len())));
+        }
+        let registry = self.registry.read().await;
+        let proxy_cfg = registry.proxy.clone();
+
+        // Spawn one task per call. Same-backend calls share the same
+        // Arc<Backend> and its conn Mutex, so they serialize naturally;
+        // cross-backend calls run concurrently.
+        let mut join = tokio::task::JoinSet::new();
+        for (i, call) in p.calls.into_iter().enumerate() {
+            let registry = registry.clone();
+            let proxy_cfg = proxy_cfg.clone();
+            join.spawn(async move {
+                let backend = match registry.get(&call.server) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return (i, json!({
+                            "server": call.server,
+                            "tool": call.tool,
+                            "ok": false,
+                            "error": e.to_string(),
+                        }));
+                    }
+                };
+                match backend.call(&call.tool, call.arguments, &proxy_cfg).await {
+                    Ok(result) => {
+                        let text = result.content.iter().find_map(|b| {
+                            if let ContentBlock::Text(t) = b { Some(t.text.as_str()) }
+                            else { None }
+                        }).unwrap_or("");
+                        (i, json!({
+                            "server": call.server,
+                            "tool": call.tool,
+                            "ok": !result.is_error.unwrap_or(false),
+                            "result": text,
+                        }))
+                    }
+                    Err(e) => {
+                        (i, json!({
+                            "server": call.server,
+                            "tool": call.tool,
+                            "ok": false,
+                            "error": format!("{e:#}"),
+                        }))
+                    }
+                }
+            });
+        }
+
+        let mut results = Vec::new();
+        while let Some(joined) = join.join_next().await {
+            if let Ok((i, result)) = joined {
+                results.push((i, result));
+            }
+        }
+        results.sort_by_key(|(i, _)| *i);
+        let results: Vec<_> = results.into_iter().map(|(_, r)| r).collect();
+        Ok(text_result(json!(results)))
+    }
+
+    #[tool(
         description = "List every available agent skill (name + one-line description). Use when asked what skills exist; use search_skills for targeted lookup."
     )]
     pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
@@ -696,8 +787,9 @@ impl ServerHandler for Proxy {
             .with_instructions(
                 "Gateway to multiple MCP servers whose tools load on demand instead of \
                  polluting your context. Flow: search_tools (with include_schema=true to \
-                 get input schemas inline) → execute_tool, or list_servers → get_tools \
-                 → execute_tool. Backends start lazily on first execution."
+                 get input schemas inline) → execute_tool (or execute_batch for multiple \
+                 independent calls), or list_servers → get_tools → execute_tool. \
+                 Backends start lazily on first execution."
                     .to_string(),
             )
     }

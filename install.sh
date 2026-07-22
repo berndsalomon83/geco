@@ -73,8 +73,8 @@ TOOLS=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protoco
 for l in sys.stdin:
     m=json.loads(l)
     if m.get("id")==2: print(len(m["result"]["tools"]))' || echo 0)
-# 9 meta-tools: 5 gateway + 3 skills + health
-[ "$TOOLS" = "9" ] && say "Proxy OK: 9 meta-tools (5 gateway + 3 skills + health)" || warn "expected 9 meta-tools, got: $TOOLS"
+# 10 meta-tools: 6 gateway + 3 skills + health
+[ "$TOOLS" = "10" ] && say "Proxy OK: 10 meta-tools (6 gateway + 3 skills + health)" || warn "expected 10 meta-tools, got: $TOOLS"
 
 # Companion opencode TUI plugin: toasts gateway health problems in-app.
 OC_PLUGIN_DIR="$HOME/.config/opencode/plugin"

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use geco::backend::Registry;
 use geco::config::Config;
 use geco::server::{
-    ExecuteParams, GetToolsParams, Proxy, RefreshParams, SearchParams, SearchSkillsParams,
-    ReadSkillParams,
+    BatchCall, BatchParams, ExecuteParams, GetToolsParams, Proxy, RefreshParams, SearchParams,
+    SearchSkillsParams, ReadSkillParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ContentBlock;
@@ -630,6 +630,116 @@ async fn check_health_detects_dead_backend() {
     let result = backend.call("add", Some(args), &registry.proxy).await.unwrap();
     let text = format!("{:?}", result.content);
     assert!(text.contains("5"), "expected 5 after reconnect: {text}");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn execute_batch_through_proxy() {
+    // Test batch execution: multiple calls in one round-trip, results
+    // in input order, errors don't abort the whole batch.
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // Batch with 3 calls to the same backend (serializes naturally):
+    // add(1+2), echo("hello"), add(40+2).
+    let result = proxy
+        .execute_batch(Parameters(BatchParams {
+            calls: vec![
+                BatchCall {
+                    server: "stub".into(),
+                    tool: "add".into(),
+                    arguments: Some(serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone()),
+                },
+                BatchCall {
+                    server: "stub".into(),
+                    tool: "echo".into(),
+                    arguments: Some(serde_json::json!({"text": "hello batch"}).as_object().unwrap().clone()),
+                },
+                BatchCall {
+                    server: "stub".into(),
+                    tool: "add".into(),
+                    arguments: Some(serde_json::json!({"a": 40, "b": 2}).as_object().unwrap().clone()),
+                },
+            ],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let results = json.as_array().unwrap();
+    assert_eq!(results.len(), 3, "expected 3 results: {json}");
+    assert_eq!(results[0]["tool"], "add");
+    assert!(results[0]["result"].as_str().unwrap_or("").contains("3"), "expected 3: {json}");
+    assert_eq!(results[1]["tool"], "echo");
+    assert!(results[1]["result"].as_str().unwrap_or("").contains("hello batch"), "expected echo: {json}");
+    assert_eq!(results[2]["tool"], "add");
+    assert!(results[2]["result"].as_str().unwrap_or("").contains("42"), "expected 42: {json}");
+    assert!(results.iter().all(|r| r["ok"] == true), "all calls should succeed: {json}");
+
+    // Batch with an error (unknown tool) — the other call should still succeed.
+    let result = proxy
+        .execute_batch(Parameters(BatchParams {
+            calls: vec![
+                BatchCall {
+                    server: "stub".into(),
+                    tool: "add".into(),
+                    arguments: Some(serde_json::json!({"a": 10, "b": 5}).as_object().unwrap().clone()),
+                },
+                BatchCall {
+                    server: "stub".into(),
+                    tool: "nonexistent".into(),
+                    arguments: None,
+                },
+            ],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let results = json.as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results[0]["ok"] == true, "first call should succeed: {json}");
+    assert!(results[1]["ok"] == false, "second call should fail: {json}");
+    assert!(results[1]["result"].as_str().unwrap_or("").contains("unknown tool")
+            || results[1].get("error").is_some(),
+            "expected error for unknown tool: {json}");
+
+    // Batch with an unknown server — error, not a crash.
+    let result = proxy
+        .execute_batch(Parameters(BatchParams {
+            calls: vec![BatchCall {
+                server: "nope".into(),
+                tool: "add".into(),
+                arguments: None,
+            }],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let results = json.as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0]["ok"] == false, "unknown server should fail: {json}");
+
+    // Empty batch returns an error.
+    let result = proxy
+        .execute_batch(Parameters(BatchParams { calls: vec![] }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "empty batch should error");
+
+    // Too many calls (>10) returns an error.
+    let calls: Vec<_> = (0..11).map(|_| BatchCall {
+        server: "stub".into(),
+        tool: "echo".into(),
+        arguments: Some(serde_json::json!({"text": "x"}).as_object().unwrap().clone()),
+    }).collect();
+    let result = proxy
+        .execute_batch(Parameters(BatchParams { calls }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "batch >10 should error");
 
     registry.shutdown_all().await;
 }
