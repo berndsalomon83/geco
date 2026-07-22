@@ -64,7 +64,9 @@ fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
 
 pub fn expand_tilde(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+        // On Windows, HOME is typically unset — fall back to USERPROFILE.
+        let home = std::env::var_os("HOME").or(std::env::var_os("USERPROFILE"));
+        if let Some(home) = home {
             return PathBuf::from(home).join(rest);
         }
     }

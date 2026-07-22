@@ -53,9 +53,10 @@ fn find_config(cli: &Cli) -> Result<PathBuf> {
             return Ok(local);
         }
     }
-    // ~/.config/geco/config.{yaml,yml,json} on every platform (predictable),
-    // then the platform-native config dir as a fallback.
-    if let Some(home) = std::env::var_os("HOME") {
+    // ~/.config/geco/config.{yaml,yml,json} on every platform (predictable).
+    // On Windows, HOME is typically unset — fall back to USERPROFILE.
+    let home = std::env::var_os("HOME").or(std::env::var_os("USERPROFILE"));
+    if let Some(home) = home {
         let dir = PathBuf::from(&home).join(".config/geco");
         for name in ["config.yaml", "config.yml", "config.json"] {
             let p = dir.join(name);

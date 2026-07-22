@@ -63,6 +63,10 @@ if (-not (Test-Path $Cfg)) {
     Say "Config already exists at $Cfg (kept)"
 }
 
+# Generate editor schema.
+Say "Generating config schema..."
+& $Dest schema | Set-Content (Join-Path $CfgDir "geco.schema.json")
+
 # Build snapshot + verify.
 Say "Building initial snapshot..."
 & $Dest --config $Cfg refresh 2>&1 | ForEach-Object { Write-Host $_ }
