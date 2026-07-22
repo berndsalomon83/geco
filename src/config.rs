@@ -58,11 +58,24 @@ pub struct SkillsConfig {
 
 /// "command": "npx" + "args": [...]  (Claude style)  — or —
 /// "command": ["npx", "-y", "server"] (OpenCode style)
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum CommandField {
-    Line(Vec<String>),
-    Bin(String),
+/// Both forms deserialize to Vec<String>: a bare string becomes ["string"].
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct CommandField(Vec<String>);
+
+impl<'de> Deserialize<'de> for CommandField {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Line(Vec<String>),
+            Bin(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Line(l) => Ok(CommandField(l)),
+            Raw::Bin(b) => Ok(CommandField(vec![b])),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -93,14 +106,12 @@ fn default_true() -> bool {
 impl ServerConfig {
     /// Resolved (binary, argv) with `${VAR}` env expansion applied.
     pub fn command_line(&self) -> Result<(String, Vec<String>)> {
-        let (bin, mut argv) = match &self.command {
-            CommandField::Bin(b) => (b.clone(), Vec::new()),
-            CommandField::Line(l) => {
-                let Some((first, rest)) = l.split_first() else {
-                    bail!("empty command array");
-                };
-                (first.clone(), rest.to_vec())
-            }
+        let (bin, mut argv) = {
+            let cmd = &self.command.0;
+            let Some((first, rest)) = cmd.split_first() else {
+                bail!("empty command array");
+            };
+            (first.clone(), rest.to_vec())
         };
         argv.extend(self.args.iter().cloned());
         let bin = expand_value(&bin)?;
@@ -273,13 +284,8 @@ impl Config {
         let mut hasher = Sha256::new();
         for (name, s) in &self.servers {
             hasher.update(name.as_bytes());
-            match &s.command {
-                CommandField::Bin(b) => hasher.update(b.as_bytes()),
-                CommandField::Line(l) => {
-                    for part in l {
-                        hasher.update(part.as_bytes());
-                    }
-                }
+            for part in &s.command.0 {
+                hasher.update(part.as_bytes());
             }
             for a in &s.args {
                 hasher.update(a.as_bytes());

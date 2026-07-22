@@ -38,7 +38,6 @@ const tuiPlugin: TuiPlugin = async (api) => {
   const { ui } = api
   const file = healthPath()
   let lastKey = ""          // fingerprint of the last problem set we showed
-  let lastGen = -1
 
   const fingerprint = (r: Report) =>
     r.issues.map((i) => `${i.kind}:${i.subject}:${i.detail}`).sort().join("|")
@@ -63,8 +62,6 @@ const tuiPlugin: TuiPlugin = async (api) => {
     } catch {
       return
     }
-    if (r.generation === lastGen) return
-    lastGen = r.generation
 
     const key = fingerprint(r)
     if (key === lastKey) return // same problem set, already shown

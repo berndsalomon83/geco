@@ -66,7 +66,7 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>) {
         // best-effort atomic-ish write
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+            let _ = std::fs::rename(tmp, path);
         }
     }
 }
