@@ -162,6 +162,7 @@ pub struct Proxy {
     absorb_dirs: Arc<RwLock<Vec<String>>>,
     absorb_issues: Arc<RwLock<Vec<Issue>>>,
     client: Arc<RwLock<Option<String>>>,
+    metrics: Arc<RwLock<crate::health::Metrics>>,
 }
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
@@ -200,6 +201,10 @@ impl Proxy {
     pub fn new(registry: Registry, snapshot: Snapshot, snapshot_path: PathBuf,
                config_path: PathBuf, skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
         let (skills, absorb_issues) = Self::absorb_and_scan(&skill_dirs, &absorb_dirs);
+        let metrics = crate::health::Metrics {
+            started_at: crate::backend::now(),
+            ..Default::default()
+        };
         Self {
             registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -210,6 +215,7 @@ impl Proxy {
             absorb_dirs: Arc::new(RwLock::new(absorb_dirs)),
             absorb_issues: Arc::new(RwLock::new(absorb_issues)),
             client: Arc::new(RwLock::new(None)),
+            metrics: Arc::new(RwLock::new(metrics)),
         }
     }
 
@@ -405,7 +411,13 @@ impl Proxy {
     pub async fn publish_health(&self) {
         let issues = self.all_issues().await;
         let client = self.client.read().await.clone();
-        health::write(client.as_deref(), issues);
+        let metrics = self.metrics.read().await.clone();
+        health::write(client.as_deref(), issues, Some(metrics));
+    }
+
+    /// Snapshot of the current metrics (for testing).
+    pub async fn metrics_snapshot(&self) -> crate::health::Metrics {
+        self.metrics.read().await.clone()
     }
 
     /// The current full issue set (backends + absorb) — used by the
@@ -630,6 +642,7 @@ impl Proxy {
             let registry = registry.clone();
             let proxy_cfg = proxy_cfg.clone();
             join.spawn(async move {
+                let start = std::time::Instant::now();
                 let backend = match registry.get(&call.server) {
                     Ok(b) => b,
                     Err(_) => {
@@ -638,11 +651,13 @@ impl Proxy {
                             "tool": call.tool,
                             "ok": false,
                             "error": { "code": "unknown_server", "message": format!("server '{}' not found", call.server) },
-                        }));
+                        }), start.elapsed().as_millis() as u64, false);
                     }
                 };
+                let was_cold = matches!(backend.status().await, crate::backend::Status::Cold);
                 match backend.call(&call.tool, call.arguments, &proxy_cfg).await {
                     Ok(result) => {
+                        let elapsed = start.elapsed().as_millis() as u64;
                         // Concatenate all text blocks; note non-text blocks.
                         let mut text = result.content.iter()
                             .filter_map(|b| {
@@ -672,9 +687,10 @@ impl Proxy {
                                 "message": text,
                             });
                         }
-                        (i, entry)
+                        (i, entry, elapsed, was_cold)
                     }
                     Err(e) => {
+                        let elapsed = start.elapsed().as_millis() as u64;
                         let msg = format!("{e:#}");
                         let code = if msg.starts_with("DENY:") { "not_allowed" }
                                    else if msg.contains("timed out") { "timeout" }
@@ -684,21 +700,34 @@ impl Proxy {
                             "tool": call.tool,
                             "ok": false,
                             "error": { "code": code, "message": msg },
-                        }))
+                        }), elapsed, was_cold)
                     }
                 }
             });
         }
 
-        // Pre-fill all slots — if a task panics, the slot keeps its
-        // placeholder so the agent sees a result for every call.
         let mut results: Vec<serde_json::Value> = (0..n)
             .map(|_| json!({"ok": false, "error": {"code": "internal_error", "message": "task panicked"}}))
             .collect();
         while let Some(joined) = join.join_next().await {
             match joined {
-                Ok((i, result)) => {
-                    if i < n { results[i] = result; }
+                Ok((i, result, latency_ms, was_cold)) => {
+                    if i < n {
+                        results[i] = result;
+                    }
+                    // Record metrics per call.
+                    let server = results[i]["server"].as_str().unwrap_or("").to_string();
+                    let ok = results[i]["ok"].as_bool().unwrap_or(false);
+                    let mut metrics = self.metrics.write().await;
+                    metrics.total_calls += 1;
+                    if !ok { metrics.total_errors += 1; }
+                    let entry = metrics.per_backend.entry(server.clone())
+                        .or_default();
+                    entry.calls += 1;
+                    if !ok { entry.errors += 1; }
+                    if was_cold { entry.cold_starts += 1; }
+                    entry.total_latency_ms += latency_ms;
+                    entry.last_call_at = Some(crate::backend::now());
                 }
                 Err(e) => {
                     tracing::error!("execute: task panicked: {e}");

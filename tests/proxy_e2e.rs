@@ -758,3 +758,37 @@ async fn execute_batch_through_proxy() {
 
     registry.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn execute_records_metrics() {
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // Make a couple of calls.
+    let args = serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone();
+    let _ = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+        }))
+        .await
+        .unwrap();
+
+    let args = serde_json::json!({"a": 3, "b": 4}).as_object().unwrap().clone();
+    let _ = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+        }))
+        .await
+        .unwrap();
+
+    // Check metrics.
+    let metrics = proxy.metrics_snapshot().await;
+    assert_eq!(metrics.total_calls, 2, "expected 2 total calls");
+    assert_eq!(metrics.total_errors, 0, "expected 0 errors");
+    let stub = &metrics.per_backend["stub"];
+    assert_eq!(stub.calls, 2, "expected 2 stub calls");
+    assert!(stub.cold_starts >= 1, "expected at least 1 cold start");
+    assert!(stub.last_call_at.is_some(), "last_call_at should be set");
+
+    registry.shutdown_all().await;
+}

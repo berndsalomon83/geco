@@ -37,6 +37,8 @@ enum Cmd {
     Inspect,
     /// Print the config JSON Schema (valid for YAML and JSON configs)
     Schema,
+    /// Print runtime metrics from the last health.json write
+    Stats,
 }
 
 fn find_config(cli: &Cli) -> Result<PathBuf> {
@@ -125,6 +127,30 @@ async fn main() -> Result<()> {
                     }
                 }
                 None => eprintln!("no snapshot yet — run: geco refresh"),
+            }
+        }
+        Cmd::Stats => {
+            let health_path = geco::health::health_path();
+            match geco::health::read(&health_path) {
+                Some(report) => {
+                    if let Some(metrics) = &report.metrics {
+                        eprintln!("geco metrics (since {})", metrics.started_at);
+                        eprintln!("  total calls:    {}", metrics.total_calls);
+                        eprintln!("  total errors:   {}", metrics.total_errors);
+                        eprintln!();
+                        eprintln!("{:24} {:>6} {:>6} {:>5} {:>8}  last_call", "server", "calls", "errors", "cold", "avg_ms");
+                        for (name, m) in &metrics.per_backend {
+                            let avg = if m.calls > 0 { m.total_latency_ms.checked_div(m.calls).unwrap_or(0) } else { 0 };
+                            eprintln!("{name:24} {calls:>6} {errors:>6} {cold:>5} {avg:>8}  {last}",
+                                       calls = m.calls, errors = m.errors,
+                                       cold = m.cold_starts, avg = avg,
+                                       last = m.last_call_at.as_deref().unwrap_or("-"));
+                        }
+                    } else {
+                        eprintln!("no metrics in {} (proxy not running or old version)", health_path.display());
+                    }
+                }
+                None => eprintln!("no health file at {} — is the proxy running?", health_path.display()),
             }
         }
         Cmd::Serve { refresh, no_refresh } => {

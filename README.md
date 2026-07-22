@@ -112,6 +112,7 @@ Store it once: `security add-generic-password -a "$USER" -s github_token -w '<to
 geco serve [--refresh|--no-refresh]   # run the proxy (default command)
 geco refresh                          # rebuild the snapshot and exit
 geco inspect                          # show the cached snapshot
+geco stats                            # show runtime metrics (calls, errors, latency)
 geco schema                           # print the config JSON Schema (YAML + JSON)
 ```
 

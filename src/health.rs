@@ -32,6 +32,23 @@ pub struct Issue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BackendMetrics {
+    pub calls: u64,
+    pub errors: u64,
+    pub cold_starts: u64,
+    pub total_latency_ms: u64,
+    pub last_call_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Metrics {
+    pub started_at: String,
+    pub total_calls: u64,
+    pub total_errors: u64,
+    pub per_backend: std::collections::BTreeMap<String, BackendMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthReport {
     pub generation: u64,
     pub updated_at: String,
@@ -40,6 +57,8 @@ pub struct HealthReport {
     pub client: Option<String>,
     pub healthy: bool,
     pub issues: Vec<Issue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Metrics>,
 }
 
 pub fn health_path() -> PathBuf {
@@ -51,7 +70,7 @@ pub fn health_path() -> PathBuf {
 
 /// Write the current problem set to a specific path (test-friendly; the
 /// production path is `health_path()`). Empty issues == healthy.
-pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>) {
+pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: Option<Metrics>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -61,6 +80,7 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>) {
         client: client.map(str::to_string),
         healthy: issues.is_empty(),
         issues,
+        metrics,
     };
     if let Ok(json) = serde_json::to_string_pretty(&report) {
         // best-effort atomic-ish write
@@ -73,8 +93,8 @@ pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>) {
 
 /// Write the current problem set. Empty issues == healthy (and that itself is
 /// worth writing, so the plugin can clear a stale warning).
-pub fn write(client: Option<&str>, issues: Vec<Issue>) {
-    write_to(&health_path(), client, issues);
+pub fn write(client: Option<&str>, issues: Vec<Issue>, metrics: Option<Metrics>) {
+    write_to(&health_path(), client, issues, metrics);
 }
 
 pub fn read(path: &Path) -> Option<HealthReport> {
@@ -96,12 +116,12 @@ mod tests {
             detail: "endpoint down".into(),
             severity: "error".into(),
         }];
-        write_to(&path, Some("opencode"), issues.clone());
+        write_to(&path, Some("opencode"), issues.clone(), None);
         let r1 = read(&path).unwrap();
         assert_eq!(r1.client.as_deref(), Some("opencode"));
         assert!(!r1.healthy);
         assert_eq!(r1.issues.len(), 1);
-        write_to(&path, Some("opencode"), vec![]);
+        write_to(&path, Some("opencode"), vec![], None);
         let r2 = read(&path).unwrap();
         assert!(r2.healthy);
         assert!(r2.generation > r1.generation);
