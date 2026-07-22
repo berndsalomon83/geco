@@ -178,8 +178,9 @@ async fn refresh_tools_does_not_deadlock() {
     .await;
     assert!(result3.is_ok(), "unknown-server refresh_tools timed out");
     let result3 = result3.unwrap().unwrap();
-    let text3 = format!("{result3:?}");
-    assert!(text3.contains("unknown server"), "expected error for unknown server: {text3}");
+    assert!(is_error(&result3), "unknown server should error");
+    let json = extract_json(&result3);
+    assert_eq!(json["error"]["code"], "unknown_server", "expected unknown_server code: {json}");
 
     registry.shutdown_all().await;
 }
@@ -285,6 +286,8 @@ async fn list_tools_through_proxy() {
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown server");
+    let json = extract_json(&result);
+    assert_eq!(json["error"]["code"], "unknown_server", "expected unknown_server: {json}");
 
     // Unknown tool returns an error.
     let result = proxy
@@ -292,6 +295,8 @@ async fn list_tools_through_proxy() {
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown tool");
+    let json = extract_json(&result);
+    assert_eq!(json["error"]["code"], "unknown_tool", "expected unknown_tool: {json}");
 
     registry.shutdown_all().await;
 }
@@ -348,6 +353,8 @@ async fn search_through_proxy() {
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for no matches");
+    let json = extract_json(&result);
+    assert_eq!(json["error"]["code"], "no_matches", "expected no_matches: {json}");
 
     registry.shutdown_all().await;
 }
@@ -393,6 +400,7 @@ async fn execute_through_proxy() {
         .unwrap();
     let json = extract_json(&result);
     assert!(json[0]["ok"] == false, "denied tool should fail: {json}");
+    assert_eq!(json[0]["error"]["code"], "not_allowed", "expected not_allowed: {json}");
 
     // Unknown server.
     let result = proxy
@@ -403,6 +411,7 @@ async fn execute_through_proxy() {
         .unwrap();
     let json = extract_json(&result);
     assert!(json[0]["ok"] == false, "unknown server should fail: {json}");
+    assert_eq!(json[0]["error"]["code"], "unknown_server", "expected unknown_server: {json}");
 
     // Unknown tool on a valid server.
     let result = proxy
@@ -466,6 +475,8 @@ async fn skills_through_proxy() {
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for no skill matches");
+    let json = extract_json(&result);
+    assert_eq!(json["error"]["code"], "no_matches", "expected no_matches: {json}");
 
     // search with kind="skills" + no skills configured returns error.
     // (already tested above — the make_proxy_with_skills has skills)
@@ -486,6 +497,8 @@ async fn skills_through_proxy() {
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown skill");
+    let json = extract_json(&result);
+    assert_eq!(json["error"]["code"], "unknown_skill", "expected unknown_skill: {json}");
 
     registry.shutdown_all().await;
 }
@@ -689,9 +702,8 @@ async fn execute_batch_through_proxy() {
     assert_eq!(results.len(), 2);
     assert!(results[0]["ok"] == true, "first call should succeed: {json}");
     assert!(results[1]["ok"] == false, "second call should fail: {json}");
-    assert!(results[1]["result"].as_str().unwrap_or("").contains("unknown tool")
-            || results[1].get("error").is_some(),
-            "expected error for unknown tool: {json}");
+    assert!(results[1]["result"].as_str().unwrap_or("").contains("unknown tool"),
+            "expected 'unknown tool' in result: {json}");
 
     // Unknown server — error, not a crash.
     let result = proxy
@@ -714,6 +726,8 @@ async fn execute_batch_through_proxy() {
         .await
         .unwrap();
     assert!(is_error(&result), "empty calls should error");
+    let json = extract_json(&result);
+    assert_eq!(json["error"]["code"], "empty_calls", "expected empty_calls: {json}");
 
     // Too many calls (>10) returns an error.
     let calls: Vec<_> = (0..11).map(|_| ExecuteCall {
@@ -726,6 +740,8 @@ async fn execute_batch_through_proxy() {
         .await
         .unwrap();
     assert!(is_error(&result), ">10 calls should error");
+    let json = extract_json(&result);
+    assert_eq!(json["error"]["code"], "too_many_calls", "expected too_many_calls: {json}");
 
     registry.shutdown_all().await;
 }

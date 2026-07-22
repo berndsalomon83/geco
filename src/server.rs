@@ -169,8 +169,30 @@ fn text_result(v: serde_json::Value) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
-fn err(msg: String) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(msg)])
+/// Structured error: returns JSON the agent can parse programmatically
+/// instead of pattern-matching on prose. Always `CallToolResult::error`
+/// with `is_error: true` so the model knows it failed.
+fn structured_err(code: &str, message: &str) -> CallToolResult {
+    let body = serde_json::to_string_pretty(&json!({
+        "error": { "code": code, "message": message }
+    }))
+    .unwrap_or_else(|e| format!("serialize error: {e}"));
+    CallToolResult::error(vec![ContentBlock::text(body)])
+}
+
+/// Structured error with extra context fields (server, tool, etc.).
+fn structured_err_ctx(code: &str, message: &str, context: serde_json::Value) -> CallToolResult {
+    let mut error = json!({ "code": code, "message": message });
+    if let serde_json::Value::Object(ctx) = context {
+        if let serde_json::Value::Object(ref mut e) = error {
+            for (k, v) in ctx {
+                e.insert(k, v);
+            }
+        }
+    }
+    let body = serde_json::to_string_pretty(&json!({ "error": error }))
+        .unwrap_or_else(|e| format!("serialize error: {e}"));
+    CallToolResult::error(vec![ContentBlock::text(body)])
 }
 
 #[tool_router]
@@ -449,10 +471,11 @@ impl Proxy {
     ) -> Result<CallToolResult, McpError> {
         let snap = self.snapshot.read().await;
         let Some(server) = snap.servers.get(&p.server) else {
-            return Ok(err(format!(
-                "unknown server '{}' — see list_mcp_servers",
-                p.server
-            )));
+            return Ok(structured_err_ctx(
+                "unknown_server",
+                &format!("server '{}' not found", p.server),
+                json!({ "server": p.server }),
+            ));
         };
         match p.tool {
             Some(tool_name) => match snap.find_tool(&p.server, &tool_name) {
@@ -462,10 +485,11 @@ impl Proxy {
                     "description": t.description,
                     "input_schema": t.input_schema,
                 }))),
-                None => Ok(err(format!(
-                    "no tool '{tool_name}' on '{}' — call list_tools without `tool` to list",
-                    p.server
-                ))),
+                None => Ok(structured_err_ctx(
+                    "unknown_tool",
+                    &format!("tool '{tool_name}' not found on server '{}'", p.server),
+                    json!({ "server": p.server, "tool": tool_name }),
+                )),
             },
             None => {
                 let tools: Vec<_> = server
@@ -530,11 +554,11 @@ impl Proxy {
         }
 
         if results.is_empty() {
-            return Ok(err(format!(
-                "no matches for '{}'{} — try different keywords",
-                p.query,
-                if kind.is_empty() { String::new() } else { format!(" (kind={kind})") }
-            )));
+            return Ok(structured_err_ctx(
+                "no_matches",
+                &format!("no matches for '{}'", p.query),
+                json!({ "query": p.query, "kind": kind }),
+            ));
         }
         Ok(text_result(json!(results)))
     }
@@ -547,10 +571,10 @@ impl Proxy {
         Parameters(p): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
         if p.calls.is_empty() {
-            return Ok(err("no calls — pass at least one {server, tool, arguments}".into()));
+            return Ok(structured_err("empty_calls", "no calls — pass at least one {server, tool, arguments}"));
         }
         if p.calls.len() > 10 {
-            return Ok(err(format!("too many calls: {} (max 10)", p.calls.len())));
+            return Ok(structured_err("too_many_calls", &format!("{} calls (max 10)", p.calls.len())));
         }
         let registry = self.registry.read().await;
         let proxy_cfg = registry.proxy.clone();
@@ -562,12 +586,12 @@ impl Proxy {
             join.spawn(async move {
                 let backend = match registry.get(&call.server) {
                     Ok(b) => b,
-                    Err(e) => {
+                    Err(_) => {
                         return (i, json!({
                             "server": call.server,
                             "tool": call.tool,
                             "ok": false,
-                            "error": e.to_string(),
+                            "error": { "code": "unknown_server", "message": format!("server '{}' not found", call.server) },
                         }));
                     }
                 };
@@ -585,11 +609,15 @@ impl Proxy {
                         }))
                     }
                     Err(e) => {
+                        let msg = format!("{e:#}");
+                        let code = if msg.contains("not allowed") { "not_allowed" }
+                                   else if msg.contains("timed out") { "timeout" }
+                                   else { "backend_error" };
                         (i, json!({
                             "server": call.server,
                             "tool": call.tool,
                             "ok": false,
-                            "error": format!("{e:#}"),
+                            "error": { "code": code, "message": msg },
                         }))
                     }
                 }
@@ -613,7 +641,7 @@ impl Proxy {
     pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
         let idx = self.skills.read().await;
         if idx.skills.is_empty() {
-            return Ok(err("no skill libraries configured (config `skills.dirs`)".into()));
+            return Ok(structured_err("no_skills", "no skill libraries configured (config `skills.dirs`)"));
         }
         let out: Vec<_> = idx
             .skills
@@ -632,7 +660,11 @@ impl Proxy {
     ) -> Result<CallToolResult, McpError> {
         let idx = self.skills.read().await;
         let Some(meta) = idx.get(&p.name) else {
-            return Ok(err(format!("unknown skill '{}' — use search with kind=\"skills\"", p.name)));
+            return Ok(structured_err_ctx(
+                "unknown_skill",
+                &format!("skill '{}' not found", p.name),
+                json!({ "name": p.name }),
+            ));
         };
         match read_skill(meta) {
             Ok((body, files)) => {
@@ -645,7 +677,11 @@ impl Proxy {
                     "{body}{tree}"
                 ))]))
             }
-            Err(e) => Ok(err(format!("cannot read skill '{}': {e}", p.name))),
+            Err(e) => Ok(structured_err_ctx(
+                "read_error",
+                &format!("cannot read skill '{}': {e}", p.name),
+                json!({ "name": p.name }),
+            )),
         }
     }
 
@@ -698,9 +734,11 @@ impl Proxy {
                 } else {
                     // Neither in config nor in the snapshot — typo, not a
                     // removal. Surface it instead of silently doing nothing.
-                    return Ok(err(format!(
-                        "unknown server '{name}' — see list_mcp_servers"
-                    )));
+                    return Ok(structured_err_ctx(
+                        "unknown_server",
+                        &format!("server '{}' not found", name),
+                        json!({ "server": name }),
+                    ));
                 }
             }
             None => {
