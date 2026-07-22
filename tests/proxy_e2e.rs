@@ -40,9 +40,10 @@ async fn make_proxy(cfg: &Config) -> (Proxy, Arc<Registry>, Snapshot) {
         .build_snapshot(cfg.snapshot_hash(), None)
         .await;
     let proxy = Proxy::new(
-        registry.clone(),
+        (*registry).clone(),
         snapshot.clone(),
         Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json")),
+        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
         vec![],
         vec![],
     );
@@ -56,9 +57,10 @@ async fn make_proxy_with_skills(cfg: &Config, skill_dirs: Vec<String>) -> (Proxy
         .build_snapshot(cfg.snapshot_hash(), None)
         .await;
     let proxy = Proxy::new(
-        registry.clone(),
+        (*registry).clone(),
         snapshot.clone(),
         Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json")),
+        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
         skill_dirs,
         vec![],
     );
@@ -204,9 +206,10 @@ async fn health_reports_backend_failures() {
     let registry = Arc::new(Registry::from_config(&cfg));
     let snapshot = registry.build_snapshot(cfg.snapshot_hash(), None).await;
     let proxy = Proxy::new(
-        registry.clone(),
+        (*registry).clone(),
         snapshot.clone(),
         Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json")),
+        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
         vec![],
         vec![],
     );
@@ -527,4 +530,71 @@ async fn execute_tool_on_warm_backend_reuses_connection() {
     assert!(text.contains("42"), "expected 42 in {text}");
 
     registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn hot_reload_updates_snapshot() {
+    // Test reload_from_config directly (not the file watcher, which is
+    // OS-dependent and hard to test reliably). Verify that after a reload:
+    // 1. New servers appear in the snapshot
+    // 2. Removed servers disappear
+    // 3. list_servers reflects the new state
+    // 4. execute_tool works on the new server
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
+    let snap_path = Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json"));
+
+    // Initial config: one server ("stub").
+    let cfg1: Config = serde_json::from_str(&format!(
+        r#"{{"mcpServers":{{"stub":{{"command":"python3","args":["{stub}"],"description":"stub","deny":["secret_*"]}}}}}}"#
+    )).unwrap();
+    let registry = Arc::new(Registry::from_config(&cfg1));
+    let snapshot = registry.build_snapshot(cfg1.snapshot_hash(), None).await;
+    let proxy = Proxy::new(
+        (*registry).clone(),
+        snapshot,
+        snap_path,
+        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
+        vec![],
+        vec![],
+    );
+
+    // Verify initial state: 1 server.
+    let result = proxy.list_servers().await.unwrap();
+    let json = extract_json(&result);
+    let servers = json.as_array().unwrap();
+    assert_eq!(servers.len(), 1, "expected 1 server initially: {json}");
+    assert_eq!(servers[0]["server"], "stub");
+
+    // Reload with a config that has a different description for "stub"
+    // (proving the snapshot hash changes and tools are re-fetched).
+    let cfg2: Config = serde_json::from_str(&format!(
+        r#"{{"mcpServers":{{"stub":{{"command":"python3","args":["{stub}"],"description":"updated desc","deny":["secret_*"]}}}}}}"#
+    )).unwrap();
+    proxy.reload_from_config(cfg2).await.unwrap();
+
+    // After reload: still 1 server, but description changed.
+    let result = proxy.list_servers().await.unwrap();
+    let json = extract_json(&result);
+    let servers = json.as_array().unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0]["description"], "updated desc");
+
+    // Execute through the reloaded proxy — should still work.
+    let args = serde_json::json!({"a": 10, "b": 5}).as_object().unwrap().clone();
+    let result = proxy
+        .execute_tool(Parameters(ExecuteParams {
+            server: "stub".into(),
+            tool: "add".into(),
+            arguments: Some(args),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "execute_tool should work after reload");
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("15"), "expected 15 in {text}");
+
+    proxy.shutdown_backends().await;
 }

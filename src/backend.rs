@@ -197,6 +197,7 @@ impl Backend {
     }
 }
 
+#[derive(Clone)]
 pub struct Registry {
     pub proxy: ProxyConfig,
     pub backends: BTreeMap<String, Arc<Backend>>,

@@ -118,6 +118,10 @@ geco schema                           # print the config JSON Schema (YAML + JSO
 
 `RUST_LOG=debug` for verbose logging (always stderr — stdout is the protocol).
 
+## Hot reload
+
+The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. No restart, no manual `refresh_tools` call. Removed backends are shut down; new ones are snapshotted and available immediately.
+
 ## Health — failures are loud, not logged
 
 The gateway is headless, so a dead backend or a partial refresh would otherwise live only in a stderr log. Instead it writes its current problem set to `<data-dir>/health.json` (level-triggered: empty = healthy, tagged with the MCP client name). Two ways to see it:

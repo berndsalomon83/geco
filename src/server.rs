@@ -4,7 +4,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use anyhow::Result as AnyhowResult;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rmcp::{
     handler::server::wrapper::Parameters, model::*, service::RequestContext, tool, tool_handler,
     tool_router, ErrorData as McpError, RoleServer, ServerHandler,
@@ -148,9 +151,10 @@ pub struct RefreshParams {
 
 #[derive(Clone)]
 pub struct Proxy {
-    registry: Arc<Registry>,
+    registry: Arc<RwLock<Registry>>,
     snapshot: Arc<RwLock<Snapshot>>,
     snapshot_path: PathBuf,
+    config_path: PathBuf,
     skills: Arc<RwLock<SkillIndex>>,
     skill_dirs: Vec<String>,
     absorb_dirs: Vec<String>,
@@ -169,14 +173,15 @@ fn err(msg: String) -> CallToolResult {
 
 #[tool_router]
 impl Proxy {
-    pub fn new(registry: Arc<Registry>, snapshot: Snapshot, snapshot_path: PathBuf,
-               skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
+    pub fn new(registry: Registry, snapshot: Snapshot, snapshot_path: PathBuf,
+               config_path: PathBuf, skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
         let absorb_issues = Self::absorb(&skill_dirs, &absorb_dirs);
         let skills = SkillIndex::scan(&skill_dirs);
         Self {
-            registry,
+            registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
             snapshot_path,
+            config_path,
             skills: Arc::new(RwLock::new(skills)),
             skill_dirs,
             absorb_dirs,
@@ -185,11 +190,143 @@ impl Proxy {
         }
     }
 
+    /// Spawn a background task that watches the config file for changes and
+    /// auto-reloads: rebuilds the Registry, recomputes the snapshot, and
+    /// publishes health. Debounced to 500ms to coalesce editor write patterns
+    /// (temp-file + rename fires multiple events).
+    pub fn spawn_hot_reload(self) {
+        let config_path = self.config_path.clone();
+        let proxy = self.clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
+        let tx_clone = tx.clone();
+
+        // File watcher → notify on channel.
+        let mut watcher = match RecommendedWatcher::new(
+            move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                        let _ = tx_clone.blocking_send(());
+                    }
+                }
+            },
+            notify::Config::default(),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!("config watcher disabled: {e}");
+                return;
+            }
+        };
+
+        // Watch the parent directory (editors write temp files then rename,
+        // which shows up as events on the dir, not the file itself).
+        let watch_dir = config_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
+            tracing::warn!("config watcher disabled: {e}");
+            return;
+        }
+
+        // Leak the watcher so it lives for the process lifetime — the proxy
+        // runs until the agent disconnects, and dropping the watcher would
+        // stop watching. This is a single long-lived watcher per process.
+        std::mem::forget(watcher);
+
+        tokio::spawn(async move {
+            let mut last_mtime: Option<std::time::SystemTime> = None;
+            let mut last_fire: Option<Instant> = None;
+            loop {
+                if rx.recv().await.is_none() {
+                    break;
+                }
+                // Debounce: ignore events within 500ms of the last one.
+                let now = Instant::now();
+                if let Some(t) = last_fire {
+                    if now.duration_since(t) < Duration::from_millis(500) {
+                        continue;
+                    }
+                }
+                last_fire = Some(now);
+
+                // Verify the config file actually changed (mtime check filters
+                // out events on sibling files in the watched directory).
+                let mtime = match std::fs::metadata(&config_path).and_then(|m| m.modified()) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if last_mtime == Some(mtime) {
+                    continue;
+                }
+                last_mtime = Some(mtime);
+
+                // Reload config, rebuild registry, rebuild snapshot.
+                let cfg = match crate::config::Config::load(&config_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("config reload failed (keeping old config): {e:#}");
+                        continue;
+                    }
+                };
+                if let Err(e) = proxy.reload_from_config(cfg).await {
+                    tracing::warn!("hot-reload: reload failed: {e:#}");
+                }
+            }
+        });
+    }
+
+    /// Reload config: rebuild registry, snapshot, skills, and health.
+    /// Called by `spawn_hot_reload` when the config file changes, but also
+    /// testable in isolation.
+    pub async fn reload_from_config(&self, cfg: crate::config::Config) -> AnyhowResult<()> {
+        let new_hash = cfg.snapshot_hash();
+        let new_registry = crate::backend::Registry::from_config(&cfg);
+
+        // Identify and shut down removed backends.
+        {
+            let old_registry = self.registry.read().await;
+            for (name, backend) in &old_registry.backends {
+                if !new_registry.backends.contains_key(name) {
+                    backend.shutdown().await;
+                    tracing::info!("hot-reload: shut down removed backend '{name}'");
+                }
+            }
+        }
+
+        *self.registry.write().await = new_registry;
+
+        // Rebuild snapshot from the new registry.
+        let registry = self.registry.read().await;
+        let snap = registry.build_snapshot(new_hash, None).await;
+        drop(registry);
+        tracing::info!(
+            "hot-reload: config changed, refreshed {} servers, {} tools",
+            snap.servers.len(),
+            snap.tool_count()
+        );
+
+        *self.snapshot.write().await = snap.clone();
+        if let Err(e) = snap.save(&self.snapshot_path) {
+            tracing::warn!("hot-reload: cannot persist snapshot: {e:#}");
+        }
+
+        let fresh_absorb = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
+        *self.absorb_issues.write().await = fresh_absorb;
+        *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
+
+        self.publish_health().await;
+        Ok(())
+    }
+
+    /// Shut down all backend processes. Called when the proxy is stopping.
+    pub async fn shutdown_backends(&self) {
+        let registry = self.registry.read().await;
+        registry.shutdown_all().await;
+    }
+
     /// Recompute the full problem set and publish it to the health file.
-    /// Level-triggered: called after every refresh (and at startup), empty
-    /// set == healthy. Merges backend failures from the snapshot with the
-    /// persisted absorb-issues list, so both surfaces (health.json and the
-    /// `health` meta-tool) agree.
     pub async fn publish_health(&self) {
         let issues = self.all_issues().await;
         let client = self.client.read().await.clone();
@@ -247,9 +384,10 @@ impl Proxy {
     )]
     pub async fn list_servers(&self) -> Result<CallToolResult, McpError> {
         let snap = self.snapshot.read().await;
+        let registry = self.registry.read().await;
         let mut out = Vec::new();
         for (name, s) in &snap.servers {
-            let status = match self.registry.get(name) {
+            let status = match registry.get(name) {
                 Ok(b) => serde_json::to_value(b.status().await).unwrap_or(json!("unknown")),
                 Err(_) => json!("removed from config"),
             };
@@ -349,11 +487,12 @@ impl Proxy {
         &self,
         Parameters(p): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
-        let backend = match self.registry.get(&p.server) {
+        let registry = self.registry.read().await;
+        let backend = match registry.get(&p.server) {
             Ok(b) => b,
             Err(e) => return Ok(err(e.to_string())),
         };
-        match backend.call(&p.tool, p.arguments, &self.registry.proxy).await {
+        match backend.call(&p.tool, p.arguments, &registry.proxy).await {
             Ok(result) => Ok(result),
             Err(e) => Ok(err(format!("{e:#}"))),
         }
@@ -452,10 +591,10 @@ impl Proxy {
         Parameters(p): Parameters<RefreshParams>,
     ) -> Result<CallToolResult, McpError> {
         let hash = { self.snapshot.read().await.config_hash.clone() };
-        let fresh = self
-            .registry
-            .build_snapshot(hash, p.server.as_deref())
-            .await;
+        let fresh = {
+            let registry = self.registry.read().await;
+            registry.build_snapshot(hash, p.server.as_deref()).await
+        };
         let mut snap = self.snapshot.write().await;
         match p.server {
             Some(ref name) => {

@@ -152,15 +152,23 @@ async fn main() -> Result<()> {
                 snapshot.servers.len(),
                 snapshot.tool_count()
             );
-            let proxy = Proxy::new(registry.clone(), snapshot, snapshot_path,
-                                   cfg.skills.dirs.clone(), cfg.skills.absorb.clone());
+            let proxy = Proxy::new(
+                (*registry).clone(),
+                snapshot,
+                snapshot_path,
+                config_path.clone(),
+                cfg.skills.dirs.clone(),
+                cfg.skills.absorb.clone(),
+            );
             proxy.publish_health().await;
+            proxy.clone().spawn_hot_reload();
             let service = proxy
+                .clone()
                 .serve(rmcp::transport::stdio())
                 .await
                 .context("failed to start stdio server")?;
             service.waiting().await?;
-            registry.shutdown_all().await;
+            proxy.shutdown_backends().await;
         }
     }
     Ok(())
