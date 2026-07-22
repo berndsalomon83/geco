@@ -318,7 +318,9 @@ impl Proxy {
                     registry.proxy.health_check_secs
                 };
                 if interval == 0 {
-                    break;
+                    // Disabled — sleep and re-check so hot-reload can re-enable.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    continue;
                 }
                 tokio::time::sleep(Duration::from_secs(interval)).await;
 
@@ -365,49 +367,11 @@ impl Proxy {
 
         *self.registry.write().await = new_registry;
 
-        // Rebuild snapshot — clone backends out and drop the read lock so
+        // Rebuild snapshot — clone the registry and drop the read lock so
         // execute / list_mcp_servers aren't blocked during the build.
         let snap = {
-            let registry = self.registry.read().await;
-            let backends: Vec<_> = registry.backends.iter()
-                .map(|(n, b)| (n.clone(), b.clone()))
-                .collect();
-            let proxy_cfg = registry.proxy.clone();
-            drop(registry);
-            let mut snap = Snapshot {
-                config_hash: new_hash.clone(),
-                generated_at: crate::backend::now(),
-                ..Default::default()
-            };
-            let mut join = tokio::task::JoinSet::new();
-            for (name, backend) in backends {
-                let pc = proxy_cfg.clone();
-                join.spawn(async move {
-                    (name, backend.cfg.description.clone(),
-                     backend.snapshot_tools(&pc).await)
-                });
-            }
-            while let Some(joined) = join.join_next().await {
-                if let Ok((name, desc, result)) = joined {
-                    let entry = match result {
-                        Ok(tools) => crate::snapshot::ServerSnapshot {
-                            description: desc.unwrap_or_default(),
-                            refresh_status: "ok".into(),
-                            tools,
-                        },
-                        Err(e) => {
-                            tracing::warn!("hot-reload: snapshot failed for '{name}': {e:#}");
-                            crate::snapshot::ServerSnapshot {
-                                description: desc.unwrap_or_default(),
-                                refresh_status: format!("error: {e}"),
-                                tools: Vec::new(),
-                            }
-                        }
-                    };
-                    snap.servers.insert(name, entry);
-                }
-            }
-            snap
+            let registry = self.registry.read().await.clone();
+            registry.build_snapshot(new_hash, None).await
         };
         tracing::info!(
             "hot-reload: config changed, refreshed {} servers, {} tools",

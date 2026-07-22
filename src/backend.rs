@@ -153,9 +153,7 @@ impl Backend {
     /// otherwise connects briefly and tears down again (stays lazy).
     pub async fn snapshot_tools(&self, proxy: &ProxyConfig) -> Result<Vec<ToolSnapshot>> {
         let startup = Duration::from_secs(proxy.startup_timeout_secs);
-        // Check for a live connection under the lock, but don't hold it
-        // across connect_raw — that can take up to startup_timeout_secs and
-        // would block any concurrent execute on the same cold backend.
+        let list_timeout = Duration::from_secs(proxy.call_timeout_secs);
         let (conn, ephemeral) = {
             let guard = self.conn.lock().await;
             match guard.as_ref() {
@@ -168,7 +166,7 @@ impl Backend {
         } else {
             self.connect_raw(startup).await?
         };
-        let listed = tokio::time::timeout(startup, conn.list_all_tools())
+        let listed = tokio::time::timeout(list_timeout, conn.list_all_tools())
             .await
             .map_err(|_| anyhow!("backend '{}' tools/list timed out", self.name))?
             .with_context(|| format!("backend '{}' tools/list failed", self.name))?;

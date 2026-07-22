@@ -194,10 +194,7 @@ pub fn expand_value(input: &str) -> Result<String> {
                 out.push_str(&resolve_var(var)?);
                 rest = &rest[start + 2 + end + 1..];
             }
-            None => {
-                out.push_str(&rest[start..]);
-                rest = "";
-            }
+            None => bail!("unterminated ${{...}} in value: {input}")
         }
     }
     out.push_str(rest);
