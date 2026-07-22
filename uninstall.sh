@@ -33,10 +33,11 @@ if [ -n "$BIN" ]; then rm -f "$BIN" && say "Removed binary: $BIN"; fi
 
 if [ "$PURGE" = 1 ]; then
     rm -rf "$HOME/.config/geco" \
-           "$HOME/.cache/geco" \
            "$HOME/.cache/dev.geco.geco" \
-           "$HOME/Library/Caches/dev.geco.geco" 2>/dev/null || true
-    say "Purged config + snapshot cache"
+           "$HOME/.local/share/dev.geco.geco" \
+           "$HOME/Library/Caches/dev.geco.geco" \
+           "$HOME/Library/Application Support/dev.geco.geco" 2>/dev/null || true
+    say "Purged config + snapshot cache + health data"
 else
     say "Config kept at ~/.config/geco (re-run with --purge to delete)"
 fi

@@ -184,25 +184,13 @@ impl Proxy {
     /// persisted absorb-issues list, so both surfaces (health.json and the
     /// `health` meta-tool) agree.
     pub async fn publish_health(&self) {
-        let snap = self.snapshot.read().await;
-        let absorb = self.absorb_issues.read().await;
-        let mut issues = absorb.clone();
-        for (name, s) in &snap.servers {
-            if s.refresh_status != "ok" {
-                issues.push(Issue {
-                    kind: "backend".into(),
-                    subject: name.clone(),
-                    detail: s.refresh_status.clone(),
-                    severity: "error".into(),
-                });
-            }
-        }
+        let issues = self.all_issues().await;
         let client = self.client.read().await.clone();
         health::write(client.as_deref(), issues);
     }
 
     /// The current full issue set (backends + absorb) — used by the
-    /// `health` meta-tool so it agrees with health.json.
+    /// `health` meta-tool and `publish_health` so they always agree.
     async fn all_issues(&self) -> Vec<Issue> {
         let snap = self.snapshot.read().await;
         let absorb = self.absorb_issues.read().await;
@@ -419,6 +407,9 @@ impl Proxy {
     )]
     pub async fn health(&self) -> Result<CallToolResult, McpError> {
         let snap = self.snapshot.read().await;
+        let server_count = snap.servers.len();
+        let tool_count = snap.tool_count();
+        drop(snap);
         let issues = self.all_issues().await;
         let issue_view: Vec<_> = issues
             .iter()
@@ -426,8 +417,8 @@ impl Proxy {
             .collect();
         Ok(text_result(json!({
             "healthy": issues.is_empty(),
-            "servers": snap.servers.len(),
-            "tools": snap.tool_count(),
+            "servers": server_count,
+            "tools": tool_count,
             "issues": issue_view,
         })))
     }
@@ -449,11 +440,13 @@ impl Proxy {
             Some(ref name) => {
                 if let Some(entry) = fresh.servers.get(name) {
                     snap.servers.insert(name.clone(), entry.clone());
+                    snap.generated_at = fresh.generated_at;
                 } else if snap.servers.contains_key(name) {
                     // Server no longer in config — evict the stale entry so
                     // a single-server refresh can clean up a removal without
                     // needing a full refresh.
                     snap.servers.remove(name);
+                    snap.generated_at = fresh.generated_at;
                     tracing::info!("refresh_tools: '{}' removed from config, evicted from snapshot", name);
                 } else {
                     // Neither in config nor in the snapshot — typo, not a
@@ -471,15 +464,16 @@ impl Proxy {
         if let Err(e) = snap.save(&self.snapshot_path) {
             tracing::warn!("cannot persist snapshot: {e:#}");
         }
-        let fresh_absorb = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
-        *self.absorb_issues.write().await = fresh_absorb;
-        *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
-        self.publish_health().await;
         let summary: Vec<_> = snap
             .servers
             .iter()
             .map(|(n, s)| json!({"server": n, "tools": s.tools.len(), "status": s.refresh_status}))
             .collect();
+        drop(snap); // release write lock before publish_health (which reads)
+        let fresh_absorb = Self::absorb(&self.skill_dirs, &self.absorb_dirs);
+        *self.absorb_issues.write().await = fresh_absorb;
+        *self.skills.write().await = SkillIndex::scan(&self.skill_dirs);
+        self.publish_health().await;
         Ok(text_result(json!(summary)))
     }
 }
