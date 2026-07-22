@@ -58,8 +58,22 @@ struct Frontmatter {
 
 fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
     let rest = text.strip_prefix("---")?;
-    let end = rest.find("\n---")?;
-    serde_norway::from_str(&rest[..end]).ok()
+    let mut search_from = 0;
+    loop {
+        let pos = rest[search_from..].find("\n---")?;
+        let abs = search_from + pos;
+        let after = &rest[abs + 4..];
+        let is_closing = after.is_empty()
+            || after.starts_with('\n')
+            || after.starts_with('\r')
+            || after.starts_with(' ')
+            || after.starts_with('\t');
+        if is_closing {
+            return serde_norway::from_str(&rest[..abs]).ok();
+        } else {
+            search_from = abs + 4;
+        }
+    }
 }
 
 pub fn expand_tilde(p: &str) -> PathBuf {

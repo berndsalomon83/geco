@@ -353,10 +353,13 @@ impl Config {
                     format!("server '{name}': empty command array")));
             }
             // Try keychain lookups — report missing items without spawning.
+            // Loop through all ${keychain:...} occurrences in each value.
             for (k, v) in &s.env {
-                if let Some(start) = v.find("${keychain:") {
-                    if let Some(end) = v[start..].find('}') {
-                        let service = &v[start + 11..start + end];
+                let mut search = 0;
+                while let Some(start) = v[search..].find("${keychain:") {
+                    let abs = search + start;
+                    if let Some(end) = v[abs..].find('}') {
+                        let service = &v[abs + 11..abs + end];
                         if service.is_empty() {
                             findings.push(("error".into(),
                                 format!("server '{name}': env '{k}' has empty keychain service name")));
@@ -364,6 +367,9 @@ impl Config {
                             findings.push(("error".into(),
                                 format!("server '{name}': keychain item '{service}' not found (will fail at spawn)")));
                         }
+                        search = abs + end + 1;
+                    } else {
+                        break; // unterminated ${keychain: — expand_value will error at runtime
                     }
                 }
             }

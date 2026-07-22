@@ -84,12 +84,24 @@ impl Backend {
 
     /// Long-lived connection for tool execution (lazy, cached, self-healing).
     async fn connection(&self, startup: Duration) -> Result<Conn> {
-        let mut guard = self.conn.lock().await;
-        if let Some(c) = guard.as_ref() {
-            return Ok(c.clone());
+        // Check for a live connection under the lock, but don't hold it
+        // across connect_raw — that can take up to startup_timeout_secs and
+        // would block check_health, shutdown, and concurrent calls.
+        {
+            let guard = self.conn.lock().await;
+            if let Some(c) = guard.as_ref() {
+                return Ok(c.clone());
+            }
         }
+        // Connect without holding the lock.
         match self.connect_raw(startup).await {
             Ok(c) => {
+                // Re-acquire and double-check: another task may have
+                // connected while we were blocked.
+                let mut guard = self.conn.lock().await;
+                if let Some(existing) = guard.as_ref() {
+                    return Ok(existing.clone());
+                }
                 *self.status.lock().await = Status::Up { since: now() };
                 *guard = Some(c.clone());
                 Ok(c)

@@ -219,12 +219,10 @@ fn compute_diff(
                     }
                     return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
                 }
-                (Some(_), None) => {
+                (Some(o), None) => {
                     // Removed server — all tools are "removed".
-                    if let Some(o) = old.servers.get(name) {
-                        for t in &o.tools {
-                            removed.push(json!({"server": name, "tool": t.name}));
-                        }
+                    for t in &o.tools {
+                        removed.push(json!({"server": name, "tool": t.name}));
                     }
                     return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
                 }
@@ -965,23 +963,19 @@ impl Proxy {
             registry.build_snapshot(hash, p.server.as_deref()).await
         };
         let mut snap = self.snapshot.write().await;
-        // Compute diff before the match (which moves fresh.generated_at).
-        let diff = compute_diff(&snap, &fresh, &p.server);
+        let old_snap = snap.clone();
+        let fresh_for_diff = fresh.clone();
+        let fresh_generated_at = fresh.generated_at.clone();
         match p.server {
             Some(ref name) => {
                 if let Some(entry) = fresh.servers.get(name) {
                     snap.servers.insert(name.clone(), entry.clone());
-                    snap.generated_at = fresh.generated_at;
+                    snap.generated_at = fresh_generated_at.clone();
                 } else if snap.servers.contains_key(name) {
-                    // Server no longer in config — evict the stale entry so
-                    // a single-server refresh can clean up a removal without
-                    // needing a full refresh.
                     snap.servers.remove(name);
-                    snap.generated_at = fresh.generated_at;
+                    snap.generated_at = fresh_generated_at.clone();
                     tracing::info!("refresh_tools: '{}' removed from config, evicted from snapshot", name);
                 } else {
-                    // Neither in config nor in the snapshot — typo, not a
-                    // removal. Surface it instead of silently doing nothing.
                     return Ok(structured_err_ctx(
                         "unknown_server",
                         &format!("server '{}' not found", name),
@@ -991,9 +985,10 @@ impl Proxy {
             }
             None => {
                 snap.servers = fresh.servers;
-                snap.generated_at = fresh.generated_at;
+                snap.generated_at = fresh_generated_at;
             }
         }
+        let diff = compute_diff(&old_snap, &fresh_for_diff, &p.server);
         let summary: Vec<_> = snap
             .servers
             .iter()
