@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result as AnyhowResult;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -199,8 +199,17 @@ fn structured_err_ctx(code: &str, message: &str, context: serde_json::Value) -> 
 impl Proxy {
     pub fn new(registry: Registry, snapshot: Snapshot, snapshot_path: PathBuf,
                config_path: PathBuf, skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
-        let absorb_issues = Self::absorb(&skill_dirs, &absorb_dirs);
+        let mut absorb_issues = Self::absorb(&skill_dirs, &absorb_dirs);
         let skills = SkillIndex::scan(&skill_dirs);
+        for e in &skills.errors {
+            tracing::warn!("skill scan error: {e}");
+            absorb_issues.push(Issue {
+                kind: "skills".into(),
+                subject: "scan".into(),
+                detail: e.clone(),
+                severity: "warning".into(),
+            });
+        }
         Self {
             registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -264,19 +273,13 @@ impl Proxy {
 
         tokio::spawn(async move {
             let mut last_mtime: Option<std::time::SystemTime> = None;
-            let mut last_fire: Option<Instant> = None;
             loop {
                 if rx.recv().await.is_none() {
                     break;
                 }
-                // Debounce: ignore events within 500ms of the last one.
-                let now = Instant::now();
-                if let Some(t) = last_fire {
-                    if now.duration_since(t) < Duration::from_millis(500) {
-                        continue;
-                    }
-                }
-                last_fire = Some(now);
+                // Drain any burst of events (editors write temp + rename,
+                // firing multiple events in quick succession).
+                while rx.try_recv().is_ok() {}
 
                 // Verify the config file actually changed (mtime check filters
                 // out events on sibling files in the watched directory).
@@ -387,8 +390,19 @@ impl Proxy {
         let skill_dirs = self.skill_dirs.read().await.clone();
         let absorb_dirs = self.absorb_dirs.read().await.clone();
         let fresh_absorb = Self::absorb(&skill_dirs, &absorb_dirs);
-        *self.absorb_issues.write().await = fresh_absorb;
-        *self.skills.write().await = SkillIndex::scan(&skill_dirs);
+        let mut issues = fresh_absorb;
+        let scanned = SkillIndex::scan(&skill_dirs);
+        for e in &scanned.errors {
+            tracing::warn!("skill scan error: {e}");
+            issues.push(Issue {
+                kind: "skills".into(),
+                subject: "scan".into(),
+                detail: e.clone(),
+                severity: "warning".into(),
+            });
+        }
+        *self.absorb_issues.write().await = issues;
+        *self.skills.write().await = scanned;
 
         self.publish_health().await;
         Ok(())
@@ -813,8 +827,19 @@ impl Proxy {
         let skill_dirs = self.skill_dirs.read().await.clone();
         let absorb_dirs = self.absorb_dirs.read().await.clone();
         let fresh_absorb = Self::absorb(&skill_dirs, &absorb_dirs);
-        *self.absorb_issues.write().await = fresh_absorb;
-        *self.skills.write().await = SkillIndex::scan(&skill_dirs);
+        let mut issues = fresh_absorb;
+        let scanned = SkillIndex::scan(&skill_dirs);
+        for e in &scanned.errors {
+            tracing::warn!("skill scan error: {e}");
+            issues.push(Issue {
+                kind: "skills".into(),
+                subject: "scan".into(),
+                detail: e.clone(),
+                severity: "warning".into(),
+            });
+        }
+        *self.absorb_issues.write().await = issues;
+        *self.skills.write().await = scanned;
         self.publish_health().await;
         Ok(text_result(json!(summary)))
     }

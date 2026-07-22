@@ -34,19 +34,24 @@ fn stub_config() -> Option<Config> {
 }
 
 /// Build a Proxy from a config, returning the proxy, registry, and snapshot.
+/// Uses a unique temp dir per call to avoid parallel-test file races.
 async fn make_proxy(cfg: &Config) -> (Proxy, Arc<Registry>, Snapshot) {
     let registry = Arc::new(Registry::from_config(cfg));
     let snapshot = registry
         .build_snapshot(cfg.snapshot_hash(), None)
         .await;
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("snapshot.json");
+    let cfg_path = dir.path().join("config.yaml");
     let proxy = Proxy::new(
         (*registry).clone(),
         snapshot.clone(),
-        Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json")),
-        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
+        snap_path,
+        cfg_path,
         vec![],
         vec![],
     );
+    std::mem::forget(dir); // keep temp dir alive for test duration
     (proxy, registry, snapshot)
 }
 
@@ -56,11 +61,14 @@ async fn make_proxy_with_skills(cfg: &Config, skill_dirs: Vec<String>) -> (Proxy
     let snapshot = registry
         .build_snapshot(cfg.snapshot_hash(), None)
         .await;
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("snapshot.json");
+    let cfg_path = dir.path().join("config.yaml");
     let proxy = Proxy::new(
         (*registry).clone(),
         snapshot.clone(),
-        Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json")),
-        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
+        snap_path,
+        cfg_path,
         skill_dirs,
         vec![],
     );
@@ -206,14 +214,16 @@ async fn health_reports_backend_failures() {
 
     let registry = Arc::new(Registry::from_config(&cfg));
     let snapshot = registry.build_snapshot(cfg.snapshot_hash(), None).await;
+    let dir = tempfile::tempdir().unwrap();
     let proxy = Proxy::new(
         (*registry).clone(),
         snapshot.clone(),
-        Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json")),
-        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
+        dir.path().join("snapshot.json"),
+        dir.path().join("config.yaml"),
         vec![],
         vec![],
     );
+    std::mem::forget(dir);
 
     // The broken server should have an error refresh_status.
     let broken = &snapshot.servers["broken"];
@@ -542,12 +552,14 @@ async fn hot_reload_updates_snapshot() {
     // 1. New servers appear in the snapshot
     // 2. Removed servers disappear
     // 3. list_mcp_servers reflects the new state
-    // 4. execute_tool works on the new server
+    // 4. execute works on the new server
     if std::process::Command::new("python3").arg("--version").output().is_err() {
         return;
     }
     let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
-    let snap_path = Snapshot::cache_path(std::path::Path::new("/tmp/geco-test-snapshot.json"));
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("snapshot.json");
+    let cfg_path = dir.path().join("config.yaml");
 
     // Initial config: one server ("stub").
     let cfg1: Config = serde_json::from_str(&format!(
@@ -559,10 +571,11 @@ async fn hot_reload_updates_snapshot() {
         (*registry).clone(),
         snapshot,
         snap_path,
-        std::path::PathBuf::from("/tmp/geco-test-config.yaml"),
+        cfg_path,
         vec![],
         vec![],
     );
+    std::mem::forget(dir);
 
     // Verify initial state: 1 server.
     let result = proxy.list_mcp_servers().await.unwrap();
