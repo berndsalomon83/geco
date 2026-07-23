@@ -1,14 +1,36 @@
-<p align="center">
-  <img src="geco_logo.png" alt="geco" width="200">
-</p>
+<img align="right" src="geco_logo.png" alt="geco" width="35%" style="margin-left: 24px;">
 
 # geco
 
-*the generic connector*
+*the <span style="color: #B7410E; font-weight: bold;">ge</span>neric <span style="color: #B7410E; font-weight: bold;">co</span>nnector*
 
-geco is an MCP gateway that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools (~3.4 KB total) instead of every schema on every request.
+## Why it exists
+The more mcp tools you expose to your llm, the more the context gets prefilled with ballast that most likely is not even used and reduces the available space you have to work with.
+The same is true for skills. Skills are great recipies to have but they also land as descriptive text in the context of your llm and yet again, more skills means lesser remaining context for the actual task to be done.
 
-Rust, single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
+So here comes this rusty reptile geco that helps you to tackle this. It sits between your IDE and the skills and mcp tools that you have and gives your llm the same 8 tools always, no matter how much you have in your tool shed!
+
+<span style="color: #B7410E; font-weight: bold;">geco is an MCP and SKILL gateway </span> that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools instead of every schema on every request.
+
+Built with Rust as single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
+
+## How it works
+
+The agent sees exactly eight meta-tools:
+
+| Meta-tool | Purpose |
+|---|---|
+| `list_mcp_servers` | Name, description, tool count, running state of each backend |
+| `list_tools` | A server's tools (name + description); with `tool`: the full input schema |
+| `refresh_tools` | Re-scan backends after installing/reconfiguring one |
+| `list_skills` | Every skill in the library (name + one-line description) |
+| `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
+| `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
+| `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
+| `health` | Report which backends failed their last refresh and why |
+
+
+Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
 
 ## Install
 
@@ -49,29 +71,6 @@ Move the MCP servers you want behind the proxy into `~/.config/geco/config.yaml`
 ```
 
 Remove the individual server entries you moved behind geco — restart the agent and it sees only the 8 meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
-
-## Why
-
-Every MCP server you connect injects its full tool catalogue into every model call. A handful of servers easily costs 20–50k tokens before the conversation starts — and measurably degrades tool selection. geco flattens that to a constant ~3.4 KB, no matter how many tools hide behind it.
-
-## How it works
-
-The agent sees exactly eight meta-tools:
-
-| Meta-tool | Purpose |
-|---|---|
-| `list_mcp_servers` | Name, description, tool count, running state of each backend |
-| `list_tools` | A server's tools (name + description); with `tool`: the full input schema |
-| `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
-| `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
-| `refresh_tools` | Re-scan backends after installing/reconfiguring one |
-| `health` | Report which backends failed their last refresh and why |
-| `list_skills` | Every skill in the library (name + one-line description) |
-| `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
-
-Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
-
-## Quickstart
 
 ## Quick start
 
