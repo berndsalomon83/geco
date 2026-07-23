@@ -870,7 +870,6 @@ impl Proxy {
         while let Some(joined) = join.join_next().await {
             match joined {
                 Ok((i, result, latency_ms, was_down)) => {
-                    if i >= n { continue; }
                     results[i] = result;
                     let server = results[i]["server"].as_str().unwrap_or("").to_string();
                     let ok = results[i]["ok"].as_bool().unwrap_or(false);
