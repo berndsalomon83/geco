@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="geco_logo.png" alt="geco" width="200">
+</p>
+
 # geco
 
 *the generic connector*
@@ -5,6 +9,46 @@
 geco is an MCP gateway that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools (~3.4 KB total) instead of every schema on every request.
 
 Rust, single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
+
+## Install
+
+### Build & install (macOS / Linux)
+
+```bash
+git clone <repo> && cd geco
+bash install.sh
+```
+
+### Build & install (Windows)
+
+```powershell
+git clone <repo>; cd geco
+.\install.ps1
+```
+
+### Wire it into your agent
+
+Move the MCP servers you want behind the proxy into `~/.config/geco/config.yaml` (copy-paste from your existing agent config — the `mcpServers` format is identical). Then register the **proxy** instead of the individual servers:
+
+**OpenCode** (`~/.config/opencode/opencode.json`):
+```jsonc
+{
+  "mcp": {
+    "geco": { "type": "local", "command": ["geco", "serve"], "enabled": true }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "geco": { "command": "/path/to/geco", "args": ["serve"] }
+  }
+}
+```
+
+Remove the individual server entries you moved behind geco — restart the agent and it sees only the 8 meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
 
 ## Why
 
@@ -29,6 +73,8 @@ Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it 
 
 ## Quickstart
 
+## Quick start
+
 ```bash
 cargo build --release
 cp target/release/geco ~/.local/bin/   # or use install.sh
@@ -51,22 +97,6 @@ Create `~/.config/geco/config.yaml` (see `geco.example.yaml`; JSON is equally ac
       "description": "Files under ~/Documents"
     }
   }
-}
-```
-
-Then register the **proxy** (instead of the individual servers) in your agent:
-
-```jsonc
-// OpenCode: ~/.config/opencode/opencode.json
-"mcp": {
-  "geco": { "type": "local", "command": ["geco", "serve"], "enabled": true }
-}
-```
-
-```json
-// Claude Desktop: claude_desktop_config.json
-"mcpServers": {
-  "geco": { "command": "/path/to/geco", "args": ["serve"] }
 }
 ```
 
