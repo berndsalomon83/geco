@@ -68,7 +68,7 @@ Say "Generating config schema..."
 & $Dest schema | Set-Content (Join-Path $CfgDir "geco.schema.json")
 
 # Install opencode health plugin if opencode is present.
-$OpencodePluginDir = Join-Path $env:USERPROFILE ".config\opencode\plugin"
+$OpencodePluginDir = Join-Path $env:USERPROFILE ".config\opencode\plugins"
 if (Test-Path (Split-Path $OpencodePluginDir -Parent)) {
     if (-not (Test-Path $OpencodePluginDir)) { New-Item -ItemType Directory -Path $OpencodePluginDir -Force | Out-Null }
     Copy-Item (Join-Path $RepoDir "opencode-plugin\geco-tui.ts") $OpencodePluginDir -Force

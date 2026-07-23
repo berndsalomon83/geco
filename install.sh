@@ -77,7 +77,7 @@ for l in sys.stdin:
 [ "$TOOLS" = "8" ] && say "Proxy OK: 8 meta-tools (6 gateway + 2 skills)" || warn "expected 8 meta-tools, got: $TOOLS"
 
 # Companion opencode TUI plugin: toasts gateway health problems in-app.
-OC_PLUGIN_DIR="$HOME/.config/opencode/plugin"
+OC_PLUGIN_DIR="$HOME/.config/opencode/plugins"
 if [ -d "$HOME/.config/opencode" ]; then
     mkdir -p "$OC_PLUGIN_DIR"
     cp "$REPO_DIR/opencode-plugin/geco-tui.ts" "$OC_PLUGIN_DIR/geco-tui.ts"

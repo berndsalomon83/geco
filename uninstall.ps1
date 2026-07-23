@@ -19,11 +19,13 @@ if (Test-Path $Dest) {
     Say "Binary not found (already removed?)"
 }
 
-# Remove opencode health plugin.
-$Plugin = Join-Path $env:USERPROFILE ".config\opencode\plugin\geco-tui.ts"
-if (Test-Path $Plugin) {
-    Remove-Item $Plugin -Force
-    Say "Removed opencode health plugin"
+# Remove opencode health plugin (check both plugins/ and plugin/ dirs).
+foreach ($d in @("plugins", "plugin")) {
+    $Plugin = Join-Path $env:USERPROFILE ".config\opencode\$d\geco-tui.ts"
+    if (Test-Path $Plugin) {
+        Remove-Item $Plugin -Force
+        Say "Removed opencode health plugin ($d/)"
+    }
 }
 
 # Remove from agent configs.

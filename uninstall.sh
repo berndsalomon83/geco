@@ -43,8 +43,11 @@ else
 fi
 
 # Remove the opencode health plugin (installed by install.sh).
-if [ -f "$HOME/.config/opencode/plugin/geco-tui.ts" ]; then
-    rm -f "$HOME/.config/opencode/plugin/geco-tui.ts"
-    say "Removed opencode health plugin"
-fi
+for d in "plugins" "plugin"; do
+    f="$HOME/.config/opencode/$d/geco-tui.ts"
+    if [ -f "$f" ]; then
+        rm -f "$f"
+        say "Removed opencode health plugin ($d/)"
+    fi
+done
 say "Done. Restart your agents; re-add any servers you still want direct."
