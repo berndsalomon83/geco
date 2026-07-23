@@ -317,6 +317,33 @@ fn keychain_lookup(service: &str) -> Result<String> {
     Ok(secret)
 }
 
+/// Check whether a binary is resolvable: either a path that exists, or a
+/// name found in any directory on PATH. Used by `validate` to catch typo'd
+/// commands before they fail at first `execute`.
+fn binary_exists(bin: &str) -> bool {
+    let p = std::path::Path::new(bin);
+    // If it contains a path separator, check the path directly.
+    if p.components().count() > 1 {
+        return p.exists();
+    }
+    // Otherwise scan PATH dirs.
+    let Some(path) = std::env::var_os("PATH") else { return true; };
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(bin);
+        if candidate.exists() {
+            return true;
+        }
+        // On Windows, try with .exe suffix.
+        if cfg!(target_os = "windows") {
+            let with_ext = dir.join(format!("{bin}.exe"));
+            if with_ext.exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
@@ -360,11 +387,40 @@ impl Config {
     pub fn validate(&self) -> Vec<(String, String)> {
         let mut findings = Vec::new();
 
+        // Proxy-level checks.
+        if self.proxy.startup_timeout_secs == 0 {
+            findings.push(("error".into(),
+                "proxy.startup_timeout_secs is 0 — backends will fail to initialize instantly".into()));
+        }
+        if self.proxy.call_timeout_secs == 0 {
+            findings.push(("error".into(),
+                "proxy.call_timeout_secs is 0 — every tool call will time out instantly".into()));
+        }
+
         // Per-server checks.
         for (name, s) in &self.servers {
             if s.command.0.is_empty() {
                 findings.push(("error".into(),
                     format!("server '{name}': empty command array")));
+            } else if let Ok((bin, _)) = s.command_line() {
+                // Warn if the binary doesn't exist on PATH or as a path.
+                // Skipped for known package managers that download the real
+                // server at runtime — a missing npx is the user's env problem,
+                // not a config mistake.
+                const DOWNLOADERS: &[&str] = &[
+                    "npx", "uvx", "uv", "node", "nodejs",
+                    "python3", "python", "pip", "pipx",
+                    "docker", "docker-compose",
+                    "bun", "deno", "cargo",
+                ];
+                let bin_name = std::path::Path::new(&bin)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&bin);
+                if !DOWNLOADERS.contains(&bin_name) && !binary_exists(&bin) {
+                    findings.push(("warning".into(),
+                        format!("server '{name}': command '{bin}' not found on PATH (will fail at spawn)")));
+                }
             }
             // Try keychain lookups — verifies the item exists at validate time.
             // Loop through all ${keychain:...} occurrences in each value.
@@ -386,6 +442,36 @@ impl Config {
                         break; // unterminated ${keychain: — expand_value will error at runtime
                     }
                 }
+            }
+            // Warn on unset ${VAR} references in command, args, and env.
+            // A typo like ${GITHUB_TOKN} silently expands to "" — the backend
+            // gets an empty token and fails with an opaque auth error. Keychain
+            // refs are already checked above (hard error); these are plain env.
+            let scan_var = |value: &str, field: &str, findings: &mut Vec<(String, String)>| {
+                let mut search = 0;
+                while let Some(start) = value[search..].find("${") {
+                    let abs = search + start;
+                    if let Some(end) = value[abs + 2..].find('}') {
+                        let var = &value[abs + 2..abs + 2 + end];
+                        // Skip keychain refs — handled above.
+                        if !var.starts_with("keychain:") && std::env::var(var).is_err() {
+                            findings.push(("warning".into(),
+                                format!("server '{name}': {field} references '${{{var}}}' which is not set (will expand to empty)")));
+                        }
+                        search = abs + 2 + end + 1;
+                    } else {
+                        break;
+                    }
+                }
+            };
+            for c in &s.command.0 {
+                scan_var(c, "command", &mut findings);
+            }
+            for a in &s.args {
+                scan_var(a, "args", &mut findings);
+            }
+            for (k, v) in &s.env {
+                scan_var(v, &format!("env[{k}]"), &mut findings);
             }
             // pass_env vars not in the proxy's env (warning).
             for var in &s.pass_env {
@@ -565,9 +651,28 @@ mcpServers:
     #[test]
     fn schema_covers_the_surface() {
         let s = Config::schema_json();
-        for key in ["mcpServers", "allow", "deny", "call_timeout_secs"] {
+        for key in ["mcpServers", "allow", "deny", "call_timeout_secs", "pass_env", "health_check_secs"] {
             assert!(s.contains(key), "schema missing {key}");
         }
+    }
+
+    /// The checked-in geco.schema.json must match the runtime-generated schema.
+    /// Catches drift whenever a config field is added/removed without
+    /// regenerating the file (`geco schema > geco.schema.json`).
+    #[test]
+    fn schema_json_matches_committed_file() {
+        let committed = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("geco.schema.json")
+        ).expect("geco.schema.json must exist at crate root");
+        let generated = Config::schema_json();
+        // Compare after parsing so formatting/whitespace differences don't
+        // cause false failures — only structural drift is reported.
+        let committed_val: serde_json::Value = serde_json::from_str(&committed)
+            .expect("geco.schema.json must be valid JSON");
+        let generated_val: serde_json::Value = serde_json::from_str(&generated)
+            .expect("runtime schema must be valid JSON");
+        assert_eq!(committed_val, generated_val,
+            "geco.schema.json is stale — run: geco schema > geco.schema.json");
     }
 
     #[test]
@@ -656,5 +761,73 @@ mcpServers:
         let findings = cfg.validate();
         let errors: Vec<_> = findings.iter().filter(|(s, _)| s == "error").collect();
         assert!(errors.is_empty(), "expected no errors for clean config: {findings:?}");
+    }
+
+    #[test]
+    fn validate_catches_zero_startup_timeout() {
+        let raw = r#"{"proxy":{"startup_timeout_secs":0},"mcpServers":{"s":{"command":["npx"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "error" && m.contains("startup_timeout_secs")),
+                "expected error about zero startup_timeout_secs: {findings:?}");
+    }
+
+    #[test]
+    fn validate_catches_zero_call_timeout() {
+        let raw = r#"{"proxy":{"call_timeout_secs":0},"mcpServers":{"s":{"command":["npx"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "error" && m.contains("call_timeout_secs")),
+                "expected error about zero call_timeout_secs: {findings:?}");
+    }
+
+    #[test]
+    fn validate_warns_missing_binary() {
+        let raw = r#"{"mcpServers":{"s":{"command":["geco-nonexistent-binary-xyz"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("not found on PATH")),
+                "expected warning about missing binary: {findings:?}");
+    }
+
+    #[test]
+    fn validate_does_not_warn_for_npx() {
+        // npx is a known package manager — even if missing, it's not a config typo.
+        let raw = r#"{"mcpServers":{"s":{"command":["npx","-y","some-server"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(!findings.iter().any(|(_, m)| m.contains("not found on PATH")),
+                "npx should not trigger binary-not-found warning: {findings:?}");
+    }
+
+    #[test]
+    fn validate_warns_unset_env_var() {
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${GECO_TYPO_VAR_XYZ}"}}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("GECO_TYPO_VAR_XYZ")),
+                "expected warning about unset env var: {findings:?}");
+    }
+
+    #[test]
+    fn validate_warns_unset_env_var_in_args() {
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"args":["${GECO_TYPO_ARG_XYZ}"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("GECO_TYPO_ARG_XYZ")),
+                "expected warning about unset env var in args: {findings:?}");
+    }
+
+    #[test]
+    fn validate_does_not_warn_set_env_var() {
+        std::env::set_var("GECO_SET_VAR_TEST", "value");
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"X":"${GECO_SET_VAR_TEST}"}}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        let env_warnings: Vec<_> = findings.iter()
+            .filter(|(_, m)| m.contains("GECO_SET_VAR_TEST"))
+            .collect();
+        assert!(env_warnings.is_empty(), "set var should not warn: {findings:?}");
+        std::env::remove_var("GECO_SET_VAR_TEST");
     }
 }

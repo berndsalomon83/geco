@@ -39,6 +39,13 @@
           "description": "Refresh the tool snapshot at startup when the config changed.",
           "type": "boolean",
           "default": true
+        },
+        "health_check_secs": {
+          "description": "How often to check if warm backends are still alive (seconds).\n0 = disabled. When a dead connection is detected, it is reset\nso the next execute reconnects fresh.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30
         }
       }
     },
@@ -84,7 +91,7 @@
           "default": {}
         },
         "description": {
-          "description": "One-line description shown in `list_servers`. Optional but worth\nwriting: it is the only thing the agent sees before drilling in.",
+          "description": "One-line description shown in `list_mcp_servers`. Optional but worth\nwriting: it is the only thing the agent sees before drilling in.",
           "type": [
             "string",
             "null"
@@ -110,6 +117,14 @@
         "enabled": {
           "type": "boolean",
           "default": true
+        },
+        "pass_env": {
+          "description": "Environment variables to forward from the proxy's own environment\nto the backend at spawn time. Shortcut for `env: { KEY: \"${KEY}\" }`\n— useful when multiple backends share the same secret that's already\nin the proxy's env (e.g. `pass_env: [\"GITHUB_TOKEN\"]`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         }
       },
       "required": [
@@ -117,16 +132,15 @@
       ]
     },
     "CommandField": {
-      "description": "\"command\": \"npx\" + \"args\": [...]  (Claude style)  — or —\n\"command\": [\"npx\", \"-y\", \"server\"] (OpenCode style)",
-      "anyOf": [
+      "oneOf": [
+        {
+          "type": "string"
+        },
         {
           "type": "array",
           "items": {
             "type": "string"
           }
-        },
-        {
-          "type": "string"
         }
       ]
     }

@@ -96,10 +96,73 @@ async fn main() -> Result<()> {
         println!("{}", Config::schema_json());
         return Ok(());
     }
+
+    // Stats needs only health.json — work even with no config file at all.
+    if matches!(cli.command, Some(Cmd::Stats)) {
+        let health_path = geco::health::health_path();
+        match geco::health::read(&health_path) {
+            Some(report) => {
+                if let Some(metrics) = &report.metrics {
+                    eprintln!("geco metrics (since {})", metrics.started_at);
+                    eprintln!("  total calls:    {}", metrics.total_calls);
+                    eprintln!("  total errors:   {}", metrics.total_errors);
+                    eprintln!();
+                    eprintln!("{:24} {:>6} {:>6} {:>5} {:>8}  last_call", "server", "calls", "errors", "cold", "avg_ms");
+                    for (name, m) in &metrics.per_backend {
+                        let avg = if m.calls > 0 { m.total_latency_ms.checked_div(m.calls).unwrap_or(0) } else { 0 };
+                        eprintln!("{name:24} {calls:>6} {errors:>6} {cold:>5} {avg:>8}  {last}",
+                                   calls = m.calls, errors = m.errors,
+                                   cold = m.cold_starts, avg = avg,
+                                   last = m.last_call_at.as_deref().unwrap_or("-"));
+                    }
+                } else {
+                    eprintln!("no metrics in {} (proxy not running or old version)", health_path.display());
+                }
+            }
+            None => eprintln!("no health file at {} — is the proxy running?", health_path.display()),
+        }
+        return Ok(());
+    }
+
+    // Inspect needs only the cached snapshot — work even with no config file.
+    // The "current/stale" label requires the config hash, but we degrade
+    // gracefully to "?" when the config can't be found or parsed.
+    if matches!(cli.command, Some(Cmd::Inspect)) {
+        let snapshot_path = match find_config(&cli).ok() {
+            Some(cp) => Snapshot::cache_path(&cp),
+            None => {
+                eprintln!("no snapshot — no config found (pass --config)");
+                return Ok(());
+            }
+        };
+        match Snapshot::load(&snapshot_path) {
+            Some(snap) => {
+                let config_hash_label = match find_config(&cli).ok().and_then(|cp| Config::load(&cp).ok()) {
+                    Some(cfg) => {
+                        if snap.config_hash == cfg.snapshot_hash() { "current" } else { "STALE" }
+                    }
+                    None => "? (config unreadable)",
+                };
+                eprintln!(
+                    "snapshot {} (config {}) generated {}",
+                    snapshot_path.display(),
+                    config_hash_label,
+                    snap.generated_at
+                );
+                for (name, s) in &snap.servers {
+                    eprintln!("{name:24} {:4} tools  {}", s.tools.len(), s.refresh_status);
+                }
+            }
+            None => eprintln!("no snapshot yet — run: geco refresh"),
+        }
+        return Ok(());
+    }
+
+    // All remaining subcommands (Refresh, Validate, Serve) need a config file.
     let config_path = find_config(&cli)?;
+    let snapshot_path = Snapshot::cache_path(&config_path);
     let cfg = Config::load(&config_path)?;
     let hash = cfg.snapshot_hash();
-    let snapshot_path = Snapshot::cache_path(&config_path);
     let registry = std::sync::Arc::new(Registry::from_config(&cfg));
 
     match cli.command.unwrap_or(Cmd::Serve { refresh: false, no_refresh: false }) {
@@ -133,46 +196,7 @@ async fn main() -> Result<()> {
             // kept for match exhaustiveness.
             unreachable!()
         }
-        Cmd::Inspect => {
-            match Snapshot::load(&snapshot_path) {
-                Some(snap) => {
-                    eprintln!(
-                        "snapshot {} (config {}) generated {}",
-                        snapshot_path.display(),
-                        if snap.config_hash == hash { "current" } else { "STALE" },
-                        snap.generated_at
-                    );
-                    for (name, s) in &snap.servers {
-                        eprintln!("{name:24} {:4} tools  {}", s.tools.len(), s.refresh_status);
-                    }
-                }
-                None => eprintln!("no snapshot yet — run: geco refresh"),
-            }
-        }
-        Cmd::Stats => {
-            let health_path = geco::health::health_path();
-            match geco::health::read(&health_path) {
-                Some(report) => {
-                    if let Some(metrics) = &report.metrics {
-                        eprintln!("geco metrics (since {})", metrics.started_at);
-                        eprintln!("  total calls:    {}", metrics.total_calls);
-                        eprintln!("  total errors:   {}", metrics.total_errors);
-                        eprintln!();
-                        eprintln!("{:24} {:>6} {:>6} {:>5} {:>8}  last_call", "server", "calls", "errors", "cold", "avg_ms");
-                        for (name, m) in &metrics.per_backend {
-                            let avg = if m.calls > 0 { m.total_latency_ms.checked_div(m.calls).unwrap_or(0) } else { 0 };
-                            eprintln!("{name:24} {calls:>6} {errors:>6} {cold:>5} {avg:>8}  {last}",
-                                       calls = m.calls, errors = m.errors,
-                                       cold = m.cold_starts, avg = avg,
-                                       last = m.last_call_at.as_deref().unwrap_or("-"));
-                        }
-                    } else {
-                        eprintln!("no metrics in {} (proxy not running or old version)", health_path.display());
-                    }
-                }
-                None => eprintln!("no health file at {} — is the proxy running?", health_path.display()),
-            }
-        }
+        Cmd::Inspect | Cmd::Stats => unreachable!(),
         Cmd::Serve { refresh, no_refresh } => {
             let cached = Snapshot::load(&snapshot_path);
             let stale = cached.as_ref().map(|s| s.config_hash != hash).unwrap_or(true);
@@ -209,11 +233,44 @@ async fn main() -> Result<()> {
             proxy.publish_health().await;
             proxy.clone().spawn_hot_reload();
             proxy.clone().spawn_health_check();
+            proxy.clone().spawn_skill_reload();
             let service = proxy
                 .clone()
                 .serve(rmcp::transport::stdio())
                 .await
                 .context("failed to start stdio server")?;
+
+            // Graceful shutdown on SIGINT/SIGTERM — without this, killing the
+            // proxy orphans every backend child process. The signal task sets
+            // the shutdown flag (so hot-reload/health/skill watchers stop)
+            // and cancels the stdio service so `waiting()` returns promptly.
+            let proxy_for_signal = proxy.clone();
+            let cancel_token = service.cancellation_token();
+            tokio::spawn(async move {
+                use tokio::signal;
+                #[cfg(unix)]
+                let mut sigterm = {
+                    use signal::unix::{signal, SignalKind};
+                    match signal(SignalKind::terminate()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!("cannot install SIGTERM handler: {e}");
+                            return;
+                        }
+                    }
+                };
+                #[cfg(unix)]
+                { tokio::select! {
+                    _ = signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                } }
+                #[cfg(not(unix))]
+                { let _ = signal::ctrl_c().await; }
+                tracing::info!("signal received — shutting down");
+                proxy_for_signal.set_shutdown();
+                cancel_token.cancel();
+            });
+
             let _ = service.waiting().await;
             proxy.shutdown_backends().await;
         }

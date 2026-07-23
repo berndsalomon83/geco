@@ -161,6 +161,7 @@ pub struct Proxy {
     skill_dirs: Arc<RwLock<Vec<String>>>,
     absorb_dirs: Arc<RwLock<Vec<String>>>,
     absorb_issues: Arc<RwLock<Vec<Issue>>>,
+    config_issues: Arc<RwLock<Vec<Issue>>>,
     client: Arc<RwLock<Option<String>>>,
     metrics: Arc<RwLock<crate::health::Metrics>>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
@@ -309,6 +310,7 @@ impl Proxy {
             skill_dirs: Arc::new(RwLock::new(skill_dirs)),
             absorb_dirs: Arc::new(RwLock::new(absorb_dirs)),
             absorb_issues: Arc::new(RwLock::new(absorb_issues)),
+            config_issues: Arc::new(RwLock::new(Vec::new())),
             client: Arc::new(RwLock::new(None)),
             metrics: Arc::new(RwLock::new(metrics)),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -394,12 +396,31 @@ impl Proxy {
                 let cfg = match crate::config::Config::load(&config_path) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::warn!("config reload failed (keeping old config): {e:#}");
+                        let msg = format!("{e:#}");
+                        tracing::warn!("config reload failed (keeping old config): {msg}");
+                        *proxy.config_issues.write().await = vec![Issue {
+                            kind: "config".into(),
+                            subject: "reload".into(),
+                            detail: format!("parse failed (keeping old config): {msg}"),
+                            severity: "error".into(),
+                        }];
+                        proxy.publish_health().await;
                         continue;
                     }
                 };
                 if let Err(e) = proxy.reload_from_config(cfg).await {
-                    tracing::warn!("hot-reload: reload failed: {e:#}");
+                    let msg = format!("{e:#}");
+                    tracing::warn!("hot-reload: reload failed: {msg}");
+                    *proxy.config_issues.write().await = vec![Issue {
+                        kind: "config".into(),
+                        subject: "reload".into(),
+                        detail: format!("reload failed (keeping old config): {msg}"),
+                        severity: "error".into(),
+                    }];
+                    proxy.publish_health().await;
+                } else {
+                    // Successful reload — reload_from_config already cleared
+                    // config_issues and published health via rescan_skills.
                 }
             }
         });
@@ -442,6 +463,118 @@ impl Proxy {
                     proxy.publish_health().await;
                     tracing::info!("health check: reset {} dead backend(s): {:?}", dead.len(), dead);
                 }
+            }
+        });
+    }
+
+    /// Spawn a background task that watches the skill directories and absorb
+    /// directories for changes. When a SKILL.md is added, edited, or removed
+    /// (or a new skill is dropped into an absorb dir), re-runs absorb + scan
+    /// so the gateway picks it up without a config touch or a manual
+    /// `refresh_tools`. Watches recursively; editor temp-file + rename bursts
+    /// are drained (debounced) before the rescan.
+    ///
+    /// Re-evaluates watch roots after each event cycle so that new dirs added
+    /// to `skills.dirs` / `skills.absorb` via hot-reload are picked up without
+    /// restarting the proxy.
+    pub fn spawn_skill_reload(self) {
+        let proxy = self.clone();
+        let shutdown = self.shutdown.clone();
+
+        tokio::spawn(async move {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
+            let tx_clone = tx.clone();
+            let mut watcher = match RecommendedWatcher::new(
+                move |res: notify::Result<notify::Event>| {
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Ok(event) = res {
+                        if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+                            let _ = tx_clone.blocking_send(());
+                        }
+                    }
+                },
+                notify::Config::default(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("skill watcher disabled: {e}");
+                    return;
+                }
+            };
+
+            // Track which roots we're currently watching so we can add new
+            // ones and remove stale ones when hot-reload changes the config.
+            use std::collections::HashSet;
+            let mut watched: HashSet<PathBuf> = HashSet::new();
+
+            // Resolve the dirs to watch from the current config and sync the
+            // watcher. Called at startup and after each event cycle.
+            let sync_watches = |watcher: &mut RecommendedWatcher, watched: &mut HashSet<PathBuf>| {
+                let desired: HashSet<PathBuf> = {
+                    let skill_dirs = proxy.skill_dirs.blocking_read();
+                    let absorb_dirs = proxy.absorb_dirs.blocking_read();
+                    skill_dirs.iter().chain(absorb_dirs.iter())
+                        .map(|d| crate::skills::expand_tilde(d))
+                        .filter(|d| d.exists())
+                        .collect()
+                };
+                // Add new roots.
+                let to_add: Vec<PathBuf> = desired.difference(watched).cloned().collect();
+                for root in &to_add {
+                    match watcher.watch(root, RecursiveMode::Recursive) {
+                        Ok(()) => { watched.insert(root.clone()); }
+                        Err(e) => tracing::warn!("skill watcher: cannot watch {}: {e}", root.display()),
+                    }
+                }
+                // Remove stale roots.
+                let to_remove: Vec<PathBuf> = watched.difference(&desired).cloned().collect();
+                for root in &to_remove {
+                    let _ = watcher.unwatch(root);
+                }
+                watched.retain(|d| desired.contains(d));
+            };
+
+            sync_watches(&mut watcher, &mut watched);
+            if watched.is_empty() {
+                // Nothing to watch yet — but keep the task alive so hot-reload
+                // can add dirs later. Poll for config changes periodically.
+            }
+
+            // Don't leak the watcher — keep it in the task scope so we can
+            // reconfigure it. The task lives for the process lifetime.
+            loop {
+                if proxy.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+
+                // If we're not watching anything, poll for new dirs periodically
+                // instead of blocking on recv (which would never fire).
+                if watched.is_empty() {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    sync_watches(&mut watcher, &mut watched);
+                    continue;
+                }
+
+                if rx.recv().await.is_none() {
+                    break;
+                }
+                // Drain any burst of events (editors write temp + rename,
+                // firing multiple events in quick succession).
+                while rx.try_recv().is_ok() {}
+
+                // Small debounce window so a multi-file editor operation
+                // (e.g. git checkout touching several skills at once) coalesces
+                // into a single rescan.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                while rx.try_recv().is_ok() {}
+
+                proxy.rescan_skills().await;
+                tracing::info!("skill watcher: rescan complete");
+
+                // Re-evaluate watch roots in case hot-reload changed the config.
+                sync_watches(&mut watcher, &mut watched);
             }
         });
     }
@@ -496,19 +629,36 @@ impl Proxy {
             tracing::warn!("hot-reload: cannot persist snapshot: {e:#}");
         }
 
-        let skill_dirs = self.skill_dirs.read().await.clone();
-        let absorb_dirs = self.absorb_dirs.read().await.clone();
-        let (scanned, issues) = Self::absorb_and_scan(&skill_dirs, &absorb_dirs);
-        *self.absorb_issues.write().await = issues;
-        *self.skills.write().await = scanned;
+        // Clear any prior config-reload issue BEFORE rescan_skills, which
+        // calls publish_health() — otherwise the health file is written
+        // with the stale error still present.
+        let mut issues = self.config_issues.write().await;
+        let had_issues = !issues.is_empty();
+        if had_issues {
+            issues.clear();
+        }
+        drop(issues);
 
-        self.publish_health().await;
+        self.rescan_skills().await;
         Ok(())
+    }
+
+    /// Mark the proxy as shutting down. Background watchers (hot-reload,
+    /// health-check, skill-reload) check this flag and exit their loops.
+    pub fn set_shutdown(&self) {
+        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set the config-reload issue (used by the hot-reload watcher and
+    /// exposed for tests so the health surface can be verified without
+    /// triggering the OS-dependent file watcher).
+    pub async fn set_config_issue(&self, issue: Option<Issue>) {
+        *self.config_issues.write().await = issue.map(|i| vec![i]).unwrap_or_default();
     }
 
     /// Shut down all backend processes. Called when the proxy is stopping.
     pub async fn shutdown_backends(&self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.set_shutdown();
         let registry = self.registry.read().await;
         registry.shutdown_all().await;
     }
@@ -535,19 +685,21 @@ impl Proxy {
         // Clone what we need and drop locks before awaiting backend
         // status() — holding the registry read lock across async status
         // checks would block hot-reload (which needs a write lock).
-        let (servers, absorb) = {
+        let (servers, absorb, config) = {
             let snap = self.snapshot.read().await;
             let absorb = self.absorb_issues.read().await.clone();
+            let config = self.config_issues.read().await.clone();
             let servers: Vec<_> = snap.servers.iter()
                 .map(|(n, s)| (n.clone(), s.refresh_status.clone()))
                 .collect();
-            (servers, absorb)
+            (servers, absorb, config)
         };
         let registry = {
             let guard = self.registry.read().await;
             guard.clone()
         };
         let mut issues = absorb;
+        issues.extend(config);
         for (name, refresh_status) in &servers {
             let snapshot_ok = refresh_status == "ok";
             if !snapshot_ok {
@@ -617,6 +769,27 @@ impl Proxy {
             });
         }
         (scanned, issues)
+    }
+
+    /// Re-run absorb + scan and swap the results into `self.skills` /
+    /// `self.absorb_issues`, then publish health. Used by reload_from_config,
+    /// refresh_tools, and spawn_skill_reload so the three callers never drift.
+    /// The absorb + scan is sync filesystem I/O, so it runs on a blocking
+    /// thread to avoid stalling the async runtime.
+    pub async fn rescan_skills(&self) {
+        let skill_dirs = self.skill_dirs.read().await.clone();
+        let absorb_dirs = self.absorb_dirs.read().await.clone();
+        let (scanned, issues) = tokio::task::spawn_blocking(move || {
+            Self::absorb_and_scan(&skill_dirs, &absorb_dirs)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("rescan_skills: blocking task panicked: {e}");
+            (SkillIndex::default(), Vec::new())
+        });
+        *self.absorb_issues.write().await = issues;
+        *self.skills.write().await = scanned;
+        self.publish_health().await;
     }
 
     #[tool(
@@ -807,8 +980,11 @@ impl Proxy {
                 match backend.call(&call.tool, call.arguments, &proxy_cfg).await {
                     Ok(result) => {
                         let elapsed = start.elapsed().as_millis() as u64;
-                        // Concatenate all text blocks; note non-text blocks.
-                        let mut text = result.content.iter()
+                        // Flatten text blocks for the convenience "result" field,
+                        // but also include the full structured "content" array so
+                        // non-text blocks (images, audio, resources) survive —
+                        // e.g. Playwright screenshots return ImageContent.
+                        let text = result.content.iter()
                             .filter_map(|b| {
                                 if let ContentBlock::Text(t) = b { Some(t.text.as_str()) }
                                 else { None }
@@ -818,11 +994,6 @@ impl Proxy {
                         let has_non_text = result.content.iter().any(|b| {
                             !matches!(b, ContentBlock::Text(_))
                         });
-                        if has_non_text && !text.is_empty() {
-                            text.push_str("\n[non-text content omitted]");
-                        } else if has_non_text {
-                            text = "[non-text content omitted]".to_string();
-                        }
                         let ok = !result.is_error.unwrap_or(false);
                         let mut entry = json!({
                             "server": call.server,
@@ -830,6 +1001,12 @@ impl Proxy {
                             "ok": ok,
                             "result": text,
                         });
+                        // Pass through the full content array when non-text
+                        // blocks are present so images/resources aren't lost.
+                        if has_non_text {
+                            entry["content"] = serde_json::to_value(&result.content)
+                                .unwrap_or(json!([]));
+                        }
                         if !ok {
                             entry["error"] = json!({
                                 "code": "tool_error",
@@ -877,6 +1054,15 @@ impl Proxy {
                     // or failure), update health so the TUI plugin stays in sync.
                     if was_down {
                         needs_health_update = true;
+                    }
+                    // A timeout or transport error on a previously-up backend
+                    // flips it to Status::Failed — surface that to health too,
+                    // otherwise the TUI toast misses the most common failure mode.
+                    if !ok {
+                        let code = results[i]["error"]["code"].as_str().unwrap_or("");
+                        if matches!(code, "timeout" | "backend_error") {
+                            needs_health_update = true;
+                        }
                     }
                     let mut metrics = self.metrics.write().await;
                     metrics.total_calls += 1;
@@ -929,15 +1115,23 @@ impl Proxy {
         &self,
         Parameters(p): Parameters<ReadSkillParams>,
     ) -> Result<CallToolResult, McpError> {
-        let idx = self.skills.read().await;
-        let Some(meta) = idx.get(&p.name) else {
+        let meta = {
+            let idx = self.skills.read().await;
+            idx.get(&p.name).cloned()
+        };
+        let Some(meta) = meta else {
             return Ok(structured_err_ctx(
                 "unknown_skill",
                 &format!("skill '{}' not found", p.name),
                 json!({ "name": p.name }),
             ));
         };
-        match read_skill(meta) {
+        // read_skill does sync filesystem I/O (read_to_string + recursive
+        // collect_files) — run it on a blocking thread.
+        let result = tokio::task::spawn_blocking(move || read_skill(&meta))
+            .await
+            .map_err(|e| McpError::internal_error(format!("read_skill task failed: {e}"), None))?;
+        match result {
             Ok((body, files)) => {
                 let tree = if files.is_empty() {
                     String::new()
@@ -1026,12 +1220,23 @@ impl Proxy {
         if let Err(e) = snapshot_to_save.save(&self.snapshot_path) {
             tracing::warn!("cannot persist snapshot: {e:#}");
         }
-        let skill_dirs = self.skill_dirs.read().await.clone();
-        let absorb_dirs = self.absorb_dirs.read().await.clone();
-        let (scanned, issues) = Self::absorb_and_scan(&skill_dirs, &absorb_dirs);
-        *self.absorb_issues.write().await = issues;
-        *self.skills.write().await = scanned;
-        self.publish_health().await;
+
+        // Shut down backends that disappeared from the config, mirroring
+        // reload_from_config. Without this, a manual refresh after removing
+        // a server leaks the child process.
+        let removed_backends: Vec<(String, std::sync::Arc<crate::backend::Backend>)> = {
+            let registry = self.registry.read().await;
+            registry.backends.iter()
+                .filter(|(name, _)| !snapshot_to_save.servers.contains_key(name.as_str()))
+                .map(|(n, b)| (n.clone(), b.clone()))
+                .collect()
+        };
+        for (name, backend) in &removed_backends {
+            backend.shutdown().await;
+            tracing::info!("refresh_tools: shut down removed backend '{name}'");
+        }
+
+        self.rescan_skills().await;
         Ok(text_result(json!({
             "summary": summary,
             "diff": diff,

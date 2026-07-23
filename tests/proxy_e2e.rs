@@ -526,6 +526,163 @@ async fn skills_through_proxy() {
 }
 
 #[tokio::test]
+async fn rescan_skills_picks_up_new_skill() {
+    // Test rescan_skills directly (not the file watcher, which is
+    // OS-dependent and hard to test reliably). After dropping a new skill
+    // dir into the library and calling rescan_skills, the new skill should
+    // appear in list_skills without touching the config.
+    let Some(cfg) = stub_config() else { return };
+    let lib = make_skill_library();
+    let (proxy, registry) = make_proxy_with_skills(
+        &cfg,
+        vec![lib.path().display().to_string()],
+    )
+    .await;
+
+    // Initially 2 skills.
+    let result = proxy.list_skills().await.unwrap();
+    let json = extract_json(&result);
+    assert_eq!(json["count"], 2, "expected 2 skills initially: {json}");
+
+    // Drop a third skill into the library dir.
+    let s3 = lib.path().join("third-skill");
+    std::fs::create_dir_all(&s3).unwrap();
+    std::fs::write(s3.join("SKILL.md"),
+        "---\nname: third-skill\ndescription: A skill added after startup\n---\n\n# Third Skill\n").unwrap();
+
+    // rescan_skills (what spawn_skill_reload calls on a filesystem event).
+    proxy.rescan_skills().await;
+
+    // Now 3 skills, including the new one.
+    let result = proxy.list_skills().await.unwrap();
+    let json = extract_json(&result);
+    assert_eq!(json["count"], 3, "expected 3 skills after rescan: {json}");
+    let skills = json["skills"].as_array().unwrap();
+    let names: Vec<_> = skills.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"third-skill"), "expected third-skill in {names:?}");
+
+    // read_skill works on the newly-added skill.
+    let result = proxy
+        .read_skill(Parameters(ReadSkillParams { name: "third-skill".into() }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "expected read_skill to find third-skill");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn rescan_skills_picks_up_edited_description() {
+    // Editing a SKILL.md frontmatter should update the description
+    // returned by list_skills after a rescan.
+    let Some(cfg) = stub_config() else { return };
+    let lib = make_skill_library();
+    let (proxy, registry) = make_proxy_with_skills(
+        &cfg,
+        vec![lib.path().display().to_string()],
+    )
+    .await;
+
+    // Initial description for code-reviewer.
+    let result = proxy.list_skills().await.unwrap();
+    let json = extract_json(&result);
+    let reviewer = json["skills"].as_array().unwrap()
+        .iter().find(|s| s["name"] == "code-reviewer").unwrap();
+    assert_eq!(reviewer["description"], "Review code for bugs and improvements");
+
+    // Edit the SKILL.md frontmatter description.
+    let s2 = lib.path().join("code-reviewer");
+    std::fs::write(s2.join("SKILL.md"),
+        "---\nname: code-reviewer\ndescription: UPDATED description after edit\n---\n\n# Code Reviewer\n").unwrap();
+
+    proxy.rescan_skills().await;
+
+    // Description should now reflect the edit.
+    let result = proxy.list_skills().await.unwrap();
+    let json = extract_json(&result);
+    let reviewer = json["skills"].as_array().unwrap()
+        .iter().find(|s| s["name"] == "code-reviewer").unwrap();
+    assert_eq!(reviewer["description"], "UPDATED description after edit",
+        "expected updated description: {reviewer}");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn rescan_skills_drops_removed_skill() {
+    // Removing a skill dir should make it disappear from list_skills
+    // after a rescan.
+    let Some(cfg) = stub_config() else { return };
+    let lib = make_skill_library();
+    let (proxy, registry) = make_proxy_with_skills(
+        &cfg,
+        vec![lib.path().display().to_string()],
+    )
+    .await;
+
+    assert_eq!(extract_json(&proxy.list_skills().await.unwrap())["count"], 2);
+
+    // Remove the code-reviewer skill entirely.
+    std::fs::remove_dir_all(lib.path().join("code-reviewer")).unwrap();
+
+    proxy.rescan_skills().await;
+
+    let result = proxy.list_skills().await.unwrap();
+    let json = extract_json(&result);
+    assert_eq!(json["count"], 1, "expected 1 skill after removal: {json}");
+    let skills = json["skills"].as_array().unwrap();
+    assert_eq!(skills[0]["name"], "test-planner");
+
+    // read_skill should now error for the removed skill.
+    let result = proxy
+        .read_skill(Parameters(ReadSkillParams { name: "code-reviewer".into() }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "expected error for removed skill");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn config_reload_failure_surfaces_in_health() {
+    let Some(cfg) = stub_config() else { return };
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // Initially healthy (no config issues).
+    let result = proxy.health().await.unwrap();
+    let json = extract_json(&result);
+    assert!(json["issues"].as_array().unwrap().iter().all(|i| i["kind"] != "config"),
+            "expected no config issues initially: {json}");
+
+    // Simulate a config-reload failure (what the hot-reload watcher does on
+    // a broken config file).
+    proxy.set_config_issue(Some(geco::health::Issue {
+        kind: "config".into(),
+        subject: "reload".into(),
+        detail: "parse failed (keeping old config): invalid YAML".into(),
+        severity: "error".into(),
+    })).await;
+
+    // Health should now surface the config issue.
+    let result = proxy.health().await.unwrap();
+    let json = extract_json(&result);
+    let config_issues: Vec<_> = json["issues"].as_array().unwrap().iter()
+        .filter(|i| i["kind"] == "config").collect();
+    assert_eq!(config_issues.len(), 1, "expected 1 config issue: {json}");
+    assert!(config_issues[0]["detail"].as_str().unwrap().contains("parse failed"),
+            "expected parse failed in detail: {config_issues:?}");
+
+    // Clear the issue (what a successful reload does).
+    proxy.set_config_issue(None).await;
+    let result = proxy.health().await.unwrap();
+    let json = extract_json(&result);
+    assert!(json["issues"].as_array().unwrap().iter().all(|i| i["kind"] != "config"),
+            "expected no config issues after clear: {json}");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
 async fn execute_on_warm_backend_reuses_connection() {
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;

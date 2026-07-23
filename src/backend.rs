@@ -159,7 +159,22 @@ impl Backend {
         match res {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(e)) => {
-                // Protocol-level error (tool errored/unknown): keep connection.
+                // Transport/protocol error. If the connection is dead (child
+                // exited, transport closed), reset so the next call reconnects
+                // fresh instead of reusing a dead conn for up to 30s.
+                let msg = format!("{e:#}");
+                let is_dead = msg.contains("stream closed")
+                    || msg.contains("channel closed")
+                    || msg.contains("broken pipe")
+                    || msg.contains("connection reset")
+                    || conn.is_closed();
+                if is_dead {
+                    *self.conn.lock().await = None;
+                    *self.status.lock().await = Status::Failed {
+                        error: format!("transport error: {msg}"),
+                        at: now(),
+                    };
+                }
                 Err(anyhow!("backend '{}' call failed: {e}", self.name))
             }
             Err(_) => {
