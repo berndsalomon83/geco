@@ -106,10 +106,18 @@ impl Stats {
         }
     }
     fn pct(&self, k: usize) -> f64 {
-        if self.n == 0 { 0.0 } else { k as f64 * 100.0 / self.n as f64 }
+        if self.n == 0 {
+            0.0
+        } else {
+            k as f64 * 100.0 / self.n as f64
+        }
     }
     fn mrr(&self) -> f64 {
-        if self.n == 0 { 0.0 } else { self.rr_sum / self.n as f64 }
+        if self.n == 0 {
+            0.0
+        } else {
+            self.rr_sum / self.n as f64
+        }
     }
     fn line(&self, label: &str) -> String {
         format!(
@@ -162,7 +170,12 @@ fn evaluate() -> Report {
         }
     }
 
-    Report { overall, lexical, semantic, misses }
+    Report {
+        overall,
+        lexical,
+        semantic,
+        misses,
+    }
 }
 
 /// Regression guard. The floors are set just under measured performance —

@@ -86,7 +86,10 @@ pub struct EnvPolicy {
 impl EnvPolicy {
     /// Pre-0.7 behaviour: the child inherits everything.
     pub fn inherit_all() -> Self {
-        Self { inherit: true, passthrough: Vec::new() }
+        Self {
+            inherit: true,
+            passthrough: Vec::new(),
+        }
     }
 }
 
@@ -103,40 +106,90 @@ pub fn baseline_env_names() -> &'static [&'static str] {
     {
         &[
             // Without these, most Win32 programs fail to start at all.
-            "SystemRoot", "windir", "SystemDrive", "PATH", "PATHEXT", "COMSPEC",
-            "TEMP", "TMP",
+            "SystemRoot",
+            "windir",
+            "SystemDrive",
+            "PATH",
+            "PATHEXT",
+            "COMSPEC",
+            "TEMP",
+            "TMP",
             // Home/profile: npm, pip and friends resolve their caches here.
-            "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "USERNAME", "USERDOMAIN",
-            "APPDATA", "LOCALAPPDATA", "ProgramData",
-            "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
-            "CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "USERNAME",
+            "USERDOMAIN",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "ProgramData",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "CommonProgramFiles",
+            "CommonProgramFiles(x86)",
+            "CommonProgramW6432",
             // Platform/CPU detection used by node-gyp and similar.
-            "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
-            "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "OS",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL",
+            "PROCESSOR_REVISION",
+            "OS",
             "PSModulePath",
             // Locale, TLS trust, proxies.
-            "LANG", "TZ",
-            "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-            "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
-            "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+            "LANG",
+            "TZ",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "NODE_EXTRA_CA_CERTS",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "all_proxy",
         ]
     }
     #[cfg(not(windows))]
     {
         &[
-            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM",
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "TMPDIR",
+            "TERM",
             // XDG dirs: npm, uv and others put caches and config here.
-            "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
-            "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_RUNTIME_DIR",
             // Locale — a missing LANG silently changes Python's text encoding.
-            "LANG", "LANGUAGE", "TZ",
+            "LANG",
+            "LANGUAGE",
+            "TZ",
             // TLS trust: corporate CA bundles.
-            "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-            "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "NODE_EXTRA_CA_CERTS",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
             // Proxies — without these `npx` can't reach the registry.
-            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
-            "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "all_proxy",
         ]
     }
 }
@@ -149,12 +202,18 @@ fn passes_env_filter(name: &str, policy: &EnvPolicy) -> bool {
     if name.starts_with("LC_") {
         return true;
     }
-    if baseline_env_names().iter().any(|b| b.eq_ignore_ascii_case(name)) {
+    if baseline_env_names()
+        .iter()
+        .any(|b| b.eq_ignore_ascii_case(name))
+    {
         return true;
     }
     if cfg!(windows) {
         let lower = name.to_lowercase();
-        policy.passthrough.iter().any(|p| glob_match(&p.to_lowercase(), &lower))
+        policy
+            .passthrough
+            .iter()
+            .any(|p| glob_match(&p.to_lowercase(), &lower))
     } else {
         policy.passthrough.iter().any(|p| glob_match(p, name))
     }
@@ -202,10 +261,13 @@ impl schemars::JsonSchema for CommandField {
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let mut map = serde_json::Map::new();
-        map.insert("oneOf".into(), serde_json::json!([
-            {"type": "string"},
-            {"type": "array", "items": {"type": "string"}}
-        ]));
+        map.insert(
+            "oneOf".into(),
+            serde_json::json!([
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}}
+            ]),
+        );
         map.into()
     }
 }
@@ -376,7 +438,7 @@ pub fn expand_value(input: &str) -> Result<String> {
                 out.push_str(&resolve_var(var)?);
                 rest = &rest[start + 2 + end + 1..];
             }
-            None => bail!("unterminated ${{...}} in value: {input}")
+            None => bail!("unterminated ${{...}} in value: {input}"),
         }
     }
     out.push_str(rest);
@@ -402,9 +464,15 @@ fn keychain_lookup(service: &str) -> Result<String> {
         bail!("empty keychain service name in ${{keychain:}}");
     }
     let (bin, args): (String, Vec<String>) = if cfg!(target_os = "macos") {
-        ("security".into(), vec![
-            "find-generic-password".into(), "-s".into(), service.into(), "-w".into()
-        ])
+        (
+            "security".into(),
+            vec![
+                "find-generic-password".into(),
+                "-s".into(),
+                service.into(),
+                "-w".into(),
+            ],
+        )
     } else if cfg!(target_os = "windows") {
         // Windows Credential Manager via PowerShell + Win32 CredReadW.
         // The service name is passed via the GECO_KEYCHAIN_SERVICE env var
@@ -441,14 +509,20 @@ fn keychain_lookup(service: &str) -> Result<String> {
         let mut cmd = std::process::Command::new("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_script]);
         cmd.env("GECO_KEYCHAIN_SERVICE", service);
-        let out = cmd
-            .output()
-            .with_context(|| format!("cannot run 'powershell' to resolve keychain item '{service}'"))?;
+        let out = cmd.output().with_context(|| {
+            format!("cannot run 'powershell' to resolve keychain item '{service}'")
+        })?;
         if !out.status.success() {
-            bail!("keychain item '{service}' not found ('powershell' exited {})", out.status);
+            bail!(
+                "keychain item '{service}' not found ('powershell' exited {})",
+                out.status
+            );
         }
         let raw = String::from_utf8_lossy(&out.stdout);
-        let secret = raw.strip_suffix("\r\n").or_else(|| raw.strip_suffix('\n')).unwrap_or(&raw);
+        let secret = raw
+            .strip_suffix("\r\n")
+            .or_else(|| raw.strip_suffix('\n'))
+            .unwrap_or(&raw);
         let secret = secret.to_string();
         if secret.is_empty() {
             bail!("keychain item '{service}' resolved to an empty value");
@@ -461,22 +535,29 @@ fn keychain_lookup(service: &str) -> Result<String> {
         return Ok(secret);
     } else {
         // Linux desktop: libsecret. Headless hosts should use plain env vars.
-        ("secret-tool".into(), vec![
-            "lookup".into(), "service".into(), service.into()
-        ])
+        (
+            "secret-tool".into(),
+            vec!["lookup".into(), "service".into(), service.into()],
+        )
     };
     let out = std::process::Command::new(&bin)
         .args(&args)
         .output()
         .with_context(|| format!("cannot run '{bin}' to resolve keychain item '{service}'"))?;
     if !out.status.success() {
-        bail!("keychain item '{service}' not found ('{bin}' exited {})", out.status);
+        bail!(
+            "keychain item '{service}' not found ('{bin}' exited {})",
+            out.status
+        );
     }
     let raw = String::from_utf8_lossy(&out.stdout);
     // Strip the single trailing newline that CLI tools add — don't use
     // trim_end_matches because it would strip legitimate trailing newlines
     // in the secret itself.
-    let secret = raw.strip_suffix("\r\n").or_else(|| raw.strip_suffix('\n')).unwrap_or(&raw);
+    let secret = raw
+        .strip_suffix("\r\n")
+        .or_else(|| raw.strip_suffix('\n'))
+        .unwrap_or(&raw);
     let secret = secret.to_string();
     if secret.is_empty() {
         bail!("keychain item '{service}' resolved to an empty value");
@@ -494,7 +575,9 @@ fn binary_exists(bin: &str) -> bool {
         return p.exists();
     }
     // Otherwise scan PATH dirs.
-    let Some(path) = std::env::var_os("PATH") else { return true; };
+    let Some(path) = std::env::var_os("PATH") else {
+        return true;
+    };
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(bin);
         if candidate.exists() {
@@ -556,29 +639,46 @@ impl Config {
 
         // Proxy-level checks.
         if self.proxy.startup_timeout_secs == 0 {
-            findings.push(("error".into(),
-                "proxy.startup_timeout_secs is 0 — backends will fail to initialize instantly".into()));
+            findings.push((
+                "error".into(),
+                "proxy.startup_timeout_secs is 0 — backends will fail to initialize instantly"
+                    .into(),
+            ));
         }
         if self.proxy.call_timeout_secs == 0 {
-            findings.push(("error".into(),
-                "proxy.call_timeout_secs is 0 — every tool call will time out instantly".into()));
+            findings.push((
+                "error".into(),
+                "proxy.call_timeout_secs is 0 — every tool call will time out instantly".into(),
+            ));
         }
 
         // Per-server checks.
         for (name, s) in &self.servers {
             if s.command.0.is_empty() {
-                findings.push(("error".into(),
-                    format!("server '{name}': empty command array")));
+                findings.push((
+                    "error".into(),
+                    format!("server '{name}': empty command array"),
+                ));
             } else if let Ok((bin, _)) = s.command_line() {
                 // Warn if the binary doesn't exist on PATH or as a path.
                 // Skipped for known package managers that download the real
                 // server at runtime — a missing npx is the user's env problem,
                 // not a config mistake.
                 const DOWNLOADERS: &[&str] = &[
-                    "npx", "uvx", "uv", "node", "nodejs",
-                    "python3", "python", "pip", "pipx",
-                    "docker", "docker-compose",
-                    "bun", "deno", "cargo",
+                    "npx",
+                    "uvx",
+                    "uv",
+                    "node",
+                    "nodejs",
+                    "python3",
+                    "python",
+                    "pip",
+                    "pipx",
+                    "docker",
+                    "docker-compose",
+                    "bun",
+                    "deno",
+                    "cargo",
                 ];
                 let bin_name = std::path::Path::new(&bin)
                     .file_name()
@@ -598,8 +698,12 @@ impl Config {
                     if let Some(end) = v[abs..].find('}') {
                         let service = &v[abs + 11..abs + end];
                         if service.is_empty() {
-                            findings.push(("error".into(),
-                                format!("server '{name}': env '{k}' has empty keychain service name")));
+                            findings.push((
+                                "error".into(),
+                                format!(
+                                    "server '{name}': env '{k}' has empty keychain service name"
+                                ),
+                            ));
                         } else if keychain_lookup(service).is_err() {
                             findings.push(("error".into(),
                                 format!("server '{name}': keychain item '{service}' not found (will fail at spawn)")));
@@ -643,15 +747,19 @@ impl Config {
             // pass_env vars not in the proxy's env (warning).
             for var in &s.pass_env {
                 if std::env::var(var).is_err() {
-                    findings.push(("warning".into(),
-                        format!("server '{name}': pass_env '{var}' not set in proxy environment")));
+                    findings.push((
+                        "warning".into(),
+                        format!("server '{name}': pass_env '{var}' not set in proxy environment"),
+                    ));
                 }
             }
             // Empty glob patterns.
             for p in s.allow.iter().chain(s.deny.iter()) {
                 if p.is_empty() {
-                    findings.push(("warning".into(),
-                        format!("server '{name}': empty glob pattern in allow/deny")));
+                    findings.push((
+                        "warning".into(),
+                        format!("server '{name}': empty glob pattern in allow/deny"),
+                    ));
                 }
             }
         }
@@ -660,15 +768,19 @@ impl Config {
         for dir in &self.skills.dirs {
             let expanded = crate::skills::expand_tilde(dir);
             if !expanded.exists() {
-                findings.push(("warning".into(),
-                    format!("skills.dirs: '{}' does not exist", dir)));
+                findings.push((
+                    "warning".into(),
+                    format!("skills.dirs: '{}' does not exist", dir),
+                ));
             }
         }
         for dir in &self.skills.absorb {
             let expanded = crate::skills::expand_tilde(dir);
             if !expanded.exists() {
-                findings.push(("warning".into(),
-                    format!("skills.absorb: '{}' does not exist", dir)));
+                findings.push((
+                    "warning".into(),
+                    format!("skills.absorb: '{}' does not exist", dir),
+                ));
             }
         }
 
@@ -833,7 +945,9 @@ mod tests {
     fn yaml_config_parses() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("c.yaml");
-        std::fs::write(&p, r#"
+        std::fs::write(
+            &p,
+            r#"
 proxy:
   startup_timeout_secs: 60
 mcpServers:
@@ -843,7 +957,9 @@ mcpServers:
       SEARXNG_URL: http://spark.local:8888
     description: private web search
     deny: ["*_dangerous"]
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let cfg = Config::load(&p).unwrap();
         assert_eq!(cfg.proxy.startup_timeout_secs, 60);
         let (bin, argv) = cfg.servers["websearch"].command_line().unwrap();
@@ -855,7 +971,14 @@ mcpServers:
     #[test]
     fn schema_covers_the_surface() {
         let s = Config::schema_json();
-        for key in ["mcpServers", "allow", "deny", "call_timeout_secs", "pass_env", "health_check_secs"] {
+        for key in [
+            "mcpServers",
+            "allow",
+            "deny",
+            "call_timeout_secs",
+            "pass_env",
+            "health_check_secs",
+        ] {
             assert!(s.contains(key), "schema missing {key}");
         }
     }
@@ -866,17 +989,20 @@ mcpServers:
     #[test]
     fn schema_json_matches_committed_file() {
         let committed = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("geco.schema.json")
-        ).expect("geco.schema.json must exist at crate root");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("geco.schema.json"),
+        )
+        .expect("geco.schema.json must exist at crate root");
         let generated = Config::schema_json();
         // Compare after parsing so formatting/whitespace differences don't
         // cause false failures — only structural drift is reported.
-        let committed_val: serde_json::Value = serde_json::from_str(&committed)
-            .expect("geco.schema.json must be valid JSON");
-        let generated_val: serde_json::Value = serde_json::from_str(&generated)
-            .expect("runtime schema must be valid JSON");
-        assert_eq!(committed_val, generated_val,
-            "geco.schema.json is stale — run: geco schema > geco.schema.json");
+        let committed_val: serde_json::Value =
+            serde_json::from_str(&committed).expect("geco.schema.json must be valid JSON");
+        let generated_val: serde_json::Value =
+            serde_json::from_str(&generated).expect("runtime schema must be valid JSON");
+        assert_eq!(
+            committed_val, generated_val,
+            "geco.schema.json is stale — run: geco schema > geco.schema.json"
+        );
     }
 
     #[test]
@@ -916,7 +1042,8 @@ mcpServers:
     #[test]
     fn pass_env_missing_var_is_silently_skipped() {
         let _env = env_guard();
-        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_NONEXISTENT_VAR_XYZ"]}}}"#;
+        let raw =
+            r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_NONEXISTENT_VAR_XYZ"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let envs = cfg.servers["s"].env_expanded().unwrap();
         assert!(!envs.contains_key("GECO_NONEXISTENT_VAR_XYZ"));
@@ -945,7 +1072,10 @@ mcpServers:
         let s = stub_server(r#"{"command":["npx"]}"#);
         let (clear, envs) = s.env_for_spawn(&EnvPolicy::default()).unwrap();
 
-        assert!(clear, "isolation must clear the inherited environment first");
+        assert!(
+            clear,
+            "isolation must clear the inherited environment first"
+        );
         // Case-insensitive: Windows reports the variable as `Path`.
         assert!(
             envs.keys().any(|k| k.eq_ignore_ascii_case("PATH")),
@@ -965,13 +1095,22 @@ mcpServers:
         std::env::set_var("GECO_UNGLOBBED", "y");
         std::env::set_var("LC_TELEPHONE", "de_DE.UTF-8");
         let s = stub_server(r#"{"command":["npx"]}"#);
-        let policy = EnvPolicy { inherit: false, passthrough: vec!["GECO_GLOBBED_*".into()] };
+        let policy = EnvPolicy {
+            inherit: false,
+            passthrough: vec!["GECO_GLOBBED_*".into()],
+        };
         let (_, envs) = s.env_for_spawn(&policy).unwrap();
 
         assert_eq!(envs.get("GECO_GLOBBED_X").map(String::as_str), Some("x"));
-        assert!(!envs.contains_key("GECO_UNGLOBBED"), "glob must not over-match");
+        assert!(
+            !envs.contains_key("GECO_UNGLOBBED"),
+            "glob must not over-match"
+        );
         // Every locale category rides along, so text encoding stays stable.
-        assert!(envs.contains_key("LC_TELEPHONE"), "LC_* should pass: {envs:?}");
+        assert!(
+            envs.contains_key("LC_TELEPHONE"),
+            "LC_* should pass: {envs:?}"
+        );
 
         std::env::remove_var("GECO_GLOBBED_X");
         std::env::remove_var("GECO_UNGLOBBED");
@@ -1016,7 +1155,10 @@ mcpServers:
         std::env::set_var("GECO_STAY_OUT", "blocked");
         let s = stub_server(r#"{"command":["npx"],"pass_env":["GECO_OPT_IN"]}"#);
         let (_, envs) = s.env_for_spawn(&EnvPolicy::default()).unwrap();
-        assert_eq!(envs.get("GECO_OPT_IN").map(String::as_str), Some("let-me-through"));
+        assert_eq!(
+            envs.get("GECO_OPT_IN").map(String::as_str),
+            Some("let-me-through")
+        );
         assert!(!envs.contains_key("GECO_STAY_OUT"));
         std::env::remove_var("GECO_OPT_IN");
         std::env::remove_var("GECO_STAY_OUT");
@@ -1029,7 +1171,11 @@ mcpServers:
         let (clear, envs) = s.env_for_spawn(&EnvPolicy::inherit_all()).unwrap();
         assert!(!clear, "inheriting must NOT clear the environment");
         // Only the declared vars are layered on; the rest arrives by inheritance.
-        assert_eq!(envs.len(), 1, "inherit mode layers only declared vars: {envs:?}");
+        assert_eq!(
+            envs.len(),
+            1,
+            "inherit mode layers only declared vars: {envs:?}"
+        );
         assert_eq!(envs["A"], "1");
     }
 
@@ -1039,8 +1185,12 @@ mcpServers:
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${keychain:nonexistent-xyz-123}"}}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "error" && m.contains("nonexistent-xyz-123")),
-                "expected error about missing keychain item: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "error" && m.contains("nonexistent-xyz-123")),
+            "expected error about missing keychain item: {findings:?}"
+        );
     }
 
     #[test]
@@ -1049,8 +1199,12 @@ mcpServers:
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_NONEXISTENT_XYZ"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("GECO_NONEXISTENT_XYZ")),
-                "expected warning about missing pass_env: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("GECO_NONEXISTENT_XYZ")),
+            "expected warning about missing pass_env: {findings:?}"
+        );
     }
 
     #[test]
@@ -1059,8 +1213,12 @@ mcpServers:
         let raw = r#"{"skills":{"dirs":["/nonexistent/path/xyz"]},"mcpServers":{"s":{"command":["npx"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("does not exist")),
-                "expected warning about missing skills dir: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("does not exist")),
+            "expected warning about missing skills dir: {findings:?}"
+        );
     }
 
     #[test]
@@ -1070,7 +1228,10 @@ mcpServers:
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
         let errors: Vec<_> = findings.iter().filter(|(s, _)| s == "error").collect();
-        assert!(errors.is_empty(), "expected no errors for clean config: {findings:?}");
+        assert!(
+            errors.is_empty(),
+            "expected no errors for clean config: {findings:?}"
+        );
     }
 
     #[test]
@@ -1079,8 +1240,12 @@ mcpServers:
         let raw = r#"{"proxy":{"startup_timeout_secs":0},"mcpServers":{"s":{"command":["npx"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "error" && m.contains("startup_timeout_secs")),
-                "expected error about zero startup_timeout_secs: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "error" && m.contains("startup_timeout_secs")),
+            "expected error about zero startup_timeout_secs: {findings:?}"
+        );
     }
 
     #[test]
@@ -1089,8 +1254,12 @@ mcpServers:
         let raw = r#"{"proxy":{"call_timeout_secs":0},"mcpServers":{"s":{"command":["npx"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "error" && m.contains("call_timeout_secs")),
-                "expected error about zero call_timeout_secs: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "error" && m.contains("call_timeout_secs")),
+            "expected error about zero call_timeout_secs: {findings:?}"
+        );
     }
 
     #[test]
@@ -1099,8 +1268,12 @@ mcpServers:
         let raw = r#"{"mcpServers":{"s":{"command":["geco-nonexistent-binary-xyz"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("not found on PATH")),
-                "expected warning about missing binary: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("not found on PATH")),
+            "expected warning about missing binary: {findings:?}"
+        );
     }
 
     #[test]
@@ -1110,18 +1283,27 @@ mcpServers:
         let raw = r#"{"mcpServers":{"s":{"command":["npx","-y","some-server"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(!findings.iter().any(|(_, m)| m.contains("not found on PATH")),
-                "npx should not trigger binary-not-found warning: {findings:?}");
+        assert!(
+            !findings
+                .iter()
+                .any(|(_, m)| m.contains("not found on PATH")),
+            "npx should not trigger binary-not-found warning: {findings:?}"
+        );
     }
 
     #[test]
     fn validate_warns_unset_env_var() {
         let _env = env_guard();
-        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${GECO_TYPO_VAR_XYZ}"}}}}"#;
+        let raw =
+            r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${GECO_TYPO_VAR_XYZ}"}}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("GECO_TYPO_VAR_XYZ")),
-                "expected warning about unset env var: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("GECO_TYPO_VAR_XYZ")),
+            "expected warning about unset env var: {findings:?}"
+        );
     }
 
     #[test]
@@ -1130,8 +1312,12 @@ mcpServers:
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"args":["${GECO_TYPO_ARG_XYZ}"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        assert!(findings.iter().any(|(s, m)| s == "warning" && m.contains("GECO_TYPO_ARG_XYZ")),
-                "expected warning about unset env var in args: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("GECO_TYPO_ARG_XYZ")),
+            "expected warning about unset env var in args: {findings:?}"
+        );
     }
 
     #[test]
@@ -1141,10 +1327,14 @@ mcpServers:
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"X":"${GECO_SET_VAR_TEST}"}}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
-        let env_warnings: Vec<_> = findings.iter()
+        let env_warnings: Vec<_> = findings
+            .iter()
             .filter(|(_, m)| m.contains("GECO_SET_VAR_TEST"))
             .collect();
-        assert!(env_warnings.is_empty(), "set var should not warn: {findings:?}");
+        assert!(
+            env_warnings.is_empty(),
+            "set var should not warn: {findings:?}"
+        );
         std::env::remove_var("GECO_SET_VAR_TEST");
     }
 }

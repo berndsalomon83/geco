@@ -87,7 +87,8 @@ pub fn tokenize(s: &str) -> Vec<String> {
 /// guards just avoid the cases where it would be obviously silly.
 fn stem(t: &str) -> String {
     let n = t.len();
-    if n >= 4 && t.ends_with('s') && !t.ends_with("ss") && !t.ends_with("us") && !t.ends_with("is") {
+    if n >= 4 && t.ends_with('s') && !t.ends_with("ss") && !t.ends_with("us") && !t.ends_with("is")
+    {
         t[..n - 1].to_string()
     } else {
         t.to_string()
@@ -124,7 +125,12 @@ impl Fields {
         let len = W_NAME * name.len() as f64
             + W_SERVER * server.len() as f64
             + W_DESC * desc.len() as f64;
-        Self { name, server, desc, len }
+        Self {
+            name,
+            server,
+            desc,
+            len,
+        }
     }
 
     /// Field-weighted frequency of one query token in this document.
@@ -253,7 +259,10 @@ mod tests {
             "icm".into(),
             ServerSnapshot {
                 tools: vec![
-                    mk("icm_memory_store", "Store important information in long-term memory"),
+                    mk(
+                        "icm_memory_store",
+                        "Store important information in long-term memory",
+                    ),
                     mk("icm_memory_recall", "Search long-term memory"),
                     mk("icm_wake_up", "Compact critical-facts pack"),
                 ],
@@ -298,7 +307,10 @@ mod tests {
     #[test]
     fn tokenizer_splits_identifiers_and_camel_case() {
         assert_eq!(tokenize("icm_memory_store"), vec!["icm", "memory", "store"]);
-        assert_eq!(tokenize("browserTakeScreenshot"), vec!["browser", "take", "screenshot"]);
+        assert_eq!(
+            tokenize("browserTakeScreenshot"),
+            vec!["browser", "take", "screenshot"]
+        );
         assert_eq!(tokenize("get-file-info"), vec!["get", "file", "info"]);
         // Single characters carry no signal and match everything.
         assert_eq!(tokenize("a b file"), vec!["file"]);

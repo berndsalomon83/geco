@@ -242,37 +242,54 @@ fn compute_diff(
     let mut changed = Vec::new();
     let mut unchanged = 0u64;
 
-    let servers: Box<dyn Iterator<Item = (&String, &crate::snapshot::ServerSnapshot, &crate::snapshot::ServerSnapshot)>> =
-        if let Some(name) = server_filter {
-            match (old.servers.get(name), new.servers.get(name)) {
-                (Some(o), Some(n)) => Box::new(std::iter::once((name, o, n))),
-                (None, Some(n)) => {
-                    // New server — all tools are "added".
-                    for t in &n.tools {
-                        added.push(json!({"server": name, "tool": t.name}));
-                    }
-                    return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
+    let servers: Box<
+        dyn Iterator<
+            Item = (
+                &String,
+                &crate::snapshot::ServerSnapshot,
+                &crate::snapshot::ServerSnapshot,
+            ),
+        >,
+    > = if let Some(name) = server_filter {
+        match (old.servers.get(name), new.servers.get(name)) {
+            (Some(o), Some(n)) => Box::new(std::iter::once((name, o, n))),
+            (None, Some(n)) => {
+                // New server — all tools are "added".
+                for t in &n.tools {
+                    added.push(json!({"server": name, "tool": t.name}));
                 }
-                (Some(o), None) => {
-                    // Removed server — all tools are "removed".
-                    for t in &o.tools {
-                        removed.push(json!({"server": name, "tool": t.name}));
-                    }
-                    return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
-                }
-                (None, None) => return json!({"added": [], "removed": [], "changed": [], "unchanged": 0}),
+                return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
             }
-        } else {
-            Box::new(new.servers.iter().filter_map(|(name, n)| {
-                old.servers.get(name).map(|o| (name, o, n))
-            }))
-        };
+            (Some(o), None) => {
+                // Removed server — all tools are "removed".
+                for t in &o.tools {
+                    removed.push(json!({"server": name, "tool": t.name}));
+                }
+                return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
+            }
+            (None, None) => {
+                return json!({"added": [], "removed": [], "changed": [], "unchanged": 0})
+            }
+        }
+    } else {
+        Box::new(
+            new.servers
+                .iter()
+                .filter_map(|(name, n)| old.servers.get(name).map(|o| (name, o, n))),
+        )
+    };
 
     for (name, old_entry, new_entry) in servers {
-        let old_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> =
-            old_entry.tools.iter().map(|t| (t.name.as_str(), t)).collect();
-        let new_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> =
-            new_entry.tools.iter().map(|t| (t.name.as_str(), t)).collect();
+        let old_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> = old_entry
+            .tools
+            .iter()
+            .map(|t| (t.name.as_str(), t))
+            .collect();
+        let new_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> = new_entry
+            .tools
+            .iter()
+            .map(|t| (t.name.as_str(), t))
+            .collect();
 
         // Tools in new but not old = added.
         for tname in new_tools.keys() {
@@ -289,7 +306,9 @@ fn compute_diff(
         // Tools in both = check for changes.
         for (tname, old_t) in &old_tools {
             if let Some(new_t) = new_tools.get(tname) {
-                if old_t.description != new_t.description || old_t.input_schema != new_t.input_schema {
+                if old_t.description != new_t.description
+                    || old_t.input_schema != new_t.input_schema
+                {
                     changed.push(json!({"server": name, "tool": tname}));
                 } else {
                     unchanged += 1;
@@ -326,8 +345,14 @@ fn compute_diff(
 
 #[tool_router]
 impl Proxy {
-    pub fn new(registry: Registry, snapshot: Snapshot, snapshot_path: PathBuf,
-               config_path: PathBuf, skill_dirs: Vec<String>, absorb_dirs: Vec<String>) -> Self {
+    pub fn new(
+        registry: Registry,
+        snapshot: Snapshot,
+        snapshot_path: PathBuf,
+        config_path: PathBuf,
+        skill_dirs: Vec<String>,
+        absorb_dirs: Vec<String>,
+    ) -> Self {
         let (skills, absorb_issues) = Self::absorb_and_scan(&skill_dirs, &absorb_dirs);
         let metrics = crate::health::Metrics {
             started_at: crate::backend::now(),
@@ -414,9 +439,7 @@ impl Proxy {
             snap.servers.insert(name.to_string(), entry);
             (before, after)
         };
-        tracing::info!(
-            "tools/list_changed: re-scanned '{name}', {before} -> {after} tools"
-        );
+        tracing::info!("tools/list_changed: re-scanned '{name}', {before} -> {after} tools");
         let to_save = self.snapshot.read().await.clone();
         if let Err(e) = to_save.save(&self.snapshot_path) {
             tracing::warn!("cannot persist snapshot after tool change: {e:#}");
@@ -482,8 +505,9 @@ impl Proxy {
             // directory (which also holds geco.schema.json, editor swap
             // files, …), an unrelated write there would trigger a full
             // reload and re-spawn every backend exactly once per process.
-            let mut last_mtime: Option<std::time::SystemTime> =
-                std::fs::metadata(&config_path).and_then(|m| m.modified()).ok();
+            let mut last_mtime: Option<std::time::SystemTime> = std::fs::metadata(&config_path)
+                .and_then(|m| m.modified())
+                .ok();
             loop {
                 if proxy.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -575,7 +599,11 @@ impl Proxy {
                 }
                 if !dead.is_empty() {
                     proxy.publish_health().await;
-                    tracing::info!("health check: reset {} dead backend(s): {:?}", dead.len(), dead);
+                    tracing::info!(
+                        "health check: reset {} dead backend(s): {:?}",
+                        dead.len(),
+                        dead
+                    );
                 }
             }
         });
@@ -604,7 +632,10 @@ impl Proxy {
                         return;
                     }
                     if let Ok(event) = res {
-                        if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+                        if matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) {
                             let _ = tx_clone.blocking_send(());
                         }
                     }
@@ -692,7 +723,9 @@ impl Proxy {
         // execute could re-obtain a just-shut-down backend from the old registry.
         let removed_backends: Vec<(String, std::sync::Arc<crate::backend::Backend>)> = {
             let old_registry = self.registry.read().await;
-            old_registry.backends.iter()
+            old_registry
+                .backends
+                .iter()
                 .filter(|(name, _)| !new_registry.backends.contains_key(*name))
                 .map(|(n, b)| (n.clone(), b.clone()))
                 .collect()
@@ -747,7 +780,8 @@ impl Proxy {
     /// Mark the proxy as shutting down. Background watchers (hot-reload,
     /// health-check, skill-reload) check this flag and exit their loops.
     pub fn set_shutdown(&self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set the config-reload issue (used by the hot-reload watcher and
@@ -790,7 +824,9 @@ impl Proxy {
             let snap = self.snapshot.read().await;
             let absorb = self.absorb_issues.read().await.clone();
             let config = self.config_issues.read().await.clone();
-            let servers: Vec<_> = snap.servers.iter()
+            let servers: Vec<_> = snap
+                .servers
+                .iter()
                 .map(|(n, s)| (n.clone(), s.refresh_status.clone()))
                 .collect();
             (servers, absorb, config)
@@ -813,7 +849,10 @@ impl Proxy {
             }
             if snapshot_ok {
                 if let Ok(backend) = registry.get(name) {
-                    if matches!(backend.status().await, crate::backend::Status::Failed { .. }) {
+                    if matches!(
+                        backend.status().await,
+                        crate::backend::Status::Failed { .. }
+                    ) {
                         issues.push(Issue {
                             kind: "backend".into(),
                             subject: name.clone(),
@@ -832,13 +871,18 @@ impl Proxy {
             return Vec::new();
         }
         let Some(library) = skill_dirs.first() else {
-            tracing::warn!("skills.absorb configured but skills.dirs is empty — nothing to absorb into");
+            tracing::warn!(
+                "skills.absorb configured but skills.dirs is empty — nothing to absorb into"
+            );
             return Vec::new();
         };
         let (moved, errors) = crate::skills::absorb_into(library, absorb_dirs);
         if !moved.is_empty() {
-            tracing::info!("absorbed {} stray skill(s) into the library: {}",
-                           moved.len(), moved.join(", "));
+            tracing::info!(
+                "absorbed {} stray skill(s) into the library: {}",
+                moved.len(),
+                moved.join(", ")
+            );
         }
         errors
             .into_iter()
@@ -880,14 +924,13 @@ impl Proxy {
     pub async fn rescan_skills(&self) {
         let skill_dirs = self.skill_dirs.read().await.clone();
         let absorb_dirs = self.absorb_dirs.read().await.clone();
-        let (scanned, issues) = tokio::task::spawn_blocking(move || {
-            Self::absorb_and_scan(&skill_dirs, &absorb_dirs)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("rescan_skills: blocking task panicked: {e}");
-            (SkillIndex::default(), Vec::new())
-        });
+        let (scanned, issues) =
+            tokio::task::spawn_blocking(move || Self::absorb_and_scan(&skill_dirs, &absorb_dirs))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("rescan_skills: blocking task panicked: {e}");
+                    (SkillIndex::default(), Vec::new())
+                });
         *self.absorb_issues.write().await = issues;
         *self.skills.write().await = scanned;
         self.publish_health().await;
@@ -963,7 +1006,9 @@ impl Proxy {
                 let tools: Vec<_> = server
                     .tools
                     .iter()
-                    .map(|t| json!({"tool": t.name, "description": short_desc(&t.description, 140)}))
+                    .map(
+                        |t| json!({"tool": t.name, "description": short_desc(&t.description, 140)}),
+                    )
                     .collect();
                 Ok(text_result(json!({
                     "server": p.server,
@@ -985,7 +1030,10 @@ impl Proxy {
         if !kind.is_empty() && kind != "tools" && kind != "skills" {
             return Ok(structured_err_ctx(
                 "invalid_kind",
-                &format!("kind must be \"tools\", \"skills\", or omitted (got \"{}\")", kind),
+                &format!(
+                    "kind must be \"tools\", \"skills\", or omitted (got \"{}\")",
+                    kind
+                ),
                 json!({ "kind": kind }),
             ));
         }
@@ -1034,7 +1082,8 @@ impl Proxy {
         // return is_error, which tells the model the call itself broke.
         if results.is_empty() {
             let hint = if !skills_configured && kind == "skills" {
-                "no skill libraries are configured — set `skills.dirs` in the geco config".to_string()
+                "no skill libraries are configured — set `skills.dirs` in the geco config"
+                    .to_string()
             } else {
                 format!(
                     "nothing matched '{}' — try fewer or more general keywords, \
@@ -1042,7 +1091,9 @@ impl Proxy {
                     p.query
                 )
             };
-            return Ok(text_result(json!({ "results": [], "count": 0, "hint": hint })));
+            return Ok(text_result(
+                json!({ "results": [], "count": 0, "hint": hint }),
+            ));
         }
         let count = results.len();
         Ok(text_result(json!({ "results": results, "count": count })))
@@ -1056,13 +1107,21 @@ impl Proxy {
         Parameters(p): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
         if p.calls.is_empty() {
-            return Ok(structured_err("empty_calls", "no calls — pass at least one {server, tool, arguments}"));
+            return Ok(structured_err(
+                "empty_calls",
+                "no calls — pass at least one {server, tool, arguments}",
+            ));
         }
         if p.calls.len() > 10 {
-            return Ok(structured_err("too_many_calls", &format!("{} calls (max 10)", p.calls.len())));
+            return Ok(structured_err(
+                "too_many_calls",
+                &format!("{} calls (max 10)", p.calls.len()),
+            ));
         }
         let n = p.calls.len();
-        let call_names: Vec<(String, String)> = p.calls.iter()
+        let call_names: Vec<(String, String)> = p
+            .calls
+            .iter()
             .map(|c| (c.server.clone(), c.tool.clone()))
             .collect();
         let (registry, proxy_cfg) = {
@@ -1161,7 +1220,10 @@ impl Proxy {
                     results[i] = result;
                     let server = results[i]["server"].as_str().unwrap_or("").to_string();
                     let ok = results[i]["ok"].as_bool().unwrap_or(false);
-                    let code = results[i]["error"]["code"].as_str().unwrap_or("").to_string();
+                    let code = results[i]["error"]["code"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
                     // If a previously-down backend's status changed (success
                     // or failure), update health so the TUI plugin stays in sync.
                     if was_down {
@@ -1175,16 +1237,21 @@ impl Proxy {
                     }
                     let mut metrics = self.metrics.write().await;
                     metrics.total_calls += 1;
-                    if !ok { metrics.total_errors += 1; }
+                    if !ok {
+                        metrics.total_errors += 1;
+                    }
                     // Don't create a per-backend row for a server that doesn't
                     // exist — a typo'd name would otherwise show up as a
                     // permanent phantom backend in `geco stats` forever.
                     if code.as_str() != "unknown_server" {
-                        let entry = metrics.per_backend.entry(server.clone())
-                            .or_default();
+                        let entry = metrics.per_backend.entry(server.clone()).or_default();
                         entry.calls += 1;
-                        if !ok { entry.errors += 1; }
-                        if was_down { entry.cold_starts += 1; }
+                        if !ok {
+                            entry.errors += 1;
+                        }
+                        if was_down {
+                            entry.cold_starts += 1;
+                        }
                         entry.total_latency_ms = entry.total_latency_ms.saturating_add(latency_ms);
                         entry.last_call_at = Some(crate::backend::now());
                     }
@@ -1206,13 +1273,17 @@ impl Proxy {
     pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
         let idx = self.skills.read().await;
         if idx.skills.is_empty() {
-            return Ok(structured_err("no_skills", "no skill libraries configured (configure `skills.dirs`)"));
+            return Ok(structured_err(
+                "no_skills",
+                "no skill libraries configured (configure `skills.dirs`)",
+            ));
         }
         let out: Vec<_> = idx
             .skills
             .iter()
             .map(|s| {
-                let mut entry = json!({"name": s.name, "description": short_desc(&s.description, 100)});
+                let mut entry =
+                    json!({"name": s.name, "description": short_desc(&s.description, 100)});
                 if let Some(v) = &s.version {
                     entry["version"] = json!(v);
                 }
@@ -1250,7 +1321,10 @@ impl Proxy {
                 let tree = if files.is_empty() {
                     String::new()
                 } else {
-                    format!("\n\n## Bundled files (absolute paths)\n{}", files.join("\n"))
+                    format!(
+                        "\n\n## Bundled files (absolute paths)\n{}",
+                        files.join("\n")
+                    )
                 };
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "{body}{tree}"
@@ -1309,7 +1383,10 @@ impl Proxy {
                 } else if snap.servers.contains_key(name) {
                     snap.servers.remove(name);
                     snap.generated_at = fresh_generated_at.clone();
-                    tracing::info!("refresh_tools: '{}' removed from config, evicted from snapshot", name);
+                    tracing::info!(
+                        "refresh_tools: '{}' removed from config, evicted from snapshot",
+                        name
+                    );
                 } else {
                     return Ok(structured_err_ctx(
                         "unknown_server",
@@ -1419,12 +1496,19 @@ mod param_tests {
 
         let diff = compute_diff(&old, &new, &None);
         let removed = diff["removed"].as_array().unwrap();
-        assert_eq!(removed.len(), 2, "both of b's tools should be removed: {diff}");
+        assert_eq!(
+            removed.len(),
+            2,
+            "both of b's tools should be removed: {diff}"
+        );
         assert!(
             removed.iter().all(|r| r["server"] == "b"),
             "removals should be attributed to b: {diff}"
         );
-        assert!(diff["added"].as_array().unwrap().is_empty(), "nothing added: {diff}");
+        assert!(
+            diff["added"].as_array().unwrap().is_empty(),
+            "nothing added: {diff}"
+        );
         assert_eq!(diff["unchanged"], 1, "a's tool is unchanged: {diff}");
     }
 
@@ -1464,7 +1548,10 @@ mod param_tests {
         let wire = serde_json::to_string(&tools).expect("tools must serialize");
         let bytes = wire.len();
         // Visible with `cargo test -- --nocapture` when you want the number.
-        eprintln!("meta-tool surface: {} tools, {bytes} bytes on the wire", tools.len());
+        eprintln!(
+            "meta-tool surface: {} tools, {bytes} bytes on the wire",
+            tools.len()
+        );
         // Measured at 4305 bytes; the budget leaves ~40% headroom.
         assert!(
             bytes <= 6000,
@@ -1493,28 +1580,35 @@ mod param_tests {
     fn include_schema_defaults_none() {
         let p: SearchParams = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
         assert_eq!(p.include_schema, None);
-        let p: SearchParams = serde_json::from_str(r#"{"query":"x","include_schema":true}"#).unwrap();
+        let p: SearchParams =
+            serde_json::from_str(r#"{"query":"x","include_schema":true}"#).unwrap();
         assert_eq!(p.include_schema, Some(true));
-        let p: SearchParams = serde_json::from_str(r#"{"query":"x","include_schema":false}"#).unwrap();
+        let p: SearchParams =
+            serde_json::from_str(r#"{"query":"x","include_schema":false}"#).unwrap();
         assert_eq!(p.include_schema, Some(false));
     }
 
     #[test]
     fn arguments_accept_object_and_stringified_object() {
         let p: ExecuteParams =
-            serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t","arguments":{"q":"hi"}}]}"#).unwrap();
-        assert_eq!(p.calls[0].arguments.clone().unwrap()["q"], "hi");
-        let p: ExecuteParams =
-            serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t","arguments":"{\"q\": \"hi\"}"}]}"#)
+            serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t","arguments":{"q":"hi"}}]}"#)
                 .unwrap();
         assert_eq!(p.calls[0].arguments.clone().unwrap()["q"], "hi");
-        let p: ExecuteParams = serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t"}]}"#).unwrap();
+        let p: ExecuteParams = serde_json::from_str(
+            r#"{"calls":[{"server":"s","tool":"t","arguments":"{\"q\": \"hi\"}"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.calls[0].arguments.clone().unwrap()["q"], "hi");
+        let p: ExecuteParams =
+            serde_json::from_str(r#"{"calls":[{"server":"s","tool":"t"}]}"#).unwrap();
         assert!(p.calls[0].arguments.is_none());
     }
 
     #[test]
     fn stringified_non_object_arguments_rejected() {
-        let r = serde_json::from_str::<ExecuteParams>(r#"{"calls":[{"server":"s","tool":"t","arguments":"[1,2]"}]}"#);
+        let r = serde_json::from_str::<ExecuteParams>(
+            r#"{"calls":[{"server":"s","tool":"t","arguments":"[1,2]"}]}"#,
+        );
         assert!(r.is_err());
     }
 

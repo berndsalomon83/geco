@@ -10,7 +10,11 @@ use geco::server::Proxy;
 use geco::snapshot::Snapshot;
 
 #[derive(Parser)]
-#[command(name = "geco", version, about = "geco — the generic connector: tools, skills & more on demand, out of context until summoned")]
+#[command(
+    name = "geco",
+    version,
+    about = "geco — the generic connector: tools, skills & more on demand, out of context until summoned"
+)]
 struct Cli {
     /// Path to the config file (default: ./geco.yaml or
     /// ~/.config/geco/config.yaml; JSON also accepted)
@@ -84,8 +88,7 @@ async fn main() -> Result<()> {
     // stdout belongs to the MCP protocol — all logging goes to stderr.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
         .with_ansi(false)
@@ -107,19 +110,36 @@ async fn main() -> Result<()> {
                     eprintln!("  total calls:    {}", metrics.total_calls);
                     eprintln!("  total errors:   {}", metrics.total_errors);
                     eprintln!();
-                    eprintln!("{:24} {:>6} {:>6} {:>5} {:>8}  last_call", "server", "calls", "errors", "cold", "avg_ms");
+                    eprintln!(
+                        "{:24} {:>6} {:>6} {:>5} {:>8}  last_call",
+                        "server", "calls", "errors", "cold", "avg_ms"
+                    );
                     for (name, m) in &metrics.per_backend {
-                        let avg = if m.calls > 0 { m.total_latency_ms.checked_div(m.calls).unwrap_or(0) } else { 0 };
-                        eprintln!("{name:24} {calls:>6} {errors:>6} {cold:>5} {avg:>8}  {last}",
-                                   calls = m.calls, errors = m.errors,
-                                   cold = m.cold_starts, avg = avg,
-                                   last = m.last_call_at.as_deref().unwrap_or("-"));
+                        let avg = if m.calls > 0 {
+                            m.total_latency_ms.checked_div(m.calls).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        eprintln!(
+                            "{name:24} {calls:>6} {errors:>6} {cold:>5} {avg:>8}  {last}",
+                            calls = m.calls,
+                            errors = m.errors,
+                            cold = m.cold_starts,
+                            avg = avg,
+                            last = m.last_call_at.as_deref().unwrap_or("-")
+                        );
                     }
                 } else {
-                    eprintln!("no metrics in {} (proxy not running or old version)", health_path.display());
+                    eprintln!(
+                        "no metrics in {} (proxy not running or old version)",
+                        health_path.display()
+                    );
                 }
             }
-            None => eprintln!("no health file at {} — is the proxy running?", health_path.display()),
+            None => eprintln!(
+                "no health file at {} — is the proxy running?",
+                health_path.display()
+            ),
         }
         return Ok(());
     }
@@ -137,12 +157,17 @@ async fn main() -> Result<()> {
         };
         match Snapshot::load(&snapshot_path) {
             Some(snap) => {
-                let config_hash_label = match find_config(&cli).ok().and_then(|cp| Config::load(&cp).ok()) {
-                    Some(cfg) => {
-                        if snap.config_hash == cfg.snapshot_hash() { "current" } else { "STALE" }
-                    }
-                    None => "? (config unreadable)",
-                };
+                let config_hash_label =
+                    match find_config(&cli).ok().and_then(|cp| Config::load(&cp).ok()) {
+                        Some(cfg) => {
+                            if snap.config_hash == cfg.snapshot_hash() {
+                                "current"
+                            } else {
+                                "STALE"
+                            }
+                        }
+                        None => "? (config unreadable)",
+                    };
                 eprintln!(
                     "snapshot {} (config {}) generated {}",
                     snapshot_path.display(),
@@ -165,7 +190,10 @@ async fn main() -> Result<()> {
     let hash = cfg.snapshot_hash();
     let registry = std::sync::Arc::new(Registry::from_config(&cfg));
 
-    match cli.command.unwrap_or(Cmd::Serve { refresh: false, no_refresh: false }) {
+    match cli.command.unwrap_or(Cmd::Serve {
+        refresh: false,
+        no_refresh: false,
+    }) {
         Cmd::Refresh => {
             let snap = registry.build_snapshot(hash, None).await;
             snap.save(&snapshot_path)?;
@@ -182,7 +210,11 @@ async fn main() -> Result<()> {
                 let errors = findings.iter().filter(|(s, _)| s == "error").count();
                 let warnings = findings.iter().filter(|(s, _)| s == "warning").count();
                 for (severity, msg) in &findings {
-                    let icon = if severity == "error" { "ERROR" } else { "WARN " };
+                    let icon = if severity == "error" {
+                        "ERROR"
+                    } else {
+                        "WARN "
+                    };
                     eprintln!("{icon}: {msg}");
                 }
                 eprintln!("\n{} error(s), {} warning(s)", errors, warnings);
@@ -197,9 +229,15 @@ async fn main() -> Result<()> {
             unreachable!()
         }
         Cmd::Inspect | Cmd::Stats => unreachable!(),
-        Cmd::Serve { refresh, no_refresh } => {
+        Cmd::Serve {
+            refresh,
+            no_refresh,
+        } => {
             let cached = Snapshot::load(&snapshot_path);
-            let stale = cached.as_ref().map(|s| s.config_hash != hash).unwrap_or(true);
+            let stale = cached
+                .as_ref()
+                .map(|s| s.config_hash != hash)
+                .unwrap_or(true);
             let snapshot = if refresh || (stale && cfg.proxy.refresh_on_start && !no_refresh) {
                 tracing::info!(
                     "refreshing tool snapshot ({} servers){}",
@@ -220,7 +258,10 @@ async fn main() -> Result<()> {
                 }
                 cached.unwrap_or_else(|| {
                     tracing::warn!("serving with EMPTY snapshot — run refresh_tools");
-                    Snapshot { config_hash: hash.clone(), ..Default::default() }
+                    Snapshot {
+                        config_hash: hash.clone(),
+                        ..Default::default()
+                    }
                 })
             };
             tracing::info!(
@@ -267,12 +308,16 @@ async fn main() -> Result<()> {
                     }
                 };
                 #[cfg(unix)]
-                { tokio::select! {
-                    _ = signal::ctrl_c() => {}
-                    _ = sigterm.recv() => {}
-                } }
+                {
+                    tokio::select! {
+                        _ = signal::ctrl_c() => {}
+                        _ = sigterm.recv() => {}
+                    }
+                }
                 #[cfg(not(unix))]
-                { let _ = signal::ctrl_c().await; }
+                {
+                    let _ = signal::ctrl_c().await;
+                }
                 tracing::info!("signal received — shutting down");
                 proxy_for_signal.set_shutdown();
                 cancel_token.cancel();

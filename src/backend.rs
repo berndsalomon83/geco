@@ -36,10 +36,7 @@ pub struct BackendClient {
 }
 
 impl rmcp::handler::client::ClientHandler for BackendClient {
-    async fn on_tool_list_changed(
-        &self,
-        _context: rmcp::service::NotificationContext<RoleClient>,
-    ) {
+    async fn on_tool_list_changed(&self, _context: rmcp::service::NotificationContext<RoleClient>) {
         let Some(tx) = &self.notify else { return };
         tracing::info!("backend '{}' reported tools/list_changed", self.name);
         // try_send, not send: a full queue means a refresh is already pending,
@@ -59,8 +56,13 @@ impl rmcp::handler::client::ClientHandler for BackendClient {
 pub enum Status {
     /// Not running — will start on first use.
     Cold,
-    Up { since: String },
-    Failed { error: String, at: String },
+    Up {
+        since: String,
+    },
+    Failed {
+        error: String,
+        at: String,
+    },
 }
 
 pub struct Backend {
@@ -146,7 +148,12 @@ impl Backend {
         };
         let svc = tokio::time::timeout(startup, client.serve(transport))
             .await
-            .map_err(|_| anyhow!("backend '{}' did not initialize within {startup:?}", self.name))?
+            .map_err(|_| {
+                anyhow!(
+                    "backend '{}' did not initialize within {startup:?}",
+                    self.name
+                )
+            })?
             .with_context(|| format!("backend '{}' failed MCP initialize", self.name))?;
         Ok(Arc::new(svc))
     }
@@ -211,7 +218,10 @@ impl Backend {
         proxy: &ProxyConfig,
     ) -> Result<CallToolResult> {
         if !self.cfg.tool_allowed(tool) {
-            bail!("DENY: tool '{tool}' is not allowed on server '{}' (allow/deny config)", self.name);
+            bail!(
+                "DENY: tool '{tool}' is not allowed on server '{}' (allow/deny config)",
+                self.name
+            );
         }
         let conn = self
             .connection(Duration::from_secs(proxy.startup_timeout_secs))

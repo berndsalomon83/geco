@@ -8,12 +8,12 @@ use std::sync::Arc;
 use geco::backend::Registry;
 use geco::config::Config;
 use geco::server::{
-    ExecuteCall, ExecuteParams, ListToolsParams, Proxy, RefreshParams, SearchParams,
-    ReadSkillParams,
+    ExecuteCall, ExecuteParams, ListToolsParams, Proxy, ReadSkillParams, RefreshParams,
+    SearchParams,
 };
+use geco::snapshot::Snapshot;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ContentBlock;
-use geco::snapshot::Snapshot;
 
 /// The interpreter to run the stub MCP server with, or None if there isn't
 /// one. Probes `python3` then `python`: Windows ships `python.exe` but
@@ -91,9 +91,7 @@ fn stub_config() -> Option<Config> {
 /// Uses a unique temp dir per call to avoid parallel-test file races.
 async fn make_proxy(cfg: &Config) -> (Proxy, Arc<Registry>, Snapshot) {
     let registry = Arc::new(Registry::from_config(cfg));
-    let snapshot = registry
-        .build_snapshot(cfg.snapshot_hash(), None)
-        .await;
+    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), None).await;
     let dir = tempfile::tempdir().unwrap();
     let snap_path = dir.path().join("snapshot.json");
     let cfg_path = dir.path().join("config.yaml");
@@ -112,9 +110,7 @@ async fn make_proxy(cfg: &Config) -> (Proxy, Arc<Registry>, Snapshot) {
 /// Build a Proxy with a skill library.
 async fn make_proxy_with_skills(cfg: &Config, skill_dirs: Vec<String>) -> (Proxy, Arc<Registry>) {
     let registry = Arc::new(Registry::from_config(cfg));
-    let snapshot = registry
-        .build_snapshot(cfg.snapshot_hash(), None)
-        .await;
+    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), None).await;
     let dir = tempfile::tempdir().unwrap();
     let snap_path = dir.path().join("snapshot.json");
     let cfg_path = dir.path().join("config.yaml");
@@ -131,16 +127,18 @@ async fn make_proxy_with_skills(cfg: &Config, skill_dirs: Vec<String>) -> (Proxy
 
 /// Extract the first text block from a CallToolResult and parse it as JSON.
 fn extract_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
-    let text = result.content.iter().find_map(|b| {
-        if let ContentBlock::Text(t) = b {
-            Some(t.text.as_str())
-        } else {
-            None
-        }
-    }).expect("no text block in result");
-    serde_json::from_str(text).unwrap_or_else(|_| {
-        panic!("failed to parse result as JSON: {text}")
-    })
+    let text = result
+        .content
+        .iter()
+        .find_map(|b| {
+            if let ContentBlock::Text(t) = b {
+                Some(t.text.as_str())
+            } else {
+                None
+            }
+        })
+        .expect("no text block in result");
+    serde_json::from_str(text).unwrap_or_else(|_| panic!("failed to parse result as JSON: {text}"))
 }
 
 /// Whether a CallToolResult is an error.
@@ -158,7 +156,11 @@ fn make_skill_library() -> tempfile::TempDir {
     std::fs::write(s1.join("SKILL.md"),
         "---\nname: test-planner\ndescription: Plan tests systematically before writing them\nversion: 1.2.0\n---\n\n# Test Planner\n\nBreak down test work.\n").unwrap();
     std::fs::create_dir_all(s1.join("scripts")).unwrap();
-    std::fs::write(s1.join("scripts").join("run.sh"), "#!/bin/bash\necho planning\n").unwrap();
+    std::fs::write(
+        s1.join("scripts").join("run.sh"),
+        "#!/bin/bash\necho planning\n",
+    )
+    .unwrap();
 
     // Skill 2: "code-reviewer"
     let s2 = lib.join("code-reviewer");
@@ -227,22 +229,32 @@ async fn refresh_tools_does_not_deadlock() {
     // refresh_tools with a specific server (single-server path)
     let result2 = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        proxy.refresh_tools(Parameters(RefreshParams { server: Some("stub".into()) })),
+        proxy.refresh_tools(Parameters(RefreshParams {
+            server: Some("stub".into()),
+        })),
     )
     .await;
-    assert!(result2.is_ok(), "single-server refresh_tools timed out (deadlock?)");
+    assert!(
+        result2.is_ok(),
+        "single-server refresh_tools timed out (deadlock?)"
+    );
 
     // refresh_tools with an unknown server should error, not hang
     let result3 = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        proxy.refresh_tools(Parameters(RefreshParams { server: Some("nonexistent".into()) })),
+        proxy.refresh_tools(Parameters(RefreshParams {
+            server: Some("nonexistent".into()),
+        })),
     )
     .await;
     assert!(result3.is_ok(), "unknown-server refresh_tools timed out");
     let result3 = result3.unwrap().unwrap();
     assert!(is_error(&result3), "unknown server should error");
     let json = extract_json(&result3);
-    assert_eq!(json["error"]["code"], "unknown_server", "expected unknown_server code: {json}");
+    assert_eq!(
+        json["error"]["code"], "unknown_server",
+        "expected unknown_server code: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -278,7 +290,10 @@ async fn health_reports_backend_failures() {
 
     // The broken server should have an error refresh_status.
     let broken = &snapshot.servers["broken"];
-    assert_ne!(broken.refresh_status, "ok", "broken server should have failed");
+    assert_ne!(
+        broken.refresh_status, "ok",
+        "broken server should have failed"
+    );
 
     // publish_health writes to health.json — verify it doesn't deadlock.
     proxy.publish_health().await;
@@ -286,10 +301,15 @@ async fn health_reports_backend_failures() {
     // The health meta-tool should report the broken server as an issue.
     let result = proxy.health().await.unwrap();
     let json = extract_json(&result);
-    assert_eq!(json["healthy"], false, "health tool should report unhealthy: {json}");
+    assert_eq!(
+        json["healthy"], false,
+        "health tool should report unhealthy: {json}"
+    );
     let issues = json["issues"].as_array().unwrap();
-    assert!(issues.iter().any(|i| i["subject"] == "broken"),
-            "health tool should mention broken server: {json}");
+    assert!(
+        issues.iter().any(|i| i["subject"] == "broken"),
+        "health tool should mention broken server: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -310,9 +330,18 @@ async fn list_mcp_servers_through_proxy() {
     // Tool preview should include both tools (add + echo, sorted alphabetically).
     let preview = servers[0]["tool_preview"].as_array().unwrap();
     assert_eq!(preview.len(), 2, "expected 2 tools in preview: {json}");
-    let names: Vec<_> = preview.iter().map(|t| t["tool"].as_str().unwrap()).collect();
-    assert!(names.contains(&"add"), "expected 'add' in preview: {names:?}");
-    assert!(names.contains(&"echo"), "expected 'echo' in preview: {names:?}");
+    let names: Vec<_> = preview
+        .iter()
+        .map(|t| t["tool"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"add"),
+        "expected 'add' in preview: {names:?}"
+    );
+    assert!(
+        names.contains(&"echo"),
+        "expected 'echo' in preview: {names:?}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -324,7 +353,10 @@ async fn list_tools_through_proxy() {
 
     // List all tools on the stub server.
     let result = proxy
-        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: None }))
+        .list_tools(Parameters(ListToolsParams {
+            server: "stub".into(),
+            tool: None,
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -334,36 +366,56 @@ async fn list_tools_through_proxy() {
     assert!(names.contains(&"add"), "expected 'add' in {names:?}");
     assert!(names.contains(&"echo"), "expected 'echo' in {names:?}");
     // secret_tool must be hidden by the denylist.
-    assert!(!names.contains(&"secret_tool"), "secret_tool should be hidden");
+    assert!(
+        !names.contains(&"secret_tool"),
+        "secret_tool should be hidden"
+    );
 
     // Get the full input schema for a specific tool.
     let result = proxy
-        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: Some("add".into()) }))
+        .list_tools(Parameters(ListToolsParams {
+            server: "stub".into(),
+            tool: Some("add".into()),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
     assert_eq!(json["tool"], "add");
-    assert!(json["input_schema"]["properties"]["a"].is_object(),
-            "expected input schema with 'a' property: {json}");
+    assert!(
+        json["input_schema"]["properties"]["a"].is_object(),
+        "expected input schema with 'a' property: {json}"
+    );
 
     // Unknown server returns an error.
     let result = proxy
-        .list_tools(Parameters(ListToolsParams { server: "nope".into(), tool: None }))
+        .list_tools(Parameters(ListToolsParams {
+            server: "nope".into(),
+            tool: None,
+        }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown server");
     let json = extract_json(&result);
-    assert_eq!(json["error"]["code"], "unknown_server", "expected unknown_server: {json}");
+    assert_eq!(
+        json["error"]["code"], "unknown_server",
+        "expected unknown_server: {json}"
+    );
 
     // Unknown tool returns an error.
     let result = proxy
-        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: Some("nope".into()) }))
+        .list_tools(Parameters(ListToolsParams {
+            server: "stub".into(),
+            tool: Some("nope".into()),
+        }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown tool");
     let json = extract_json(&result);
-    assert_eq!(json["error"]["code"], "unknown_tool", "expected unknown_tool: {json}");
+    assert_eq!(
+        json["error"]["code"], "unknown_tool",
+        "expected unknown_tool: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -375,34 +427,59 @@ async fn search_through_proxy() {
 
     // Search for "add numbers" with kind="tools" should find the 'add' tool.
     let result = proxy
-        .search(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: None, kind: Some("tools".into()) }))
+        .search(Parameters(SearchParams {
+            query: "add numbers".into(),
+            limit: None,
+            include_schema: None,
+            kind: Some("tools".into()),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
     let hits = json["results"].as_array().unwrap();
     assert!(!hits.is_empty(), "expected at least one hit");
-    assert_eq!(json["count"], hits.len(), "count must match results length: {json}");
+    assert_eq!(
+        json["count"],
+        hits.len(),
+        "count must match results length: {json}"
+    );
     assert_eq!(hits[0]["kind"], "tool");
     assert_eq!(hits[0]["name"], "add");
     assert_eq!(hits[0]["server"], "stub");
-    assert!(hits[0].get("input_schema").is_none() || hits[0]["input_schema"].is_null(),
-           "input_schema should be absent without include_schema: {json}");
+    assert!(
+        hits[0].get("input_schema").is_none() || hits[0]["input_schema"].is_null(),
+        "input_schema should be absent without include_schema: {json}"
+    );
 
     // Search with limit.
     let result = proxy
-        .search(Parameters(SearchParams { query: "add".into(), limit: Some(1), include_schema: None, kind: None }))
+        .search(Parameters(SearchParams {
+            query: "add".into(),
+            limit: Some(1),
+            include_schema: None,
+            kind: None,
+        }))
         .await
         .unwrap();
     let json = extract_json(&result);
     let hits = json["results"].as_array().unwrap();
     // Tools are limited to 1, skills may also appear (but no skills configured here).
     let tool_hits: Vec<_> = hits.iter().filter(|h| h["kind"] == "tool").collect();
-    assert_eq!(tool_hits.len(), 1, "expected exactly 1 tool hit with limit=1: {json}");
+    assert_eq!(
+        tool_hits.len(),
+        1,
+        "expected exactly 1 tool hit with limit=1: {json}"
+    );
 
     // Search with include_schema=true: should include the input schema inline.
     let result = proxy
-        .search(Parameters(SearchParams { query: "add numbers".into(), limit: None, include_schema: Some(true), kind: Some("tools".into()) }))
+        .search(Parameters(SearchParams {
+            query: "add numbers".into(),
+            limit: None,
+            include_schema: Some(true),
+            kind: Some("tools".into()),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -410,22 +487,37 @@ async fn search_through_proxy() {
     let hits = json["results"].as_array().unwrap();
     assert!(!hits.is_empty());
     assert_eq!(hits[0]["name"], "add");
-    assert!(hits[0]["input_schema"]["properties"]["a"].is_object(),
-            "expected input schema with 'a' property: {json}");
-    assert!(hits[0]["input_schema"]["properties"]["b"].is_object(),
-            "expected input schema with 'b' property: {json}");
+    assert!(
+        hits[0]["input_schema"]["properties"]["a"].is_object(),
+        "expected input schema with 'a' property: {json}"
+    );
+    assert!(
+        hits[0]["input_schema"]["properties"]["b"].is_object(),
+        "expected input schema with 'b' property: {json}"
+    );
 
     // No matches is an empty result, NOT an error — an is_error response here
     // told the model the call itself had failed.
     let result = proxy
-        .search(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None, kind: None }))
+        .search(Parameters(SearchParams {
+            query: "xyzzy_nothing".into(),
+            limit: None,
+            include_schema: None,
+            kind: None,
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result), "no matches must not be an error");
     let json = extract_json(&result);
     assert_eq!(json["count"], 0, "expected count 0: {json}");
-    assert!(json["results"].as_array().unwrap().is_empty(), "expected empty results: {json}");
-    assert!(json["hint"].is_string(), "expected a hint on empty results: {json}");
+    assert!(
+        json["results"].as_array().unwrap().is_empty(),
+        "expected empty results: {json}"
+    );
+    assert!(
+        json["hint"].is_string(),
+        "expected a hint on empty results: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -436,10 +528,17 @@ async fn execute_through_proxy() {
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
     // Single call: add(17 + 25 = 42).
-    let args = serde_json::json!({"a": 17, "b": 25}).as_object().unwrap().clone();
+    let args = serde_json::json!({"a": 17, "b": 25})
+        .as_object()
+        .unwrap()
+        .clone();
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "add".into(),
+                arguments: Some(args),
+            }],
         }))
         .await
         .unwrap();
@@ -448,46 +547,80 @@ async fn execute_through_proxy() {
     let results = json.as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["ok"], true);
-    assert!(results[0]["result"].as_str().unwrap_or("").contains("42"), "expected 42: {json}");
+    assert!(
+        results[0]["result"].as_str().unwrap_or("").contains("42"),
+        "expected 42: {json}"
+    );
 
     // Single call: echo.
-    let args = serde_json::json!({"text": "hello geco"}).as_object().unwrap().clone();
+    let args = serde_json::json!({"text": "hello geco"})
+        .as_object()
+        .unwrap()
+        .clone();
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "echo".into(), arguments: Some(args) }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "echo".into(),
+                arguments: Some(args),
+            }],
         }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    assert!(json[0]["result"].as_str().unwrap_or("").contains("hello geco"), "expected echo: {json}");
+    assert!(
+        json[0]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("hello geco"),
+        "expected echo: {json}"
+    );
 
     // Denylist: secret_tool is blocked at execute time even if guessed.
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "secret_tool".into(), arguments: None }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "secret_tool".into(),
+                arguments: None,
+            }],
         }))
         .await
         .unwrap();
     let json = extract_json(&result);
     assert!(json[0]["ok"] == false, "denied tool should fail: {json}");
-    assert_eq!(json[0]["error"]["code"], "not_allowed", "expected not_allowed: {json}");
+    assert_eq!(
+        json[0]["error"]["code"], "not_allowed",
+        "expected not_allowed: {json}"
+    );
 
     // Unknown server.
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "nope".into(), tool: "add".into(), arguments: None }],
+            calls: vec![ExecuteCall {
+                server: "nope".into(),
+                tool: "add".into(),
+                arguments: None,
+            }],
         }))
         .await
         .unwrap();
     let json = extract_json(&result);
     assert!(json[0]["ok"] == false, "unknown server should fail: {json}");
-    assert_eq!(json[0]["error"]["code"], "unknown_server", "expected unknown_server: {json}");
+    assert_eq!(
+        json[0]["error"]["code"], "unknown_server",
+        "expected unknown_server: {json}"
+    );
 
     // Unknown tool on a valid server.
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "nonexistent".into(), arguments: None }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "nonexistent".into(),
+                arguments: None,
+            }],
         }))
         .await
         .unwrap();
@@ -501,11 +634,8 @@ async fn execute_through_proxy() {
 async fn skills_through_proxy() {
     let Some(cfg) = stub_config() else { return };
     let lib = make_skill_library();
-    let (proxy, registry) = make_proxy_with_skills(
-        &cfg,
-        vec![lib.path().display().to_string()],
-    )
-    .await;
+    let (proxy, registry) =
+        make_proxy_with_skills(&cfg, vec![lib.path().display().to_string()]).await;
 
     // list_skills: should show both skills.
     let result = proxy.list_skills().await.unwrap();
@@ -514,18 +644,37 @@ async fn skills_through_proxy() {
     let skills = json["skills"].as_array().unwrap();
     assert_eq!(json["count"], 2, "expected 2 skills: {json}");
     let names: Vec<_> = skills.iter().map(|s| s["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"test-planner"), "expected test-planner in {names:?}");
-    assert!(names.contains(&"code-reviewer"), "expected code-reviewer in {names:?}");
+    assert!(
+        names.contains(&"test-planner"),
+        "expected test-planner in {names:?}"
+    );
+    assert!(
+        names.contains(&"code-reviewer"),
+        "expected code-reviewer in {names:?}"
+    );
     // test-planner has a version in frontmatter; code-reviewer doesn't.
     let planner = skills.iter().find(|s| s["name"] == "test-planner").unwrap();
-    assert_eq!(planner["version"], "1.2.0", "expected version 1.2.0: {planner}");
-    let reviewer = skills.iter().find(|s| s["name"] == "code-reviewer").unwrap();
-    assert!(reviewer.get("version").is_none() || reviewer["version"].is_null(),
-            "code-reviewer should have no version: {reviewer}");
+    assert_eq!(
+        planner["version"], "1.2.0",
+        "expected version 1.2.0: {planner}"
+    );
+    let reviewer = skills
+        .iter()
+        .find(|s| s["name"] == "code-reviewer")
+        .unwrap();
+    assert!(
+        reviewer.get("version").is_none() || reviewer["version"].is_null(),
+        "code-reviewer should have no version: {reviewer}"
+    );
 
     // search with kind="skills": "review" should find code-reviewer.
     let result = proxy
-        .search(Parameters(SearchParams { query: "review".into(), limit: None, include_schema: None, kind: Some("skills".into()) }))
+        .search(Parameters(SearchParams {
+            query: "review".into(),
+            limit: None,
+            include_schema: None,
+            kind: Some("skills".into()),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -537,7 +686,12 @@ async fn skills_through_proxy() {
 
     // search with kind="skills": "plan" should find test-planner.
     let result = proxy
-        .search(Parameters(SearchParams { query: "plan tests".into(), limit: None, include_schema: None, kind: Some("skills".into()) }))
+        .search(Parameters(SearchParams {
+            query: "plan tests".into(),
+            limit: None,
+            include_schema: None,
+            kind: Some("skills".into()),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result));
@@ -548,35 +702,56 @@ async fn skills_through_proxy() {
 
     // search with kind="skills": no match is an empty result, not an error.
     let result = proxy
-        .search(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None, kind: Some("skills".into()) }))
+        .search(Parameters(SearchParams {
+            query: "xyzzy_nothing".into(),
+            limit: None,
+            include_schema: None,
+            kind: Some("skills".into()),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result), "no skill matches must not be an error");
     let json = extract_json(&result);
     assert_eq!(json["count"], 0, "expected count 0: {json}");
-    assert!(json["hint"].is_string(), "expected a hint on empty results: {json}");
+    assert!(
+        json["hint"].is_string(),
+        "expected a hint on empty results: {json}"
+    );
 
     // search with kind="skills" + no skills configured returns error.
     // (already tested above — the make_proxy_with_skills has skills)
 
     // read_skill: load the full SKILL.md + file inventory.
     let result = proxy
-        .read_skill(Parameters(ReadSkillParams { name: "test-planner".into() }))
+        .read_skill(Parameters(ReadSkillParams {
+            name: "test-planner".into(),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let text = format!("{:?}", result.content);
-    assert!(text.contains("Test Planner"), "expected SKILL.md body in result");
-    assert!(text.contains("run.sh"), "expected bundled script in file inventory");
+    assert!(
+        text.contains("Test Planner"),
+        "expected SKILL.md body in result"
+    );
+    assert!(
+        text.contains("run.sh"),
+        "expected bundled script in file inventory"
+    );
 
     // read_skill: unknown skill returns an error.
     let result = proxy
-        .read_skill(Parameters(ReadSkillParams { name: "nonexistent".into() }))
+        .read_skill(Parameters(ReadSkillParams {
+            name: "nonexistent".into(),
+        }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for unknown skill");
     let json = extract_json(&result);
-    assert_eq!(json["error"]["code"], "unknown_skill", "expected unknown_skill: {json}");
+    assert_eq!(
+        json["error"]["code"], "unknown_skill",
+        "expected unknown_skill: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -589,11 +764,8 @@ async fn rescan_skills_picks_up_new_skill() {
     // appear in list_skills without touching the config.
     let Some(cfg) = stub_config() else { return };
     let lib = make_skill_library();
-    let (proxy, registry) = make_proxy_with_skills(
-        &cfg,
-        vec![lib.path().display().to_string()],
-    )
-    .await;
+    let (proxy, registry) =
+        make_proxy_with_skills(&cfg, vec![lib.path().display().to_string()]).await;
 
     // Initially 2 skills.
     let result = proxy.list_skills().await.unwrap();
@@ -603,8 +775,11 @@ async fn rescan_skills_picks_up_new_skill() {
     // Drop a third skill into the library dir.
     let s3 = lib.path().join("third-skill");
     std::fs::create_dir_all(&s3).unwrap();
-    std::fs::write(s3.join("SKILL.md"),
-        "---\nname: third-skill\ndescription: A skill added after startup\n---\n\n# Third Skill\n").unwrap();
+    std::fs::write(
+        s3.join("SKILL.md"),
+        "---\nname: third-skill\ndescription: A skill added after startup\n---\n\n# Third Skill\n",
+    )
+    .unwrap();
 
     // rescan_skills (what spawn_skill_reload calls on a filesystem event).
     proxy.rescan_skills().await;
@@ -615,14 +790,22 @@ async fn rescan_skills_picks_up_new_skill() {
     assert_eq!(json["count"], 3, "expected 3 skills after rescan: {json}");
     let skills = json["skills"].as_array().unwrap();
     let names: Vec<_> = skills.iter().map(|s| s["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"third-skill"), "expected third-skill in {names:?}");
+    assert!(
+        names.contains(&"third-skill"),
+        "expected third-skill in {names:?}"
+    );
 
     // read_skill works on the newly-added skill.
     let result = proxy
-        .read_skill(Parameters(ReadSkillParams { name: "third-skill".into() }))
+        .read_skill(Parameters(ReadSkillParams {
+            name: "third-skill".into(),
+        }))
         .await
         .unwrap();
-    assert!(!is_error(&result), "expected read_skill to find third-skill");
+    assert!(
+        !is_error(&result),
+        "expected read_skill to find third-skill"
+    );
 
     registry.shutdown_all().await;
 }
@@ -633,18 +816,22 @@ async fn rescan_skills_picks_up_edited_description() {
     // returned by list_skills after a rescan.
     let Some(cfg) = stub_config() else { return };
     let lib = make_skill_library();
-    let (proxy, registry) = make_proxy_with_skills(
-        &cfg,
-        vec![lib.path().display().to_string()],
-    )
-    .await;
+    let (proxy, registry) =
+        make_proxy_with_skills(&cfg, vec![lib.path().display().to_string()]).await;
 
     // Initial description for code-reviewer.
     let result = proxy.list_skills().await.unwrap();
     let json = extract_json(&result);
-    let reviewer = json["skills"].as_array().unwrap()
-        .iter().find(|s| s["name"] == "code-reviewer").unwrap();
-    assert_eq!(reviewer["description"], "Review code for bugs and improvements");
+    let reviewer = json["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "code-reviewer")
+        .unwrap();
+    assert_eq!(
+        reviewer["description"],
+        "Review code for bugs and improvements"
+    );
 
     // Edit the SKILL.md frontmatter description.
     let s2 = lib.path().join("code-reviewer");
@@ -656,10 +843,16 @@ async fn rescan_skills_picks_up_edited_description() {
     // Description should now reflect the edit.
     let result = proxy.list_skills().await.unwrap();
     let json = extract_json(&result);
-    let reviewer = json["skills"].as_array().unwrap()
-        .iter().find(|s| s["name"] == "code-reviewer").unwrap();
-    assert_eq!(reviewer["description"], "UPDATED description after edit",
-        "expected updated description: {reviewer}");
+    let reviewer = json["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "code-reviewer")
+        .unwrap();
+    assert_eq!(
+        reviewer["description"], "UPDATED description after edit",
+        "expected updated description: {reviewer}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -670,13 +863,13 @@ async fn rescan_skills_drops_removed_skill() {
     // after a rescan.
     let Some(cfg) = stub_config() else { return };
     let lib = make_skill_library();
-    let (proxy, registry) = make_proxy_with_skills(
-        &cfg,
-        vec![lib.path().display().to_string()],
-    )
-    .await;
+    let (proxy, registry) =
+        make_proxy_with_skills(&cfg, vec![lib.path().display().to_string()]).await;
 
-    assert_eq!(extract_json(&proxy.list_skills().await.unwrap())["count"], 2);
+    assert_eq!(
+        extract_json(&proxy.list_skills().await.unwrap())["count"],
+        2
+    );
 
     // Remove the code-reviewer skill entirely.
     std::fs::remove_dir_all(lib.path().join("code-reviewer")).unwrap();
@@ -691,7 +884,9 @@ async fn rescan_skills_drops_removed_skill() {
 
     // read_skill should now error for the removed skill.
     let result = proxy
-        .read_skill(Parameters(ReadSkillParams { name: "code-reviewer".into() }))
+        .read_skill(Parameters(ReadSkillParams {
+            name: "code-reviewer".into(),
+        }))
         .await
         .unwrap();
     assert!(is_error(&result), "expected error for removed skill");
@@ -707,33 +902,56 @@ async fn config_reload_failure_surfaces_in_health() {
     // Initially healthy (no config issues).
     let result = proxy.health().await.unwrap();
     let json = extract_json(&result);
-    assert!(json["issues"].as_array().unwrap().iter().all(|i| i["kind"] != "config"),
-            "expected no config issues initially: {json}");
+    assert!(
+        json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["kind"] != "config"),
+        "expected no config issues initially: {json}"
+    );
 
     // Simulate a config-reload failure (what the hot-reload watcher does on
     // a broken config file).
-    proxy.set_config_issue(Some(geco::health::Issue {
-        kind: "config".into(),
-        subject: "reload".into(),
-        detail: "parse failed (keeping old config): invalid YAML".into(),
-        severity: "error".into(),
-    })).await;
+    proxy
+        .set_config_issue(Some(geco::health::Issue {
+            kind: "config".into(),
+            subject: "reload".into(),
+            detail: "parse failed (keeping old config): invalid YAML".into(),
+            severity: "error".into(),
+        }))
+        .await;
 
     // Health should now surface the config issue.
     let result = proxy.health().await.unwrap();
     let json = extract_json(&result);
-    let config_issues: Vec<_> = json["issues"].as_array().unwrap().iter()
-        .filter(|i| i["kind"] == "config").collect();
+    let config_issues: Vec<_> = json["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "config")
+        .collect();
     assert_eq!(config_issues.len(), 1, "expected 1 config issue: {json}");
-    assert!(config_issues[0]["detail"].as_str().unwrap().contains("parse failed"),
-            "expected parse failed in detail: {config_issues:?}");
+    assert!(
+        config_issues[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("parse failed"),
+        "expected parse failed in detail: {config_issues:?}"
+    );
 
     // Clear the issue (what a successful reload does).
     proxy.set_config_issue(None).await;
     let result = proxy.health().await.unwrap();
     let json = extract_json(&result);
-    assert!(json["issues"].as_array().unwrap().iter().all(|i| i["kind"] != "config"),
-            "expected no config issues after clear: {json}");
+    assert!(
+        json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["kind"] != "config"),
+        "expected no config issues after clear: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -744,28 +962,48 @@ async fn execute_on_warm_backend_reuses_connection() {
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
     // First call: cold start.
-    let args = serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone();
+    let args = serde_json::json!({"a": 1, "b": 2})
+        .as_object()
+        .unwrap()
+        .clone();
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "add".into(),
+                arguments: Some(args),
+            }],
         }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    assert!(json[0]["result"].as_str().unwrap_or("").contains("3"), "expected 3: {json}");
+    assert!(
+        json[0]["result"].as_str().unwrap_or("").contains("3"),
+        "expected 3: {json}"
+    );
 
     // Second call: warm — should reuse connection.
-    let args = serde_json::json!({"a": 40, "b": 2}).as_object().unwrap().clone();
+    let args = serde_json::json!({"a": 40, "b": 2})
+        .as_object()
+        .unwrap()
+        .clone();
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "add".into(),
+                arguments: Some(args),
+            }],
         }))
         .await
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    assert!(json[0]["result"].as_str().unwrap_or("").contains("42"), "expected 42: {json}");
+    assert!(
+        json[0]["result"].as_str().unwrap_or("").contains("42"),
+        "expected 42: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -827,16 +1065,26 @@ async fn hot_reload_updates_snapshot() {
     assert_eq!(servers[0]["description"], "updated desc");
 
     // Execute through the reloaded proxy — should still work.
-    let args = serde_json::json!({"a": 10, "b": 5}).as_object().unwrap().clone();
+    let args = serde_json::json!({"a": 10, "b": 5})
+        .as_object()
+        .unwrap()
+        .clone();
     let result = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "add".into(),
+                arguments: Some(args),
+            }],
         }))
         .await
         .unwrap();
     assert!(!is_error(&result), "execute should work after reload");
     let json = extract_json(&result);
-    assert!(json[0]["result"].as_str().unwrap_or("").contains("15"), "expected 15: {json}");
+    assert!(
+        json[0]["result"].as_str().unwrap_or("").contains("15"),
+        "expected 15: {json}"
+    );
 
     proxy.shutdown_backends().await;
 }
@@ -850,26 +1098,53 @@ async fn check_health_detects_dead_backend() {
     let backend = registry.get("stub").unwrap();
 
     // Cold backend: check_health returns true (nothing to check).
-    assert!(backend.check_health().await, "cold backend should be healthy");
+    assert!(
+        backend.check_health().await,
+        "cold backend should be healthy"
+    );
 
     // Start the backend by calling a tool.
-    let args = serde_json::json!({"a": 1, "b": 1}).as_object().unwrap().clone();
-    let _ = backend.call("add", Some(args), &registry.proxy).await.unwrap();
-    assert!(matches!(backend.status().await, geco::backend::Status::Up { .. }));
+    let args = serde_json::json!({"a": 1, "b": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+    let _ = backend
+        .call("add", Some(args), &registry.proxy)
+        .await
+        .unwrap();
+    assert!(matches!(
+        backend.status().await,
+        geco::backend::Status::Up { .. }
+    ));
 
     // Warm backend: check_health returns true.
-    assert!(backend.check_health().await, "warm backend should be healthy");
+    assert!(
+        backend.check_health().await,
+        "warm backend should be healthy"
+    );
 
     // Shut down — simulates the child process dying.
     backend.shutdown().await;
-    assert!(matches!(backend.status().await, geco::backend::Status::Cold));
+    assert!(matches!(
+        backend.status().await,
+        geco::backend::Status::Cold
+    ));
 
     // After shutdown, conn is None — check_health is a no-op (returns true).
-    assert!(backend.check_health().await, "after shutdown, check_health is a no-op");
+    assert!(
+        backend.check_health().await,
+        "after shutdown, check_health is a no-op"
+    );
 
     // Reconnect: call should work again (new connection).
-    let args = serde_json::json!({"a": 2, "b": 3}).as_object().unwrap().clone();
-    let result = backend.call("add", Some(args), &registry.proxy).await.unwrap();
+    let args = serde_json::json!({"a": 2, "b": 3})
+        .as_object()
+        .unwrap()
+        .clone();
+    let result = backend
+        .call("add", Some(args), &registry.proxy)
+        .await
+        .unwrap();
     let text = format!("{:?}", result.content);
     assert!(text.contains("5"), "expected 5 after reconnect: {text}");
 
@@ -891,17 +1166,32 @@ async fn execute_batch_through_proxy() {
                 ExecuteCall {
                     server: "stub".into(),
                     tool: "add".into(),
-                    arguments: Some(serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone()),
+                    arguments: Some(
+                        serde_json::json!({"a": 1, "b": 2})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
                 },
                 ExecuteCall {
                     server: "stub".into(),
                     tool: "echo".into(),
-                    arguments: Some(serde_json::json!({"text": "hello batch"}).as_object().unwrap().clone()),
+                    arguments: Some(
+                        serde_json::json!({"text": "hello batch"})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
                 },
                 ExecuteCall {
                     server: "stub".into(),
                     tool: "add".into(),
-                    arguments: Some(serde_json::json!({"a": 40, "b": 2}).as_object().unwrap().clone()),
+                    arguments: Some(
+                        serde_json::json!({"a": 40, "b": 2})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
                 },
             ],
         }))
@@ -912,12 +1202,27 @@ async fn execute_batch_through_proxy() {
     let results = json.as_array().unwrap();
     assert_eq!(results.len(), 3, "expected 3 results: {json}");
     assert_eq!(results[0]["tool"], "add");
-    assert!(results[0]["result"].as_str().unwrap_or("").contains("3"), "expected 3: {json}");
+    assert!(
+        results[0]["result"].as_str().unwrap_or("").contains("3"),
+        "expected 3: {json}"
+    );
     assert_eq!(results[1]["tool"], "echo");
-    assert!(results[1]["result"].as_str().unwrap_or("").contains("hello batch"), "expected echo: {json}");
+    assert!(
+        results[1]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("hello batch"),
+        "expected echo: {json}"
+    );
     assert_eq!(results[2]["tool"], "add");
-    assert!(results[2]["result"].as_str().unwrap_or("").contains("42"), "expected 42: {json}");
-    assert!(results.iter().all(|r| r["ok"] == true), "all calls should succeed: {json}");
+    assert!(
+        results[2]["result"].as_str().unwrap_or("").contains("42"),
+        "expected 42: {json}"
+    );
+    assert!(
+        results.iter().all(|r| r["ok"] == true),
+        "all calls should succeed: {json}"
+    );
 
     // Mixed success/error (unknown tool) — the other call should still succeed.
     let result = proxy
@@ -926,7 +1231,12 @@ async fn execute_batch_through_proxy() {
                 ExecuteCall {
                     server: "stub".into(),
                     tool: "add".into(),
-                    arguments: Some(serde_json::json!({"a": 10, "b": 5}).as_object().unwrap().clone()),
+                    arguments: Some(
+                        serde_json::json!({"a": 10, "b": 5})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
                 },
                 ExecuteCall {
                     server: "stub".into(),
@@ -941,10 +1251,18 @@ async fn execute_batch_through_proxy() {
     let json = extract_json(&result);
     let results = json.as_array().unwrap();
     assert_eq!(results.len(), 2);
-    assert!(results[0]["ok"] == true, "first call should succeed: {json}");
+    assert!(
+        results[0]["ok"] == true,
+        "first call should succeed: {json}"
+    );
     assert!(results[1]["ok"] == false, "second call should fail: {json}");
-    assert!(results[1]["result"].as_str().unwrap_or("").contains("unknown tool"),
-            "expected 'unknown tool' in result: {json}");
+    assert!(
+        results[1]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unknown tool"),
+        "expected 'unknown tool' in result: {json}"
+    );
 
     // Unknown server — error, not a crash.
     let result = proxy
@@ -968,21 +1286,34 @@ async fn execute_batch_through_proxy() {
         .unwrap();
     assert!(is_error(&result), "empty calls should error");
     let json = extract_json(&result);
-    assert_eq!(json["error"]["code"], "empty_calls", "expected empty_calls: {json}");
+    assert_eq!(
+        json["error"]["code"], "empty_calls",
+        "expected empty_calls: {json}"
+    );
 
     // Too many calls (>10) returns an error.
-    let calls: Vec<_> = (0..11).map(|_| ExecuteCall {
-        server: "stub".into(),
-        tool: "echo".into(),
-        arguments: Some(serde_json::json!({"text": "x"}).as_object().unwrap().clone()),
-    }).collect();
+    let calls: Vec<_> = (0..11)
+        .map(|_| ExecuteCall {
+            server: "stub".into(),
+            tool: "echo".into(),
+            arguments: Some(
+                serde_json::json!({"text": "x"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .collect();
     let result = proxy
         .execute(Parameters(ExecuteParams { calls }))
         .await
         .unwrap();
     assert!(is_error(&result), ">10 calls should error");
     let json = extract_json(&result);
-    assert_eq!(json["error"]["code"], "too_many_calls", "expected too_many_calls: {json}");
+    assert_eq!(
+        json["error"]["code"], "too_many_calls",
+        "expected too_many_calls: {json}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -993,18 +1324,32 @@ async fn execute_records_metrics() {
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
     // Make a couple of calls.
-    let args = serde_json::json!({"a": 1, "b": 2}).as_object().unwrap().clone();
+    let args = serde_json::json!({"a": 1, "b": 2})
+        .as_object()
+        .unwrap()
+        .clone();
     let _ = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "add".into(),
+                arguments: Some(args),
+            }],
         }))
         .await
         .unwrap();
 
-    let args = serde_json::json!({"a": 3, "b": 4}).as_object().unwrap().clone();
+    let args = serde_json::json!({"a": 3, "b": 4})
+        .as_object()
+        .unwrap()
+        .clone();
     let _ = proxy
         .execute(Parameters(ExecuteParams {
-            calls: vec![ExecuteCall { server: "stub".into(), tool: "add".into(), arguments: Some(args) }],
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "add".into(),
+                arguments: Some(args),
+            }],
         }))
         .await
         .unwrap();
@@ -1037,12 +1382,17 @@ async fn refresh_tools_returns_diff() {
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    assert!(json["diff"].is_object(), "expected diff in response: {json}");
+    assert!(
+        json["diff"].is_object(),
+        "expected diff in response: {json}"
+    );
     // The stub has 2 tools (add, echo). On the first refresh after snapshot
     // build, they should be unchanged (same snapshot data).
     let diff = &json["diff"];
-    assert!(diff["unchanged"].as_u64().unwrap_or(0) >= 2,
-            "expected at least 2 unchanged tools: {diff}");
+    assert!(
+        diff["unchanged"].as_u64().unwrap_or(0) >= 2,
+        "expected at least 2 unchanged tools: {diff}"
+    );
 
     // Second refresh — nothing changed.
     let result = proxy
@@ -1051,11 +1401,25 @@ async fn refresh_tools_returns_diff() {
         .unwrap();
     let json = extract_json(&result);
     let diff = &json["diff"];
-    assert_eq!(diff["added"].as_array().unwrap().len(), 0, "expected 0 added: {diff}");
-    assert_eq!(diff["removed"].as_array().unwrap().len(), 0, "expected 0 removed: {diff}");
-    assert_eq!(diff["changed"].as_array().unwrap().len(), 0, "expected 0 changed: {diff}");
-    assert!(diff["unchanged"].as_u64().unwrap_or(0) >= 2,
-            "expected at least 2 unchanged: {diff}");
+    assert_eq!(
+        diff["added"].as_array().unwrap().len(),
+        0,
+        "expected 0 added: {diff}"
+    );
+    assert_eq!(
+        diff["removed"].as_array().unwrap().len(),
+        0,
+        "expected 0 removed: {diff}"
+    );
+    assert_eq!(
+        diff["changed"].as_array().unwrap().len(),
+        0,
+        "expected 0 changed: {diff}"
+    );
+    assert!(
+        diff["unchanged"].as_u64().unwrap_or(0) >= 2,
+        "expected at least 2 unchanged: {diff}"
+    );
 
     registry.shutdown_all().await;
 }
@@ -1086,7 +1450,9 @@ async fn refresh_tools_diff_shows_added_server() {
     let registry = Arc::new(Registry::from_config(&cfg));
 
     // Build a snapshot with only "stub" (not stub2).
-    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), Some("stub")).await;
+    let snapshot = registry
+        .build_snapshot(cfg.snapshot_hash(), Some("stub"))
+        .await;
     // build_snapshot with a filter only builds that one server.
     let proxy = Proxy::new(
         (*registry).clone(),
@@ -1106,9 +1472,14 @@ async fn refresh_tools_diff_shows_added_server() {
     let json = extract_json(&result);
     let diff = &json["diff"];
     let added = diff["added"].as_array().unwrap();
-    assert!(!added.is_empty(), "expected added tools from new server: {diff}");
-    assert!(added.iter().any(|a| a["server"] == "stub2"),
-            "expected stub2 tools in added: {added:?}");
+    assert!(
+        !added.is_empty(),
+        "expected added tools from new server: {diff}"
+    );
+    assert!(
+        added.iter().any(|a| a["server"] == "stub2"),
+        "expected stub2 tools in added: {added:?}"
+    );
 
     proxy.shutdown_backends().await;
 }
@@ -1140,7 +1511,9 @@ async fn partial_refresh_leaves_other_backends_running() {
 
     // Snapshot deliberately covers only "stub" — "stub2" is configured and
     // live, but absent from the snapshot.
-    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), Some("stub")).await;
+    let snapshot = registry
+        .build_snapshot(cfg.snapshot_hash(), Some("stub"))
+        .await;
     let proxy = Proxy::new(
         (*registry).clone(),
         snapshot,
@@ -1152,21 +1525,33 @@ async fn partial_refresh_leaves_other_backends_running() {
 
     // Warm up stub2 so it has a real child process to lose.
     let stub2 = registry.get("stub2").unwrap();
-    let args = serde_json::json!({"a": 1, "b": 1}).as_object().unwrap().clone();
-    stub2.call("add", Some(args), &registry.proxy).await.unwrap();
-    assert!(matches!(stub2.status().await, geco::backend::Status::Up { .. }),
-            "stub2 should be warm before the refresh");
+    let args = serde_json::json!({"a": 1, "b": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+    stub2
+        .call("add", Some(args), &registry.proxy)
+        .await
+        .unwrap();
+    assert!(
+        matches!(stub2.status().await, geco::backend::Status::Up { .. }),
+        "stub2 should be warm before the refresh"
+    );
 
     // Refresh only "stub".
     let result = proxy
-        .refresh_tools(Parameters(RefreshParams { server: Some("stub".into()) }))
+        .refresh_tools(Parameters(RefreshParams {
+            server: Some("stub".into()),
+        }))
         .await
         .unwrap();
     assert!(!is_error(&result), "single-server refresh should succeed");
 
     let status = stub2.status().await;
-    assert!(matches!(status, geco::backend::Status::Up { .. }),
-            "partial refresh must not shut down unrelated backends, got: {status:?}");
+    assert!(
+        matches!(status, geco::backend::Status::Up { .. }),
+        "partial refresh must not shut down unrelated backends, got: {status:?}"
+    );
 
     proxy.shutdown_backends().await;
 }
@@ -1190,12 +1575,22 @@ async fn execute_batches_across_backends() {
                 ExecuteCall {
                     server: "stub2".into(),
                     tool: "echo".into(),
-                    arguments: Some(serde_json::json!({"text": "from stub2"}).as_object().unwrap().clone()),
+                    arguments: Some(
+                        serde_json::json!({"text": "from stub2"})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
                 },
                 ExecuteCall {
                     server: "stub".into(),
                     tool: "add".into(),
-                    arguments: Some(serde_json::json!({"a": 20, "b": 22}).as_object().unwrap().clone()),
+                    arguments: Some(
+                        serde_json::json!({"a": 20, "b": 22})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
                 },
             ],
         }))
@@ -1206,15 +1601,39 @@ async fn execute_batches_across_backends() {
     let results = json.as_array().unwrap();
     assert_eq!(results.len(), 2, "{json}");
     // Input order, not completion order.
-    assert_eq!(results[0]["server"], "stub2", "results must keep input order: {json}");
-    assert_eq!(results[1]["server"], "stub", "results must keep input order: {json}");
-    assert!(results.iter().all(|r| r["ok"] == true), "both should succeed: {json}");
-    assert!(results[0]["result"].as_str().unwrap_or("").contains("from stub2"), "{json}");
-    assert!(results[1]["result"].as_str().unwrap_or("").contains("42"), "{json}");
+    assert_eq!(
+        results[0]["server"], "stub2",
+        "results must keep input order: {json}"
+    );
+    assert_eq!(
+        results[1]["server"], "stub",
+        "results must keep input order: {json}"
+    );
+    assert!(
+        results.iter().all(|r| r["ok"] == true),
+        "both should succeed: {json}"
+    );
+    assert!(
+        results[0]["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("from stub2"),
+        "{json}"
+    );
+    assert!(
+        results[1]["result"].as_str().unwrap_or("").contains("42"),
+        "{json}"
+    );
 
     // Both backends should now be warm — proof they really both ran.
-    assert!(matches!(registry.get("stub").unwrap().status().await, geco::backend::Status::Up { .. }));
-    assert!(matches!(registry.get("stub2").unwrap().status().await, geco::backend::Status::Up { .. }));
+    assert!(matches!(
+        registry.get("stub").unwrap().status().await,
+        geco::backend::Status::Up { .. }
+    ));
+    assert!(matches!(
+        registry.get("stub2").unwrap().status().await,
+        geco::backend::Status::Up { .. }
+    ));
 
     registry.shutdown_all().await;
 }
@@ -1234,17 +1653,28 @@ async fn allowlist_filters_snapshot_and_execution() {
     let (proxy, registry, snapshot) = make_proxy(&cfg).await;
 
     // Snapshot: only the allowed tool survives.
-    let names: Vec<_> = snapshot.servers["stub"].tools.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<_> = snapshot.servers["stub"]
+        .tools
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
     assert_eq!(names, vec!["add"], "allowlist should leave only `add`");
 
     // list_tools agrees.
     let result = proxy
-        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: None }))
+        .list_tools(Parameters(ListToolsParams {
+            server: "stub".into(),
+            tool: None,
+        }))
         .await
         .unwrap();
     let json = extract_json(&result);
-    let listed: Vec<_> = json["tools"].as_array().unwrap().iter()
-        .map(|t| t["tool"].as_str().unwrap()).collect();
+    let listed: Vec<_> = json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["tool"].as_str().unwrap())
+        .collect();
     assert_eq!(listed, vec!["add"], "{json}");
 
     // And a guessed, non-allowlisted tool is refused at execution time.
@@ -1253,13 +1683,21 @@ async fn allowlist_filters_snapshot_and_execution() {
             calls: vec![ExecuteCall {
                 server: "stub".into(),
                 tool: "echo".into(),
-                arguments: Some(serde_json::json!({"text": "hi"}).as_object().unwrap().clone()),
+                arguments: Some(
+                    serde_json::json!({"text": "hi"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
             }],
         }))
         .await
         .unwrap();
     let json = extract_json(&result);
-    assert_eq!(json[0]["ok"], false, "non-allowlisted tool must not run: {json}");
+    assert_eq!(
+        json[0]["ok"], false,
+        "non-allowlisted tool must not run: {json}"
+    );
     assert_eq!(json[0]["error"]["code"], "not_allowed", "{json}");
 
     registry.shutdown_all().await;
@@ -1281,9 +1719,18 @@ async fn backend_death_mid_call_is_detected_and_recovers() {
     let backend = registry.get("stub").unwrap();
 
     // Warm it up.
-    let args = serde_json::json!({"a": 1, "b": 1}).as_object().unwrap().clone();
-    backend.call("add", Some(args), &registry.proxy).await.unwrap();
-    assert!(matches!(backend.status().await, geco::backend::Status::Up { .. }));
+    let args = serde_json::json!({"a": 1, "b": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+    backend
+        .call("add", Some(args), &registry.proxy)
+        .await
+        .unwrap();
+    assert!(matches!(
+        backend.status().await,
+        geco::backend::Status::Up { .. }
+    ));
 
     // Kill it mid-call. Bounded by our own timeout so a hang fails fast
     // rather than sitting on geco's 120s call_timeout.
@@ -1307,13 +1754,22 @@ async fn backend_death_mid_call_is_detected_and_recovers() {
     );
 
     // ...and the next call must transparently reconnect.
-    let args = serde_json::json!({"a": 2, "b": 3}).as_object().unwrap().clone();
+    let args = serde_json::json!({"a": 2, "b": 3})
+        .as_object()
+        .unwrap()
+        .clone();
     let res = backend
         .call("add", Some(args), &registry.proxy)
         .await
         .expect("next call should reconnect to a fresh child");
-    assert!(format!("{:?}", res.content).contains("5"), "expected 5 after reconnect");
-    assert!(matches!(backend.status().await, geco::backend::Status::Up { .. }));
+    assert!(
+        format!("{:?}", res.content).contains("5"),
+        "expected 5 after reconnect"
+    );
+    assert!(matches!(
+        backend.status().await,
+        geco::backend::Status::Up { .. }
+    ));
 
     registry.shutdown_all().await;
 }
@@ -1337,10 +1793,21 @@ async fn backend_child_is_reaped_on_shutdown() {
 
     // Ask the child for its own PID.
     let res = backend.call("pid", None, &registry.proxy).await.unwrap();
-    let text = res.content.iter().find_map(|b| {
-        if let ContentBlock::Text(t) = b { Some(t.text.clone()) } else { None }
-    }).expect("pid tool should return text");
-    let pid: u32 = text.trim().parse().unwrap_or_else(|e| panic!("bad pid {text:?}: {e}"));
+    let text = res
+        .content
+        .iter()
+        .find_map(|b| {
+            if let ContentBlock::Text(t) = b {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        })
+        .expect("pid tool should return text");
+    let pid: u32 = text
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("bad pid {text:?}: {e}"));
 
     // `ps -o stat=` prints nothing once the process is gone; a leading Z
     // means it exited but hasn't been reaped, which counts as dead here.
@@ -1383,11 +1850,23 @@ async fn backend_getenv(
     registry: &Registry,
     name: &str,
 ) -> String {
-    let args = serde_json::json!({ "name": name }).as_object().unwrap().clone();
-    let res = backend.call("getenv", Some(args), &registry.proxy).await.unwrap();
+    let args = serde_json::json!({ "name": name })
+        .as_object()
+        .unwrap()
+        .clone();
+    let res = backend
+        .call("getenv", Some(args), &registry.proxy)
+        .await
+        .unwrap();
     res.content
         .iter()
-        .find_map(|b| if let ContentBlock::Text(t) = b { Some(t.text.clone()) } else { None })
+        .find_map(|b| {
+            if let ContentBlock::Text(t) = b {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        })
         .unwrap_or_default()
 }
 
@@ -1477,11 +1956,18 @@ async fn env_passthrough_globs_and_inherit_escape_hatch() {
                 "env": { "STUB_EXTRA_TOOLS": "1" },
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let registry = Arc::new(Registry::from_config(&cfg));
     let backend = registry.get("stub").unwrap();
-    assert_eq!(backend_getenv(&backend, &registry, "GECO_GLOB_ONE").await, "one");
-    assert_eq!(backend_getenv(&backend, &registry, "GECO_OTHER").await, "<unset>");
+    assert_eq!(
+        backend_getenv(&backend, &registry, "GECO_GLOB_ONE").await,
+        "one"
+    );
+    assert_eq!(
+        backend_getenv(&backend, &registry, "GECO_OTHER").await,
+        "<unset>"
+    );
     registry.shutdown_all().await;
 
     // inherit_env: true restores the pre-0.7 behaviour wholesale.
@@ -1493,7 +1979,8 @@ async fn env_passthrough_globs_and_inherit_escape_hatch() {
                 "env": { "STUB_EXTRA_TOOLS": "1" },
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let registry = Arc::new(Registry::from_config(&cfg));
     let backend = registry.get("stub").unwrap();
     assert_eq!(
@@ -1525,7 +2012,10 @@ async fn tools_list_changed_refreshes_the_snapshot_unprompted() {
 
     let tool_names = |p: Proxy| async move {
         let r = p
-            .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: None }))
+            .list_tools(Parameters(ListToolsParams {
+                server: "stub".into(),
+                tool: None,
+            }))
             .await
             .unwrap();
         let json = extract_json(&r);
@@ -1585,16 +2075,21 @@ async fn skill_watch_roots_resolves_inside_a_task() {
     // exercises the resolver from an async context, where the old code blew up.
     let Some(cfg) = stub_config() else { return };
     let lib = make_skill_library();
-    let (proxy, registry) = make_proxy_with_skills(
-        &cfg,
-        vec![lib.path().display().to_string()],
-    )
-    .await;
+    let (proxy, registry) =
+        make_proxy_with_skills(&cfg, vec![lib.path().display().to_string()]).await;
 
     let roots = proxy.skill_watch_roots().await;
     let expected = std::path::PathBuf::from(lib.path().display().to_string());
-    assert_eq!(roots.len(), 1, "expected exactly the configured library: {roots:?}");
-    assert!(roots.contains(&expected), "expected {} in {roots:?}", expected.display());
+    assert_eq!(
+        roots.len(),
+        1,
+        "expected exactly the configured library: {roots:?}"
+    );
+    assert!(
+        roots.contains(&expected),
+        "expected {} in {roots:?}",
+        expected.display()
+    );
 
     // Run it from a spawned task too — that is where the panic actually fired.
     let proxy2 = proxy.clone();

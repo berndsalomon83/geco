@@ -117,7 +117,9 @@ pub fn absorb_into(library: &str, absorb_dirs: &[String]) -> (Vec<String>, Vec<S
         if src_root == lib {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&src_root) else { continue };
+        let Ok(entries) = std::fs::read_dir(&src_root) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let src = entry.path();
             if !src.join("SKILL.md").is_file() {
@@ -177,19 +179,26 @@ impl SkillIndex {
                 if !skill_md.is_file() {
                     continue;
                 }
-                let Ok(text) = std::fs::read_to_string(&skill_md) else { continue };
+                let Ok(text) = std::fs::read_to_string(&skill_md) else {
+                    continue;
+                };
                 let fm = parse_frontmatter(&text);
-                let name = fm
-                    .as_ref()
-                    .and_then(|f| f.name.clone())
-                    .unwrap_or_else(|| {
-                        path.file_name().unwrap_or_default().to_string_lossy().to_string()
-                    });
+                let name = fm.as_ref().and_then(|f| f.name.clone()).unwrap_or_else(|| {
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                });
                 let (description, version) = match fm {
                     Some(f) => (f.description, f.version),
                     None => (String::new(), None),
                 };
-                idx.skills.push(SkillMeta { name, description, version, dir: path });
+                idx.skills.push(SkillMeta {
+                    name,
+                    description,
+                    version,
+                    dir: path,
+                });
             }
         }
         idx.skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -240,7 +249,10 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) -
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if std::fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            if std::fs::symlink_metadata(&p)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
                 continue;
             }
             if p.is_dir() {
@@ -264,7 +276,9 @@ mod tests {
         let d = root.join(dir_name);
         std::fs::create_dir_all(d.join("scripts")).unwrap();
         let fm = match fm_name {
-            Some(n) => format!("---\nname: {n}\ndescription: {desc}\nlicense: X\n---\n\n# Body\nDo things.\n"),
+            Some(n) => format!(
+                "---\nname: {n}\ndescription: {desc}\nlicense: X\n---\n\n# Body\nDo things.\n"
+            ),
             None => format!("---\ndescription: {desc}\n---\n\n# Body\n"),
         };
         std::fs::write(d.join("SKILL.md"), fm).unwrap();
@@ -274,9 +288,18 @@ mod tests {
     #[test]
     fn scan_search_and_read() {
         let tmp = tempfile::tempdir().unwrap();
-        mk_skill(tmp.path(), "council", Some("council-of-minds"),
-                 "Convene multiple model perspectives for hard decisions");
-        mk_skill(tmp.path(), "organizer", None, "Organize files by type and date");
+        mk_skill(
+            tmp.path(),
+            "council",
+            Some("council-of-minds"),
+            "Convene multiple model perspectives for hard decisions",
+        );
+        mk_skill(
+            tmp.path(),
+            "organizer",
+            None,
+            "Organize files by type and date",
+        );
         std::fs::create_dir(tmp.path().join("not-a-skill")).unwrap(); // no SKILL.md
 
         let idx = SkillIndex::scan(&[tmp.path().display().to_string()]);
@@ -293,7 +316,9 @@ mod tests {
         // Normalise separators: these are real filesystem paths, so on Windows
         // they come back as `scripts\run.sh`.
         assert!(
-            files.iter().any(|f| f.replace('\\', "/").ends_with("scripts/run.sh")),
+            files
+                .iter()
+                .any(|f| f.replace('\\', "/").ends_with("scripts/run.sh")),
             "expected the bundled script in the inventory: {files:?}"
         );
     }
@@ -343,10 +368,9 @@ mod tests {
     fn frontmatter_stops_at_the_first_real_delimiter() {
         // A body containing its own --- (horizontal rules are common in
         // markdown) must not confuse the scan or truncate the description.
-        let fm = parse_frontmatter(
-            "---\nname: a\ndescription: d\n---\n\n# Body\n\n---\n\nmore body\n",
-        )
-        .expect("frontmatter should parse");
+        let fm =
+            parse_frontmatter("---\nname: a\ndescription: d\n---\n\n# Body\n\n---\n\nmore body\n")
+                .expect("frontmatter should parse");
         assert_eq!(fm.name.as_deref(), Some("a"));
         assert_eq!(fm.description, "d");
     }
@@ -364,30 +388,31 @@ mod tests {
         let lib = tmp.path().join("library");
         let native = tmp.path().join("native");
         std::fs::create_dir_all(&native).unwrap();
-        mk_skill(&native, "stray-skill", Some("stray-skill"), "dropped by a model");
+        mk_skill(
+            &native,
+            "stray-skill",
+            Some("stray-skill"),
+            "dropped by a model",
+        );
         std::fs::write(native.join("notes.txt"), "not a skill").unwrap();
         std::fs::create_dir(native.join("empty-dir")).unwrap();
 
-        let (moved, errors) = absorb_into(
-            &lib.display().to_string(),
-            &[native.display().to_string()],
-        );
+        let (moved, errors) =
+            absorb_into(&lib.display().to_string(), &[native.display().to_string()]);
         assert_eq!(moved, vec!["stray-skill"]);
         assert!(errors.is_empty());
         assert!(lib.join("stray-skill/SKILL.md").is_file());
         assert!(!native.join("stray-skill").exists());
-        assert!(native.join("notes.txt").exists());     // junk untouched
+        assert!(native.join("notes.txt").exists()); // junk untouched
         assert!(native.join("empty-dir").exists());
 
         // collision: same name appears again in native → skipped + reported
         mk_skill(&native, "stray-skill", Some("stray-skill"), "second copy");
-        let (moved2, errors2) = absorb_into(
-            &lib.display().to_string(),
-            &[native.display().to_string()],
-        );
+        let (moved2, errors2) =
+            absorb_into(&lib.display().to_string(), &[native.display().to_string()]);
         assert!(moved2.is_empty());
         assert_eq!(errors2.len(), 1);
-        assert!(native.join("stray-skill").exists());   // left for the human
+        assert!(native.join("stray-skill").exists()); // left for the human
     }
 
     #[cfg(unix)]
@@ -395,16 +420,27 @@ mod tests {
     fn collect_files_skips_symlinks() {
         use std::os::unix::fs::symlink;
         let tmp = tempfile::tempdir().unwrap();
-        mk_skill(tmp.path(), "cyclical", Some("cyclical"), "tests symlink skip");
+        mk_skill(
+            tmp.path(),
+            "cyclical",
+            Some("cyclical"),
+            "tests symlink skip",
+        );
         // a real bundled file
         std::fs::write(tmp.path().join("cyclical").join("real.sh"), "#!/bin/bash\n").unwrap();
         // a symlink to a file (should be skipped)
-        symlink(tmp.path().join("cyclical").join("real.sh"),
-                tmp.path().join("cyclical").join("link.sh")).unwrap();
+        symlink(
+            tmp.path().join("cyclical").join("real.sh"),
+            tmp.path().join("cyclical").join("link.sh"),
+        )
+        .unwrap();
 
         let idx = SkillIndex::scan(&[tmp.path().display().to_string()]);
         let (_body, files) = read_skill(idx.get("cyclical").unwrap()).unwrap();
         assert!(files.iter().any(|f| f.ends_with("real.sh")));
-        assert!(!files.iter().any(|f| f.ends_with("link.sh")), "symlink leaked into inventory: {files:?}");
+        assert!(
+            !files.iter().any(|f| f.ends_with("link.sh")),
+            "symlink leaked into inventory: {files:?}"
+        );
     }
 }

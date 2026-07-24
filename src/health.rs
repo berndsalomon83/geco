@@ -38,14 +38,18 @@ fn fnv1a(data: &[u8]) -> u64 {
 /// Check if the content hash for `path` matches the last successful write.
 /// Does NOT update the hash — call `commit_hash` after the write succeeds.
 fn should_skip_write(path: &Path, hash: u64) -> bool {
-    let guard = LAST_CONTENT_HASHES.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = LAST_CONTENT_HASHES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let map = guard.as_ref();
     map.and_then(|m| m.get(path)) == Some(&hash)
 }
 
 /// Record the hash after a successful write to disk.
 fn commit_hash(path: &Path, hash: u64) {
-    let mut guard = LAST_CONTENT_HASHES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = LAST_CONTENT_HASHES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
     map.insert(path.to_path_buf(), hash);
 }

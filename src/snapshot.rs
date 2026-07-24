@@ -78,11 +78,11 @@ impl Snapshot {
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::write(&tmp, &raw)
-            .with_context(|| format!("cannot write {}", tmp.display()))?;
+        std::fs::write(&tmp, &raw).with_context(|| format!("cannot write {}", tmp.display()))?;
         if let Err(e) = std::fs::rename(&tmp, path) {
             let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("cannot rename {} -> {}", tmp.display(), path.display()));
+            return Err(e)
+                .with_context(|| format!("cannot rename {} -> {}", tmp.display(), path.display()));
         }
         Ok(())
     }
