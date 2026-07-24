@@ -1,6 +1,8 @@
 //! The proxy's own MCP surface: eight small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~3.4 KB no matter how many tools hide behind the gate.
+//! ~4.3 KB no matter how many tools hide behind the gate. That number is
+//! measured, not asserted by hand: see
+//! `param_tests::meta_tool_surface_stays_within_its_context_budget`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1299,6 +1301,99 @@ impl ServerHandler for Proxy {
 #[cfg(test)]
 mod param_tests {
     use super::*;
+    use crate::snapshot::{ServerSnapshot, ToolSnapshot};
+
+    /// A snapshot from (server, [tool]) pairs, for diff tests.
+    fn snap_of(servers: &[(&str, &[&str])]) -> Snapshot {
+        let mut s = Snapshot::default();
+        for (name, tools) in servers {
+            s.servers.insert(
+                (*name).into(),
+                ServerSnapshot {
+                    tools: tools
+                        .iter()
+                        .map(|t| ToolSnapshot {
+                            name: (*t).into(),
+                            description: "d".into(),
+                            input_schema: json!({"type": "object"}),
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            );
+        }
+        s
+    }
+
+    #[test]
+    fn compute_diff_reports_a_removed_server() {
+        // The added-server path has a regression test; this is its mirror.
+        // A full refresh must report the tools of a server that vanished,
+        // not silently drop them from the diff.
+        let old = snap_of(&[("a", &["t1"]), ("b", &["t2", "t3"])]);
+        let new = snap_of(&[("a", &["t1"])]);
+
+        let diff = compute_diff(&old, &new, &None);
+        let removed = diff["removed"].as_array().unwrap();
+        assert_eq!(removed.len(), 2, "both of b's tools should be removed: {diff}");
+        assert!(
+            removed.iter().all(|r| r["server"] == "b"),
+            "removals should be attributed to b: {diff}"
+        );
+        assert!(diff["added"].as_array().unwrap().is_empty(), "nothing added: {diff}");
+        assert_eq!(diff["unchanged"], 1, "a's tool is unchanged: {diff}");
+    }
+
+    #[test]
+    fn compute_diff_single_server_filter_reports_removal() {
+        // Same, through the `server`-filtered path.
+        let old = snap_of(&[("a", &["t1"]), ("b", &["t2"])]);
+        let new = snap_of(&[("a", &["t1"])]);
+        let diff = compute_diff(&old, &new, &Some("b".to_string()));
+        let removed = diff["removed"].as_array().unwrap();
+        assert_eq!(removed.len(), 1, "{diff}");
+        assert_eq!(removed[0]["server"], "b");
+        assert_eq!(removed[0]["tool"], "t2");
+    }
+
+    #[test]
+    fn compute_diff_flags_a_changed_schema() {
+        let old = snap_of(&[("a", &["t1"])]);
+        let mut new = snap_of(&[("a", &["t1"])]);
+        new.servers.get_mut("a").unwrap().tools[0].input_schema =
+            json!({"type": "object", "properties": {"x": {"type": "string"}}});
+        let diff = compute_diff(&old, &new, &None);
+        assert_eq!(diff["changed"].as_array().unwrap().len(), 1, "{diff}");
+        assert_eq!(diff["unchanged"], 0, "{diff}");
+    }
+
+    /// The whole product claim: the agent's context carries a small, FIXED
+    /// meta-tool surface no matter how many backend tools hide behind it.
+    /// Nothing asserted that, so a verbose description could quietly inflate
+    /// every session's cost. The ceiling is deliberately loose — this guards
+    /// against ballooning, not against ordinary wording edits.
+    #[test]
+    fn meta_tool_surface_stays_within_its_context_budget() {
+        let tools = Proxy::tool_router().list_all();
+        assert_eq!(tools.len(), 8, "expected 8 meta-tools, got {}", tools.len());
+
+        let wire = serde_json::to_string(&tools).expect("tools must serialize");
+        let bytes = wire.len();
+        // Visible with `cargo test -- --nocapture` when you want the number.
+        eprintln!("meta-tool surface: {} tools, {bytes} bytes on the wire", tools.len());
+        // Measured at 4305 bytes; the budget leaves ~40% headroom.
+        assert!(
+            bytes <= 6000,
+            "meta-tool surface grew to {bytes} bytes (budget 6000). This is the \
+             always-on context cost of every session — trim a description or \
+             raise the budget deliberately."
+        );
+        assert!(
+            bytes > 1000,
+            "surface is suspiciously small ({bytes} bytes) — are the tool \
+             descriptions still attached?"
+        );
+    }
 
     #[test]
     fn limit_accepts_number_and_string() {

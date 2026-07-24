@@ -24,6 +24,7 @@ use geco::snapshot::Snapshot;
 /// failure instead of a skip. A run that quietly covered nothing is worse
 /// than a red one, because it looks like coverage.
 fn python_bin() -> Option<String> {
+    isolate_health();
     for bin in ["python3", "python"] {
         // Check the exit status, not just that spawning worked: Windows'
         // App Execution Alias stub for `python` runs fine and exits 9009.
@@ -47,6 +48,18 @@ fn python_bin() -> Option<String> {
 
 fn stub_path() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py")
+}
+
+/// Redirect health writes into a temp file. `Proxy::publish_health()` writes
+/// unconditionally, so without this the suite overwrites the developer's real
+/// health.json — clobbering the state a running geco is reporting through.
+fn isolate_health() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("geco-test-health-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("GECO_HEALTH", dir.join("health.json"));
+    });
 }
 
 /// Build a Config from an `mcpServers` map.
@@ -1156,6 +1169,212 @@ async fn partial_refresh_leaves_other_backends_running() {
             "partial refresh must not shut down unrelated backends, got: {status:?}");
 
     proxy.shutdown_backends().await;
+}
+
+#[tokio::test]
+async fn execute_batches_across_backends() {
+    // `execute`'s description promises cross-backend calls run in parallel,
+    // but every batch test so far used a single backend. This covers the
+    // claim: two servers, one batch, results in INPUT order regardless of
+    // which finishes first.
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub":  { "command": py, "args": [stub_path()], "description": "stub" },
+        "stub2": { "command": py, "args": [stub_path()], "description": "second stub" },
+    }));
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    let result = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![
+                ExecuteCall {
+                    server: "stub2".into(),
+                    tool: "echo".into(),
+                    arguments: Some(serde_json::json!({"text": "from stub2"}).as_object().unwrap().clone()),
+                },
+                ExecuteCall {
+                    server: "stub".into(),
+                    tool: "add".into(),
+                    arguments: Some(serde_json::json!({"a": 20, "b": 22}).as_object().unwrap().clone()),
+                },
+            ],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result));
+    let json = extract_json(&result);
+    let results = json.as_array().unwrap();
+    assert_eq!(results.len(), 2, "{json}");
+    // Input order, not completion order.
+    assert_eq!(results[0]["server"], "stub2", "results must keep input order: {json}");
+    assert_eq!(results[1]["server"], "stub", "results must keep input order: {json}");
+    assert!(results.iter().all(|r| r["ok"] == true), "both should succeed: {json}");
+    assert!(results[0]["result"].as_str().unwrap_or("").contains("from stub2"), "{json}");
+    assert!(results[1]["result"].as_str().unwrap_or("").contains("42"), "{json}");
+
+    // Both backends should now be warm — proof they really both ran.
+    assert!(matches!(registry.get("stub").unwrap().status().await, geco::backend::Status::Up { .. }));
+    assert!(matches!(registry.get("stub2").unwrap().status().await, geco::backend::Status::Up { .. }));
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn allowlist_filters_snapshot_and_execution() {
+    // Only `deny` was covered end to end. An allowlist is the stricter,
+    // more security-relevant direction: everything not named is invisible
+    // AND unrunnable, even if the agent guesses the name.
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "description": "stub", "allow": ["add"],
+        }
+    }));
+    let (proxy, registry, snapshot) = make_proxy(&cfg).await;
+
+    // Snapshot: only the allowed tool survives.
+    let names: Vec<_> = snapshot.servers["stub"].tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, vec!["add"], "allowlist should leave only `add`");
+
+    // list_tools agrees.
+    let result = proxy
+        .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: None }))
+        .await
+        .unwrap();
+    let json = extract_json(&result);
+    let listed: Vec<_> = json["tools"].as_array().unwrap().iter()
+        .map(|t| t["tool"].as_str().unwrap()).collect();
+    assert_eq!(listed, vec!["add"], "{json}");
+
+    // And a guessed, non-allowlisted tool is refused at execution time.
+    let result = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "echo".into(),
+                arguments: Some(serde_json::json!({"text": "hi"}).as_object().unwrap().clone()),
+            }],
+        }))
+        .await
+        .unwrap();
+    let json = extract_json(&result);
+    assert_eq!(json[0]["ok"], false, "non-allowlisted tool must not run: {json}");
+    assert_eq!(json[0]["error"]["code"], "not_allowed", "{json}");
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn backend_death_mid_call_is_detected_and_recovers() {
+    // check_health_detects_dead_backend only covers an orderly shutdown().
+    // This is the real failure mode: the child dies mid-call without
+    // replying, and the cached connection must be reset rather than reused.
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "env": { "STUB_EXTRA_TOOLS": "1" },
+        }
+    }));
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+
+    // Warm it up.
+    let args = serde_json::json!({"a": 1, "b": 1}).as_object().unwrap().clone();
+    backend.call("add", Some(args), &registry.proxy).await.unwrap();
+    assert!(matches!(backend.status().await, geco::backend::Status::Up { .. }));
+
+    // Kill it mid-call. Bounded by our own timeout so a hang fails fast
+    // rather than sitting on geco's 120s call_timeout.
+    let crashed = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        backend.call("crash", None, &registry.proxy),
+    )
+    .await
+    .expect("crash call should return promptly, not hang until call_timeout");
+    let err_msg = match crashed {
+        Err(e) => format!("{e:#}"),
+        Ok(r) => panic!("a backend that exits mid-call must surface an error, got {r:?}"),
+    };
+
+    // The dead connection must have been dropped, not left cached.
+    let status = backend.status().await;
+    assert!(
+        matches!(status, geco::backend::Status::Failed { .. }),
+        "a died-mid-call backend should be Failed, got {status:?}\n\
+         underlying transport error was: {err_msg}"
+    );
+
+    // ...and the next call must transparently reconnect.
+    let args = serde_json::json!({"a": 2, "b": 3}).as_object().unwrap().clone();
+    let res = backend
+        .call("add", Some(args), &registry.proxy)
+        .await
+        .expect("next call should reconnect to a fresh child");
+    assert!(format!("{:?}", res.content).contains("5"), "expected 5 after reconnect");
+    assert!(matches!(backend.status().await, geco::backend::Status::Up { .. }));
+
+    registry.shutdown_all().await;
+}
+
+/// Settles the question the code review left open: does dropping the
+/// connection actually reap the child process, or does every backend leak
+/// one? Unix-only — it needs `ps` to check liveness. The Windows answer
+/// still rests on rmcp's kill-on-drop behaviour and is unverified here.
+#[cfg(unix)]
+#[tokio::test]
+async fn backend_child_is_reaped_on_shutdown() {
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "env": { "STUB_EXTRA_TOOLS": "1" },
+        }
+    }));
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+
+    // Ask the child for its own PID.
+    let res = backend.call("pid", None, &registry.proxy).await.unwrap();
+    let text = res.content.iter().find_map(|b| {
+        if let ContentBlock::Text(t) = b { Some(t.text.clone()) } else { None }
+    }).expect("pid tool should return text");
+    let pid: u32 = text.trim().parse().unwrap_or_else(|e| panic!("bad pid {text:?}: {e}"));
+
+    // `ps -o stat=` prints nothing once the process is gone; a leading Z
+    // means it exited but hasn't been reaped, which counts as dead here.
+    let is_alive = |pid: u32| -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output();
+        match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                !s.is_empty() && !s.starts_with('Z')
+            }
+            Err(_) => false,
+        }
+    };
+    assert!(is_alive(pid), "child {pid} should be running while warm");
+
+    registry.shutdown_all().await;
+
+    // Reaping is asynchronous — give it a moment before declaring a leak.
+    let mut alive = true;
+    for _ in 0..50 {
+        if !is_alive(pid) {
+            alive = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        !alive,
+        "backend child {pid} still running 5s after shutdown_all() — \
+         dropping the connection does NOT reap the child, so every backend \
+         leaks a process on reload and on exit"
+    );
 }
 
 #[tokio::test]

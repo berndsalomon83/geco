@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::service::{RoleClient, RunningService, ServiceError};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use rmcp::ServiceExt;
 use tokio::process::Command;
@@ -163,27 +163,23 @@ impl Backend {
                 // exited, transport closed), reset so the next call reconnects
                 // fresh instead of reusing a dead conn for up to 30s.
                 //
-                // `is_closed()` is authoritative and checked first. The string
-                // fallback catches the window where the transport has broken
-                // but the service task hasn't observed it yet — it is kept
-                // deliberately narrow, matching phrases the transport emits
-                // rather than ones a backend might author about its own remote
-                // connections. "connection reset" used to be on this list and
-                // was removed: an HTTP/browser backend reporting "connection
-                // reset by peer" about *its* upstream would get its perfectly
-                // healthy child process torn down.
+                // Decided from the error TYPE, never its text. This used to
+                // substring-match "stream closed"/"broken pipe"/"connection
+                // reset", which was wrong in both directions: rmcp actually
+                // reports a dead child as "Transport closed" — matching none
+                // of those, so a crashed backend stayed cached as Up until the
+                // 30s health check noticed — while a healthy HTTP/browser
+                // backend reporting "connection reset by peer" about ITS
+                // upstream would get its child torn down for nothing.
+                //
+                // TransportClosed/TransportSend mean our pipe to the child is
+                // gone. McpError means the child answered, with an error — it
+                // is alive, and its message is its own text to write.
+                let is_dead = matches!(
+                    e,
+                    ServiceError::TransportClosed | ServiceError::TransportSend(_)
+                ) || conn.is_closed();
                 let msg = format!("{e:#}");
-                let closed = conn.is_closed();
-                let is_dead = closed
-                    || msg.contains("stream closed")
-                    || msg.contains("channel closed")
-                    || msg.contains("broken pipe");
-                if is_dead && !closed {
-                    tracing::debug!(
-                        "backend '{}': treating as dead from error text, not is_closed(): {msg}",
-                        self.name
-                    );
-                }
                 if is_dead {
                     *self.conn.lock().await = None;
                     *self.status.lock().await = Status::Failed {

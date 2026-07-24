@@ -64,7 +64,7 @@ The entries are the same shape — copy, paste, add a `description` (that's what
 geco refresh     # snapshot the moved servers once
 ```
 
-Restart the agent. Context cost for those servers drops to ~3.4 KB flat.
+Restart the agent. Context cost for those servers drops to ~4.3 KB flat.
 
 **Rule of thumb:** keep proactive-use servers (memory, core workflow) direct; gate everything you use occasionally.
 

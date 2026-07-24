@@ -91,7 +91,18 @@ pub struct HealthReport {
     pub metrics: Option<Metrics>,
 }
 
+/// Where the health file lives. `GECO_HEALTH` overrides the default —
+/// the companion opencode plugin already honours that variable when
+/// locating the file, so geco not honouring it meant pointing the plugin
+/// somewhere else silently broke the pairing. It also lets the test suite
+/// redirect writes into a temp dir instead of scribbling on the developer's
+/// real health.json.
 pub fn health_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("GECO_HEALTH") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
     let dir = directories::ProjectDirs::from("dev", "geco", "geco")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".geco"));
