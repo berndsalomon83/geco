@@ -157,6 +157,21 @@ const SYNONYM_GROUPS: &[&[&str]] = &[
     &["rename", "move"],
     &["edit", "modify", "change", "update"],
     &["timezone", "time"],
+    // Mined from ~150 real MCP servers (5000+ tools), 2026-07, then A/B-tested
+    // against real-tool search (tests/real_search_probe.rs). Six candidates
+    // were tried; these two are the only ones that MOVED THE RIGHT TOOL from
+    // off-the-list to rank 1 on a reverse-vocabulary query:
+    //   "verify a workflow" : without -> playwright browser_verify_* (UI
+    //                         asserts, wrong intent); with -> n8n_validate_workflow #1
+    //   "compile the project": without -> dbt compile_sql (SQL, wrong intent);
+    //                         with -> build_project #1
+    // The four rejected — mail/email, scrape/crawl, copy/duplicate/clone,
+    // execute/run — were neutral-to-noise: the literal word already matched the
+    // right tool, and the synonym only pulled in near-misses (e.g. scrape/crawl
+    // surfaced crawler-ANALYTICS tools for "scrape a web page"). Same lesson as
+    // the whole table: measure on real data, keep only what earns rank 1.
+    &["validate", "verify"],
+    &["build", "compile"],
 ];
 
 /// A synonym match counts for less than the word the user actually typed.
