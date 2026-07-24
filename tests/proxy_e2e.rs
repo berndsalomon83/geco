@@ -8,8 +8,7 @@ use std::sync::Arc;
 use geco::backend::Registry;
 use geco::config::Config;
 use geco::server::{
-    ExecuteCall, ExecuteParams, ListToolsParams, Proxy, ReadSkillParams, RefreshParams,
-    SearchParams,
+    ExecuteCall, ExecuteParams, ListToolsParams, Proxy, ReadSkillParams, SearchParams,
 };
 use geco::snapshot::Snapshot;
 use rmcp::handler::server::wrapper::Parameters;
@@ -203,58 +202,6 @@ async fn snapshot_execute_and_denylist() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("DENY:"));
-
-    registry.shutdown_all().await;
-}
-
-#[tokio::test]
-async fn refresh_tools_does_not_deadlock() {
-    // Regression test for the P0 deadlock: refresh_tools held the snapshot
-    // write lock across publish_health, which tries to read the same lock.
-    // If this test returns within a reasonable time, the deadlock is gone.
-    let Some(cfg) = stub_config() else { return };
-    let (proxy, registry, _snap) = make_proxy(&cfg).await;
-
-    // refresh_tools with no server arg (full refresh)
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        proxy.refresh_tools(Parameters(RefreshParams { server: None })),
-    )
-    .await;
-    assert!(result.is_ok(), "refresh_tools timed out (deadlock?)");
-    let result = result.unwrap().unwrap();
-    let text = format!("{result:?}");
-    assert!(text.contains("stub"), "expected stub in result: {text}");
-
-    // refresh_tools with a specific server (single-server path)
-    let result2 = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        proxy.refresh_tools(Parameters(RefreshParams {
-            server: Some("stub".into()),
-        })),
-    )
-    .await;
-    assert!(
-        result2.is_ok(),
-        "single-server refresh_tools timed out (deadlock?)"
-    );
-
-    // refresh_tools with an unknown server should error, not hang
-    let result3 = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        proxy.refresh_tools(Parameters(RefreshParams {
-            server: Some("nonexistent".into()),
-        })),
-    )
-    .await;
-    assert!(result3.is_ok(), "unknown-server refresh_tools timed out");
-    let result3 = result3.unwrap().unwrap();
-    assert!(is_error(&result3), "unknown server should error");
-    let json = extract_json(&result3);
-    assert_eq!(
-        json["error"]["code"], "unknown_server",
-        "expected unknown_server code: {json}"
-    );
 
     registry.shutdown_all().await;
 }
@@ -1358,196 +1305,6 @@ async fn execute_records_metrics() {
 }
 
 #[tokio::test]
-async fn refresh_tools_returns_diff() {
-    // Verify refresh_tools returns a diff: after the first refresh, all
-    // tools are "unchanged". After a second refresh with no changes, the
-    // diff should show 0 added, 0 removed, 0 changed.
-    let Some(cfg) = stub_config() else { return };
-    let (proxy, registry, _snap) = make_proxy(&cfg).await;
-
-    // First full refresh — everything is either added or unchanged
-    // (depends on whether the snapshot already had the tools).
-    let result = proxy
-        .refresh_tools(Parameters(RefreshParams { server: None }))
-        .await
-        .unwrap();
-    assert!(!is_error(&result));
-    let json = extract_json(&result);
-    assert!(
-        json["diff"].is_object(),
-        "expected diff in response: {json}"
-    );
-    // The stub has 2 tools (add, echo). On the first refresh after snapshot
-    // build, they should be unchanged (same snapshot data).
-    let diff = &json["diff"];
-    assert!(
-        diff["unchanged"].as_u64().unwrap_or(0) >= 2,
-        "expected at least 2 unchanged tools: {diff}"
-    );
-
-    // Second refresh — nothing changed.
-    let result = proxy
-        .refresh_tools(Parameters(RefreshParams { server: None }))
-        .await
-        .unwrap();
-    let json = extract_json(&result);
-    let diff = &json["diff"];
-    assert_eq!(
-        diff["added"].as_array().unwrap().len(),
-        0,
-        "expected 0 added: {diff}"
-    );
-    assert_eq!(
-        diff["removed"].as_array().unwrap().len(),
-        0,
-        "expected 0 removed: {diff}"
-    );
-    assert_eq!(
-        diff["changed"].as_array().unwrap().len(),
-        0,
-        "expected 0 changed: {diff}"
-    );
-    assert!(
-        diff["unchanged"].as_u64().unwrap_or(0) >= 2,
-        "expected at least 2 unchanged: {diff}"
-    );
-
-    registry.shutdown_all().await;
-}
-
-#[tokio::test]
-async fn refresh_tools_diff_shows_added_server() {
-    // Regression: compute_diff missed newly added servers in a full refresh
-    // because the iterator only covered servers in both old and new.
-    let Some(py) = python_bin() else { return };
-    let dir = tempfile::tempdir().unwrap();
-    let snap_path = dir.path().join("snapshot.json");
-    let cfg_path = dir.path().join("config.yaml");
-    std::mem::forget(dir);
-
-    // Config with two servers, but initial snapshot only has one.
-    // (Simulates: user added a server to config, then calls refresh_tools
-    // manually without hot-reload having fired yet.)
-    let cfg = config_from(serde_json::json!({
-        "stub": {
-            "command": py, "args": [stub_path()],
-            "description": "stub", "deny": ["secret_*"],
-        },
-        "stub2": {
-            "command": py, "args": [stub_path()],
-            "description": "second stub",
-        },
-    }));
-    let registry = Arc::new(Registry::from_config(&cfg));
-
-    // Build a snapshot with only "stub" (not stub2).
-    let snapshot = registry
-        .build_snapshot(cfg.snapshot_hash(), Some("stub"))
-        .await;
-    // build_snapshot with a filter only builds that one server.
-    let proxy = Proxy::new(
-        (*registry).clone(),
-        snapshot,
-        snap_path,
-        cfg_path,
-        vec![],
-        vec![],
-    );
-
-    // Now refresh_tools (full) — should build both servers and diff
-    // against the old snapshot (which only had stub).
-    let result = proxy
-        .refresh_tools(Parameters(RefreshParams { server: None }))
-        .await
-        .unwrap();
-    let json = extract_json(&result);
-    let diff = &json["diff"];
-    let added = diff["added"].as_array().unwrap();
-    assert!(
-        !added.is_empty(),
-        "expected added tools from new server: {diff}"
-    );
-    assert!(
-        added.iter().any(|a| a["server"] == "stub2"),
-        "expected stub2 tools in added: {added:?}"
-    );
-
-    proxy.shutdown_backends().await;
-}
-
-#[tokio::test]
-async fn partial_refresh_leaves_other_backends_running() {
-    // Regression: refresh_tools shut down every registry backend that was
-    // missing from the post-refresh snapshot. A single-server refresh leaves
-    // every OTHER server out of the fresh build, so whenever the snapshot was
-    // partial (empty cache with refresh_on_start=false, or a filtered build),
-    // refreshing one backend killed all the others.
-    let Some(py) = python_bin() else { return };
-    let dir = tempfile::tempdir().unwrap();
-    let snap_path = dir.path().join("snapshot.json");
-    let cfg_path = dir.path().join("config.yaml");
-    std::mem::forget(dir);
-
-    let cfg = config_from(serde_json::json!({
-        "stub": {
-            "command": py, "args": [stub_path()],
-            "description": "stub",
-        },
-        "stub2": {
-            "command": py, "args": [stub_path()],
-            "description": "second stub",
-        },
-    }));
-    let registry = Arc::new(Registry::from_config(&cfg));
-
-    // Snapshot deliberately covers only "stub" — "stub2" is configured and
-    // live, but absent from the snapshot.
-    let snapshot = registry
-        .build_snapshot(cfg.snapshot_hash(), Some("stub"))
-        .await;
-    let proxy = Proxy::new(
-        (*registry).clone(),
-        snapshot,
-        snap_path,
-        cfg_path,
-        vec![],
-        vec![],
-    );
-
-    // Warm up stub2 so it has a real child process to lose.
-    let stub2 = registry.get("stub2").unwrap();
-    let args = serde_json::json!({"a": 1, "b": 1})
-        .as_object()
-        .unwrap()
-        .clone();
-    stub2
-        .call("add", Some(args), &registry.proxy)
-        .await
-        .unwrap();
-    assert!(
-        matches!(stub2.status().await, geco::backend::Status::Up { .. }),
-        "stub2 should be warm before the refresh"
-    );
-
-    // Refresh only "stub".
-    let result = proxy
-        .refresh_tools(Parameters(RefreshParams {
-            server: Some("stub".into()),
-        }))
-        .await
-        .unwrap();
-    assert!(!is_error(&result), "single-server refresh should succeed");
-
-    let status = stub2.status().await;
-    assert!(
-        matches!(status, geco::backend::Status::Up { .. }),
-        "partial refresh must not shut down unrelated backends, got: {status:?}"
-    );
-
-    proxy.shutdown_backends().await;
-}
-
-#[tokio::test]
 async fn execute_batches_across_backends() {
     // `execute`'s description promises cross-backend calls run in parallel,
     // but every batch test so far used a single backend. This covers the
@@ -1989,7 +1746,7 @@ async fn env_passthrough_globs_and_inherit_escape_hatch() {
 async fn tools_list_changed_refreshes_the_snapshot_unprompted() {
     // The drift this closes: a backend that gains or loses tools at runtime
     // stayed wrong in the snapshot until someone happened to run
-    // refresh_tools, with nothing reporting that anything had changed.
+    // a manual refresh, with nothing reporting that anything had changed.
     let Some(py) = python_bin() else { return };
     let cfg = config_from(serde_json::json!({
         "stub": {
@@ -2025,7 +1782,7 @@ async fn tools_list_changed_refreshes_the_snapshot_unprompted() {
     );
 
     // Ask the backend to grow its toolset. It replies, then sends
-    // notifications/tools/list_changed — nothing here calls refresh_tools.
+    // notifications/tools/list_changed — no manual refresh anywhere.
     let result = proxy
         .execute(Parameters(ExecuteParams {
             calls: vec![ExecuteCall {

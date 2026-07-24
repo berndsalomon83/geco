@@ -50,6 +50,19 @@ enum Cmd {
     Validate,
 }
 
+/// `touch`, without the content round-trip: sets the modified time to now and
+/// leaves every byte alone.
+///
+/// A running proxy watches its config file and gates on mtime, so this is how
+/// a CLI process asks a live instance to rebuild. Using `File::set_times`
+/// rather than rewriting the file means a crash mid-call cannot damage
+/// someone's config — there is nothing to half-write.
+fn bump_mtime(path: &std::path::Path) -> std::io::Result<()> {
+    // Write access is what Windows requires to set timestamps.
+    let f = std::fs::OpenOptions::new().write(true).open(path)?;
+    f.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))
+}
+
 fn find_config(cli: &Cli) -> Result<PathBuf> {
     if let Some(p) = &cli.config {
         return Ok(p.clone());
@@ -278,6 +291,24 @@ async fn main() -> Result<()> {
                 eprintln!("{name:24} {:4} tools  {}", s.tools.len(), s.refresh_status);
             }
             eprintln!("snapshot: {}", snapshot_path.display());
+
+            // Rewriting the snapshot file is not enough on its own: a running
+            // proxy holds its snapshot in memory and only ever WRITES this
+            // file, so it would keep serving the old catalogue and overwrite
+            // what we just saved. Since the config watcher gates on mtime, a
+            // touch is all it takes to make a live instance rebuild — which
+            // is what someone running `geco refresh` actually wants.
+            //
+            // Content is untouched; only the timestamp moves. If no proxy is
+            // running this is a no-op.
+            match bump_mtime(&config_path) {
+                Ok(()) => eprintln!("nudged any running proxy to reload"),
+                Err(e) => eprintln!(
+                    "note: could not touch {} ({e}) — a running proxy keeps its \
+                     old catalogue until restarted",
+                    config_path.display()
+                ),
+            }
         }
         Cmd::Validate => {
             let findings = cfg.validate();
@@ -332,11 +363,11 @@ async fn main() -> Result<()> {
                 if stale && cached.is_some() {
                     tracing::warn!(
                         "serving a STALE snapshot — the config changed since it was built; \
-                         run `geco refresh` or call refresh_tools"
+                         run `geco refresh`"
                     );
                 }
                 cached.unwrap_or_else(|| {
-                    tracing::warn!("serving with EMPTY snapshot — run refresh_tools");
+                    tracing::warn!("serving with EMPTY snapshot — run `geco refresh`");
                     Snapshot {
                         config_hash: hash.clone(),
                         ..Default::default()
@@ -344,7 +375,7 @@ async fn main() -> Result<()> {
                 })
             };
             tracing::info!(
-                "geco up: {} servers, {} tools behind 7 meta-tools",
+                "geco up: {} servers, {} tools behind 6 meta-tools",
                 snapshot.servers.len(),
                 snapshot.tool_count()
             );

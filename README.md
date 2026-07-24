@@ -11,29 +11,28 @@
 The more MCP tools you expose to your LLM, the more the context gets prefilled with ballast that most likely is not even used, reducing the space you have to work with.
 The same is true for skills. Skills are great recipes to have but they also land as descriptive text in the context of your LLM — and again, more skills means less remaining context for the actual task.
 
-So here comes this rusty reptile geco to tackle it. It sits between your IDE and the skills and MCP tools that you have, and gives your LLM the same 7 tools always, no matter how much you have in your tool shed.
+So here comes this rusty reptile geco to tackle it. It sits between your IDE and the skills and MCP tools that you have, and gives your LLM the same 6 tools always, no matter how much you have in your tool shed.
 
-**geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees seven small meta-tools instead of every schema on every request.
+**geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees six small meta-tools instead of every schema on every request.
 
-The cost is fixed: **~4.7 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
+The cost is fixed: **~4.3 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
 
 Built with Rust as single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
 
 ## How it works
 
-The agent sees exactly seven meta-tools:
+The agent sees exactly six meta-tools:
 
 | Meta-tool | Purpose |
 |---|---|
 | `list_mcp_servers` | Name, description, tool count, running state of each backend — plus `issues` when the gateway has a problem |
 | `list_tools` | A server's tools (name + description); with `tool`: the full input schema |
-| `refresh_tools` | Re-scan backends after installing/reconfiguring one |
 | `list_skills` | Every skill in the library (name + one-line description) |
 | `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
 | `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
 | `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
 
-Seven, and that is the whole always-on surface — 4.1 KB of schema plus a short instruction, whatever hides behind it. Gateway health is deliberately **not** among them: see [reporting problems](#reporting-problems).
+Six, and that is the whole always-on surface — 3.6 KB of schema plus a short instruction, whatever hides behind it. Two things are deliberately *not* here: gateway health and manual refresh. Both are operator actions, and both live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
 
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
@@ -109,7 +108,7 @@ Move the MCP servers you want behind the proxy into `~/.config/geco/config.yaml`
 }
 ```
 
-Remove the individual server entries you moved behind geco — restart the agent and it sees only the 7 meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
+Remove the individual server entries you moved behind geco — restart the agent and it sees only the 6 meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
 
 ## Quick start
 
@@ -238,7 +237,7 @@ than behind geco.
 Tool lists stay current on their own: geco listens for
 `notifications/tools/list_changed` and re-scans that one backend when it
 fires, so a server that adds or removes tools at runtime is picked up without
-a `refresh_tools` call. Servers that don't send the notification are still
+a manual refresh. Servers that don't send the notification are still
 snapshot-based — refresh them manually or let a config change do it.
 
 ### Backend environment isolation
@@ -282,8 +281,9 @@ A missing keychain item fails the spawn loudly — plain `${VAR}` env references
 
 ```bash
 geco serve [--refresh|--no-refresh]   # run the proxy (default command)
-geco refresh                          # rebuild the snapshot and exit
+geco refresh                          # rebuild the snapshot; nudges a running proxy to reload
 geco inspect                          # show the cached snapshot
+geco health                           # what's broken right now (exit 1 on errors)
 geco stats                            # show runtime metrics (calls, errors, latency)
 geco validate                         # check config for common mistakes
 geco schema                           # print the config JSON Schema (YAML + JSON)
@@ -293,7 +293,11 @@ geco schema                           # print the config JSON Schema (YAML + JSO
 
 ## Hot reload
 
-The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. No restart, no manual `refresh_tools` call. Removed backends are shut down; new ones are snapshotted and available immediately.
+The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. No restart, no manual step. Removed backends are shut down; new ones are snapshotted and available immediately.
+
+The watcher triggers on **mtime**, not content, which is what makes `geco refresh` work against a live proxy: it rewrites the snapshot file *and* touches the config, so a running instance rebuilds instead of quietly serving its in-memory copy. (Content is untouched — only the timestamp moves.)
+
+That covers the one case nothing else does: a backend **upgraded in place**, where the config never changed and the server sends no `tools/list_changed`, so no automatic path notices. There is deliberately no `refresh_tools` meta-tool for the agent — installing software is something you do, and the agent shouldn't carry 480 bytes of schema in every session for it.
 
 ## Self-healing backends
 
@@ -326,7 +330,7 @@ The item doesn't exist under that exact service name, or the OS keychain is lock
 Check `geco inspect` first — if the tool isn't in the snapshot, it's a refresh or an `allow`/`deny` problem, not a search problem. If it *is* there, the search wording is the issue: `geco stats` lists recent queries that matched nothing. Search is lexical with a small synonym table ([how search ranks](#how-search-ranks)) — a query sharing no vocabulary and no synonym with the tool's name or description won't find it. Improve the server's `description`, which is what the model actually reads.
 
 **Tools changed on a backend but geco still shows the old set.**
-geco follows `notifications/tools/list_changed`, but not every server sends it. Force it with the `refresh_tools` meta-tool or `geco refresh`.
+geco follows `notifications/tools/list_changed`, but not every server sends it, and a backend upgraded in place (config unchanged) has nothing to notify about. Force a rebuild with `geco refresh` — it rewrites the snapshot AND bumps the config mtime, which is what makes a *running* proxy reload rather than keep serving its in-memory copy.
 
 **macOS: "cannot be opened because the developer cannot be verified".**
 The released binaries are unsigned. `xattr -d com.apple.quarantine "$(command -v geco)"`.

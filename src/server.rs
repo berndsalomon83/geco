@@ -1,6 +1,6 @@
 //! The proxy's own MCP surface: eight small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~4.7 KB no matter how many tools hide behind the gate. That number is
+//! ~4.3 KB no matter how many tools hide behind the gate. That number is
 //! measured, not asserted by hand: see
 //! `param_tests::meta_tool_surface_stays_within_its_context_budget`.
 
@@ -146,14 +146,6 @@ pub struct ReadSkillParams {
     pub name: String,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RefreshParams {
-    /// Optional: refresh only this server
-    #[serde(default)]
-    #[schemars(with = "String")]
-    pub server: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct Proxy {
     registry: Arc<RwLock<Registry>>,
@@ -291,119 +283,6 @@ fn sync_watches(
     watched.retain(|d| desired.contains(d));
 }
 
-/// Compute the diff between the old and new snapshots for the refresh_tools
-/// response. If `server_filter` is set, only that server is diffed.
-fn compute_diff(
-    old: &Snapshot,
-    new: &Snapshot,
-    server_filter: &Option<String>,
-) -> serde_json::Value {
-    let mut added = Vec::new();
-    let mut removed = Vec::new();
-    let mut changed = Vec::new();
-    let mut unchanged = 0u64;
-
-    let servers: Box<
-        dyn Iterator<
-            Item = (
-                &String,
-                &crate::snapshot::ServerSnapshot,
-                &crate::snapshot::ServerSnapshot,
-            ),
-        >,
-    > = if let Some(name) = server_filter {
-        match (old.servers.get(name), new.servers.get(name)) {
-            (Some(o), Some(n)) => Box::new(std::iter::once((name, o, n))),
-            (None, Some(n)) => {
-                // New server — all tools are "added".
-                for t in &n.tools {
-                    added.push(json!({"server": name, "tool": t.name}));
-                }
-                return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
-            }
-            (Some(o), None) => {
-                // Removed server — all tools are "removed".
-                for t in &o.tools {
-                    removed.push(json!({"server": name, "tool": t.name}));
-                }
-                return json!({"added": added, "removed": removed, "changed": changed, "unchanged": 0});
-            }
-            (None, None) => {
-                return json!({"added": [], "removed": [], "changed": [], "unchanged": 0})
-            }
-        }
-    } else {
-        Box::new(
-            new.servers
-                .iter()
-                .filter_map(|(name, n)| old.servers.get(name).map(|o| (name, o, n))),
-        )
-    };
-
-    for (name, old_entry, new_entry) in servers {
-        let old_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> = old_entry
-            .tools
-            .iter()
-            .map(|t| (t.name.as_str(), t))
-            .collect();
-        let new_tools: std::collections::HashMap<&str, &crate::snapshot::ToolSnapshot> = new_entry
-            .tools
-            .iter()
-            .map(|t| (t.name.as_str(), t))
-            .collect();
-
-        // Tools in new but not old = added.
-        for tname in new_tools.keys() {
-            if !old_tools.contains_key(tname) {
-                added.push(json!({"server": name, "tool": tname}));
-            }
-        }
-        // Tools in old but not new = removed.
-        for tname in old_tools.keys() {
-            if !new_tools.contains_key(tname) {
-                removed.push(json!({"server": name, "tool": tname}));
-            }
-        }
-        // Tools in both = check for changes.
-        for (tname, old_t) in &old_tools {
-            if let Some(new_t) = new_tools.get(tname) {
-                if old_t.description != new_t.description
-                    || old_t.input_schema != new_t.input_schema
-                {
-                    changed.push(json!({"server": name, "tool": tname}));
-                } else {
-                    unchanged += 1;
-                }
-            }
-        }
-    }
-
-    // For a full refresh, also check for removed and added servers.
-    if server_filter.is_none() {
-        for (name, old_entry) in &old.servers {
-            if !new.servers.contains_key(name) {
-                for t in &old_entry.tools {
-                    removed.push(json!({"server": name, "tool": t.name}));
-                }
-            }
-        }
-        for (name, new_entry) in &new.servers {
-            if !old.servers.contains_key(name) {
-                for t in &new_entry.tools {
-                    added.push(json!({"server": name, "tool": t.name}));
-                }
-            }
-        }
-    }
-
-    json!({
-        "added": added,
-        "removed": removed,
-        "changed": changed,
-        "unchanged": unchanged,
-    })
-}
-
 #[tool_router]
 impl Proxy {
     pub fn new(
@@ -468,7 +347,7 @@ impl Proxy {
     /// Watch for backends reporting `tools/list_changed` and re-scan just that
     /// server. Without this the snapshot silently drifts: a backend that adds
     /// or removes a tool at runtime stays wrong until someone runs
-    /// `refresh_tools`, and nothing anywhere reports that it happened.
+    /// a manual refresh, and nothing anywhere reports that it happened.
     pub fn spawn_tool_change_listener(self) {
         let Some(mut rx) = self
             .tool_change_rx
@@ -502,7 +381,7 @@ impl Proxy {
     }
 
     /// Re-scan one backend's tools and merge the result into the snapshot.
-    /// Used by the tool-change listener; `refresh_tools` has its own path
+    /// Used by the tool-change listener; config hot-reload has its own path
     /// because it also reports a diff.
     async fn refresh_server(&self, name: &str) {
         let hash = { self.snapshot.read().await.config_hash.clone() };
@@ -697,7 +576,7 @@ impl Proxy {
     /// directories for changes. When a SKILL.md is added, edited, or removed
     /// (or a new skill is dropped into an absorb dir), re-runs absorb + scan
     /// so the gateway picks it up without a config touch or a manual
-    /// `refresh_tools`. Watches recursively; editor temp-file + rename bursts
+    /// a restart. Watches recursively; editor temp-file + rename bursts
     /// are drained (debounced) before the rescan.
     ///
     /// Re-evaluates watch roots after each event cycle so that new dirs added
@@ -983,7 +862,7 @@ impl Proxy {
     }
 
     /// Run absorb + skill scan and return (SkillIndex, issues).
-    /// Used by new(), reload_from_config(), and refresh_tools() to avoid
+    /// Used by new() and reload_from_config() to avoid
     /// duplicating the absorb-then-scan-then-collect-errors pattern.
     fn absorb_and_scan(skill_dirs: &[String], absorb_dirs: &[String]) -> (SkillIndex, Vec<Issue>) {
         let mut issues = Self::absorb(skill_dirs, absorb_dirs);
@@ -1002,7 +881,7 @@ impl Proxy {
 
     /// Re-run absorb + scan and swap the results into `self.skills` /
     /// `self.absorb_issues`, then publish health. Used by reload_from_config,
-    /// refresh_tools, and spawn_skill_reload so the three callers never drift.
+    /// and spawn_skill_reload so the callers never drift.
     /// The absorb + scan is sync filesystem I/O, so it runs on a blocking
     /// thread to avoid stalling the async runtime.
     pub async fn rescan_skills(&self) {
@@ -1496,75 +1375,6 @@ impl Proxy {
             )),
         }
     }
-
-    #[tool(
-        description = "Re-scan backend servers for their current tools (all, or one via `server`). Returns a diff (added/removed/changed/unchanged) so you can see what's new without comparing against a previous call. Use after installing or reconfiguring a backend."
-    )]
-    pub async fn refresh_tools(
-        &self,
-        Parameters(p): Parameters<RefreshParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let hash = { self.snapshot.read().await.config_hash.clone() };
-        let fresh = {
-            let registry = self.registry.read().await.clone();
-            registry.build_snapshot(hash, p.server.as_deref()).await
-        };
-        let mut snap = self.snapshot.write().await;
-        let old_snap = snap.clone();
-        let fresh_for_diff = fresh.clone();
-        let fresh_generated_at = fresh.generated_at.clone();
-        match p.server {
-            Some(ref name) => {
-                if let Some(entry) = fresh.servers.get(name) {
-                    snap.servers.insert(name.clone(), entry.clone());
-                    snap.generated_at = fresh_generated_at.clone();
-                } else if snap.servers.contains_key(name) {
-                    snap.servers.remove(name);
-                    snap.generated_at = fresh_generated_at.clone();
-                    tracing::info!(
-                        "refresh_tools: '{}' removed from config, evicted from snapshot",
-                        name
-                    );
-                } else {
-                    return Ok(structured_err_ctx(
-                        "unknown_server",
-                        &format!("server '{}' not found", name),
-                        json!({ "server": name }),
-                    ));
-                }
-            }
-            None => {
-                snap.servers = fresh.servers;
-                snap.generated_at = fresh_generated_at;
-            }
-        }
-        let diff = compute_diff(&old_snap, &fresh_for_diff, &p.server);
-        let summary: Vec<_> = snap
-            .servers
-            .iter()
-            .map(|(n, s)| json!({"server": n, "tools": s.tools.len(), "status": s.refresh_status}))
-            .collect();
-        let snapshot_to_save = snap.clone();
-        drop(snap); // release write lock before disk I/O and publish_health
-        if let Err(e) = snapshot_to_save.save(&self.snapshot_path) {
-            tracing::warn!("cannot persist snapshot: {e:#}");
-        }
-
-        // NOTE: refresh_tools deliberately shuts down nothing. It re-reads
-        // backends' tool catalogues; it does not re-read the config, so the
-        // registry it started with is still the current one. An earlier
-        // version shut down "backends missing from the snapshot", which is a
-        // different set entirely: a single-server refresh leaves every other
-        // server out of `fresh`, so refreshing one backend killed all the
-        // others whenever the snapshot was partial (empty cache with
-        // refresh_on_start=false, or a filtered build). Backend lifecycle
-        // belongs to reload_from_config, which compares old and new *configs*.
-        self.rescan_skills().await;
-        Ok(text_result(json!({
-            "summary": summary,
-            "diff": diff,
-        })))
-    }
 }
 
 // Per-instance router rather than the static one, so the advertised tool
@@ -1595,78 +1405,6 @@ impl ServerHandler for Proxy {
 #[cfg(test)]
 mod param_tests {
     use super::*;
-    use crate::snapshot::{ServerSnapshot, ToolSnapshot};
-
-    /// A snapshot from (server, [tool]) pairs, for diff tests.
-    fn snap_of(servers: &[(&str, &[&str])]) -> Snapshot {
-        let mut s = Snapshot::default();
-        for (name, tools) in servers {
-            s.servers.insert(
-                (*name).into(),
-                ServerSnapshot {
-                    tools: tools
-                        .iter()
-                        .map(|t| ToolSnapshot {
-                            name: (*t).into(),
-                            description: "d".into(),
-                            input_schema: json!({"type": "object"}),
-                        })
-                        .collect(),
-                    ..Default::default()
-                },
-            );
-        }
-        s
-    }
-
-    #[test]
-    fn compute_diff_reports_a_removed_server() {
-        // The added-server path has a regression test; this is its mirror.
-        // A full refresh must report the tools of a server that vanished,
-        // not silently drop them from the diff.
-        let old = snap_of(&[("a", &["t1"]), ("b", &["t2", "t3"])]);
-        let new = snap_of(&[("a", &["t1"])]);
-
-        let diff = compute_diff(&old, &new, &None);
-        let removed = diff["removed"].as_array().unwrap();
-        assert_eq!(
-            removed.len(),
-            2,
-            "both of b's tools should be removed: {diff}"
-        );
-        assert!(
-            removed.iter().all(|r| r["server"] == "b"),
-            "removals should be attributed to b: {diff}"
-        );
-        assert!(
-            diff["added"].as_array().unwrap().is_empty(),
-            "nothing added: {diff}"
-        );
-        assert_eq!(diff["unchanged"], 1, "a's tool is unchanged: {diff}");
-    }
-
-    #[test]
-    fn compute_diff_single_server_filter_reports_removal() {
-        // Same, through the `server`-filtered path.
-        let old = snap_of(&[("a", &["t1"]), ("b", &["t2"])]);
-        let new = snap_of(&[("a", &["t1"])]);
-        let diff = compute_diff(&old, &new, &Some("b".to_string()));
-        let removed = diff["removed"].as_array().unwrap();
-        assert_eq!(removed.len(), 1, "{diff}");
-        assert_eq!(removed[0]["server"], "b");
-        assert_eq!(removed[0]["tool"], "t2");
-    }
-
-    #[test]
-    fn compute_diff_flags_a_changed_schema() {
-        let old = snap_of(&[("a", &["t1"])]);
-        let mut new = snap_of(&[("a", &["t1"])]);
-        new.servers.get_mut("a").unwrap().tools[0].input_schema =
-            json!({"type": "object", "properties": {"x": {"type": "string"}}});
-        let diff = compute_diff(&old, &new, &None);
-        assert_eq!(diff["changed"].as_array().unwrap().len(), 1, "{diff}");
-        assert_eq!(diff["unchanged"], 0, "{diff}");
-    }
 
     /// A Proxy with no backends and the given skill dirs, for surface tests.
     /// `Proxy::new` is sync and touches the filesystem only through
@@ -1684,7 +1422,7 @@ mod param_tests {
         )
     }
 
-    /// Two of the seven meta-tools exist only to serve a skill library. If
+    /// Two of the six meta-tools exist only to serve a skill library. If
     /// none is configured they are permanent context describing a capability
     /// the user doesn't have — and an invitation to call something that can
     /// only answer "nothing here".
@@ -1702,11 +1440,11 @@ mod param_tests {
         };
         let (a, b) = (names(&with), names(&without));
 
-        assert_eq!(a.len(), 7, "a configured library advertises all 7: {a:?}");
+        assert_eq!(a.len(), 6, "a configured library advertises all 6: {a:?}");
         assert!(a.contains(&"list_skills".to_string()));
         assert!(a.contains(&"read_skill".to_string()));
 
-        assert_eq!(b.len(), 5, "no library should advertise 5: {b:?}");
+        assert_eq!(b.len(), 4, "no library should advertise 4: {b:?}");
         assert!(!b.contains(&"list_skills".to_string()), "got {b:?}");
         assert!(!b.contains(&"read_skill".to_string()), "got {b:?}");
         // search survives — it still finds tools, and explains itself when
@@ -1734,7 +1472,7 @@ mod param_tests {
     #[test]
     fn meta_tool_surface_stays_within_its_context_budget() {
         let tools = Proxy::tool_router().list_all();
-        assert_eq!(tools.len(), 7, "expected 7 meta-tools, got {}", tools.len());
+        assert_eq!(tools.len(), 6, "expected 6 meta-tools, got {}", tools.len());
 
         let wire = serde_json::to_string(&tools).expect("tools must serialize");
         // The instructions ride in the initialize result and stay in context
@@ -1753,10 +1491,10 @@ mod param_tests {
             wire.len(),
             instr.len()
         );
-        // Measured at 4143 + 596 bytes; the budget leaves ~21% headroom.
-        // Schema was 4305 before `health` was retired to a CLI-only command;
-        // that saved 218 B and a longer list_mcp_servers description spent 56
-        // of it back, for a net 162.
+        // Measured at 3662 + 596 bytes; the budget leaves ~29% headroom.
+        // Schema was 4305 with eight tools. `health` (218 B) and
+        // `refresh_tools` (480 B) both became CLI commands, and describing
+        // list_mcp_servers' new `issues` field spent 56 B back.
         assert!(
             bytes <= 6000,
             "meta-tool surface grew to {bytes} bytes (budget 6000). This is the \

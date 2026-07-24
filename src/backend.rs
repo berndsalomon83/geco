@@ -25,7 +25,7 @@ type Conn = Arc<RunningService<RoleClient, BackendClient>>;
 /// type `()` also implements `ClientHandler`, which is what this used to
 /// connect with — and its default hooks accept the notification and drop it
 /// on the floor. A backend that gains or loses tools at runtime therefore
-/// stayed wrong in the snapshot until someone happened to run `refresh_tools`,
+/// stayed wrong in the snapshot until someone happened to run `geco refresh`,
 /// with nothing anywhere reporting the drift.
 #[derive(Clone)]
 pub struct BackendClient {
