@@ -73,3 +73,48 @@ jobs:
           if ! cargo fmt --check; then
             echo "::warning::rustfmt drift present — advisory only, see log above"
           fi
+
+  # Warnings are per-job annotations, which means they are effectively
+  # invisible: you have to open each job to find them. That is how a Node 20
+  # deprecation notice sat unnoticed across four runs. This job collects every
+  # non-failure annotation in the run into the run summary, so warnings are
+  # readable from the run page without drilling in.
+  warnings:
+    name: surface warnings
+    runs-on: ubuntu-latest
+    needs: [test, fmt]
+    if: always()
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Collect annotations into the run summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          tmp="$(mktemp)"
+          for id in $(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
+                        --jq '.check_runs[].id' 2>/dev/null || true); do
+            gh api "repos/$REPO/check-runs/$id/annotations" --jq \
+              '.[] | select(.annotation_level != "failure")
+                   | "- **\(.annotation_level)** — \(.message | split("\n")[0])"' \
+              >> "$tmp" 2>/dev/null || true
+          done
+
+          {
+            echo "## CI warnings"
+            echo
+            if [ -s "$tmp" ]; then
+              sort -u "$tmp" | head -50
+            else
+              echo "_none_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s "$tmp" ]; then
+            n="$(sort -u "$tmp" | wc -l | tr -d ' ')"
+            echo "::warning::$n warning(s) in this run — see the run summary"
+          fi
