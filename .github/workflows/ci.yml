@@ -48,10 +48,16 @@ jobs:
         run: cargo test --locked
         env:
           GECO_REQUIRE_E2E: 1
-          # Exercise the real OS credential store where there is one. Opt-in
-          # because the test writes a throwaway item; CI runners are
-          # disposable, a developer's login keychain is not.
-          GECO_TEST_KEYCHAIN: ${{ (runner.os == 'macOS' || runner.os == 'Windows') && '1' || '' }}
+          # Exercise the real OS credential store. Opt-in because the test
+          # writes a throwaway item; CI runners are disposable, a developer's
+          # login keychain is not.
+          #
+          # macOS only. On the Windows runner `cmdkey` cannot create the
+          # fixture — the Actions session has no interactive credential store,
+          # so the test fails setting up rather than testing anything. It
+          # works on a real Windows desktop (verified by hand), so the test
+          # stays and is run locally with GECO_TEST_KEYCHAIN=1.
+          GECO_TEST_KEYCHAIN: ${{ runner.os == 'macOS' && '1' || '' }}
 
   fmt:
     name: rustfmt

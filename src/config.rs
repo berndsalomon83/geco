@@ -508,15 +508,25 @@ fn keychain_lookup(service: &str) -> Result<String> {
         // The service name is passed via the GECO_KEYCHAIN_SERVICE env var
         // to avoid PowerShell injection through string interpolation.
         //
-        // Two things this script must get exactly right, both of which have
-        // bitten us: `Marshal` has no PowerShell type accelerator, so it needs
-        // its full name ([Runtime.InteropServices.Marshal]) — and pointer
-        // arithmetic must happen in Int64 *before* the [IntPtr] cast, because
-        // .NET Framework's IntPtr has no addition operator. Both failures are
-        // non-terminating by default, which would let the script fall through
-        // to Write-Output with a zero-filled buffer and exit 0 — handing back
-        // a string of NULs as if it were the secret. ErrorActionPreference=Stop
-        // plus the try/catch turn any such slip into a hard, loud exit 1.
+        // Three things this script must get exactly right, every one of which
+        // has bitten us:
+        //
+        //  1. `Marshal` has no PowerShell type accelerator — it needs its full
+        //     name, [Runtime.InteropServices.Marshal].
+        //  2. Pointer arithmetic happens in Int64 BEFORE the [IntPtr] cast,
+        //     because .NET Framework's IntPtr has no addition operator.
+        //  3. CREDENTIALW on x64 is: Flags(0,4) Type(4,4) TargetName(8,ptr)
+        //     Comment(16,ptr) LastWritten(24,8) CredentialBlobSize(32,4)
+        //     CredentialBlob(40,ptr). +32 is an inline DWORD, but +40 holds a
+        //     POINTER that must be dereferenced with ReadIntPtr. Copying from
+        //     the address of the field instead returned the pointer's own
+        //     bytes — 'Ꝙ澤ƞ\0\0\0…' rather than the password.
+        //
+        // Each failure is non-terminating by default, which would let the
+        // script fall through to Write-Output with a garbage buffer and exit 0,
+        // handing back nonsense as if it were the secret. ErrorActionPreference
+        // = Stop plus the try/catch make any such slip a hard, loud exit 1, and
+        // the Rust side additionally rejects an empty or NUL-bearing result.
         let ps_script = "\
          $ErrorActionPreference='Stop';\
          try{\
@@ -529,7 +539,7 @@ fn keychain_lookup(service: &str) -> Result<String> {
          if($t::CredReadW($svc,1,0,[ref]$p)){\
          $base=$p.ToInt64();\
          $cb=[Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]($base+32));\
-         $blob=[IntPtr]($base+40);\
+         $blob=[Runtime.InteropServices.Marshal]::ReadIntPtr([IntPtr]($base+40));\
          $b=New-Object byte[] $cb;\
          [Runtime.InteropServices.Marshal]::Copy($blob,$b,0,$cb);\
          $pw=[Text.Encoding]::Unicode.GetString($b);\
