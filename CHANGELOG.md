@@ -8,6 +8,25 @@ minor bump may break.
 
 ### Added
 
+- **CLI tests** (`tests/cli.rs`, 11 of them), run against the real binary.
+  `src/main.rs` was 441 lines no test could reach — it is a binary, and none
+  of its logic lives in the library. Two bugs shipped through that gap in a
+  single day: `geco health` did not exist while docs and a design decision
+  both assumed it did, and `geco refresh` was a no-op for a running proxy.
+  Neither was subtle; both were invisible because nothing ever executed the
+  CLI. Both guards were then mutation-tested — reintroducing bug 1 fails four
+  tests, reintroducing bug 2 fails one with the message written for it.
+- **Twelve more held-out search queries**, written to *falsify* the next
+  proposed synonym rather than to confirm it — three use a word the table
+  maps while wanting a tool that has nothing to do with it. Held-out is now
+  20 queries. This dropped the reported held-out score from 87.5%/100% to
+  65%/80%: nothing regressed, the old sample was simply too small and too
+  kind. The floors moved with it, and the reasoning is recorded beside them
+  so the drop is not later misread as one.
+- `know` as a synonym for `recall` — "what do you know about X" is how people
+  ask a memory tool what it has. Semantic recall@5 90.9% → 100%, held-out
+  unchanged, and the three planted "know"-means-something-else queries still
+  rank correctly. Motivated by training data, validated on data it never saw.
 - **Hidden skills are now discoverable.** When a library is configured, geco's
   MCP instructions state how many skills exist, that they're invisible
   otherwise, that they are not callable tools, and to search first. Measured

@@ -217,14 +217,19 @@ One rule depends on word order: a verb leading a request is expanded where the s
 
 It is lexical, deliberately: no model, no index, no state. Ranking a few hundred tools costs microseconds and there is nothing to invalidate when the snapshot changes.
 
-The limits are measured rather than assumed, against a 59-query corpus in the test suite:
+The limits are measured rather than assumed, against a 71-query corpus in the test suite:
 
 | | recall@1 | recall@5 |
 |---|---|---|
 | queries sharing vocabulary with the tool | 87.5% | 100% |
-| queries needing a synonym | 72.7% | 90.9% |
+| queries needing a synonym | 72.7% | 100% |
+| held out from all tuning | 65.0% | 80.0% |
 
-Eight of those queries are held out — written after the synonym table and never consulted while building it — so every change is checked against queries the table was not fitted to. That guard has already rejected one change that looked obviously right: a symmetric create/open synonym that raised the group it was derived from while lowering the group it wasn't. If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
+That third row is the one to believe, and the only one worth trusting about *your* tools. Twenty queries are held out — written after the synonym table, never consulted while building it, and twelve of them written specifically to break the next proposed change rather than to confirm it. The first two rows are measured partly on the queries the table was derived from, which always flatters.
+
+The guard earns its keep in both directions. It **rejected** a symmetric create/open synonym that raised the group it came from while lowering the group it didn't, and it **cleared** a `know` → `recall` mapping by leaving three deliberately planted "know"-means-something-else queries ranking correctly.
+
+If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
 
 ### What geco proxies (and what it doesn't)
 
