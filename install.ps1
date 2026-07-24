@@ -134,13 +134,31 @@ if (Test-Path (Split-Path $OpencodePluginDir -Parent)) {
 
 # Build snapshot + verify.
 Say "Building initial snapshot..."
-& $Dest --config $Cfg refresh 2>&1 | ForEach-Object { Write-Host $_ }
+# NOT `2>&1`: PowerShell 5.1 wraps each stderr line from a native command in an
+# ErrorRecord, and with $ErrorActionPreference = "Stop" that is terminating —
+# so the installer aborted here the moment any backend logged a warning. geco
+# logs everything to stderr by design (stdout belongs to the MCP protocol), and
+# a first refresh with a missing `npx` or keychain item is the common case, not
+# the exception. Let stderr flow to the console untouched and judge the result
+# by the exit code, which is what it is for.
+& $Dest --config $Cfg refresh
+if ($LASTEXITCODE -ne 0) {
+    Warn "refresh reported issues (fix the config, then: geco refresh)"
+}
 
 Say "Verifying meta-tool surface..."
 $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"install","version":"0"}}}'
 $tools = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 $msgs = "$init`n$tools"
-$result = $msgs | & $Dest --config $Cfg serve --no-refresh 2>$null | ConvertFrom-Json
+# The same PowerShell 5.1 trap as the refresh above, and it bites even with
+# `2>$null`: stderr from a native command still becomes ErrorRecords, which
+# are terminating under "Stop". geco announces itself on stderr at startup,
+# so this aborted every install. Relax the preference for just this call.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$raw = $msgs | & $Dest --config $Cfg serve --no-refresh 2>$null
+$ErrorActionPreference = $prevEap
+$result = $raw | ConvertFrom-Json
 $toolCount = ($result | Where-Object { $_.id -eq 2 }).result.tools.Count
 if ($toolCount -eq 8) {
     Say "Proxy OK: 8 meta-tools"
