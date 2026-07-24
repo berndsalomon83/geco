@@ -35,6 +35,23 @@ pub struct ProxyConfig {
     /// 0 = disabled. When a dead connection is detected, it is reset
     /// so the next execute reconnects fresh.
     pub health_check_secs: u64,
+    /// Give backends geco's whole environment (pre-0.7 behaviour).
+    ///
+    /// Default false: a backend starts from a clean environment containing
+    /// only the OS/runtime baseline (see `env_passthrough`), whatever its
+    /// `env` and `pass_env` declare, and nothing else. That way a
+    /// `GITHUB_TOKEN` exported in your shell for one server isn't handed to
+    /// every other server you run. Set true to restore inheritance.
+    pub inherit_env: bool,
+    /// Extra variables to pass through to every backend when isolating,
+    /// as glob patterns (`*` wildcard), e.g. `["NODE_*", "DOCKER_HOST"]`.
+    ///
+    /// The built-in baseline already covers OS essentials, locale, TLS trust
+    /// and proxy settings — this is for tool-specific configuration that
+    /// isn't a secret. Per-server needs belong in `pass_env` instead.
+    /// Ignored when `inherit_env` is true. Matched case-insensitively on
+    /// Windows, where environment names are case-insensitive.
+    pub env_passthrough: Vec<String>,
 }
 
 impl Default for ProxyConfig {
@@ -44,7 +61,102 @@ impl Default for ProxyConfig {
             startup_timeout_secs: 30,
             refresh_on_start: true,
             health_check_secs: 30,
+            inherit_env: false,
+            env_passthrough: Vec::new(),
         }
+    }
+}
+
+impl ProxyConfig {
+    pub fn env_policy(&self) -> EnvPolicy {
+        EnvPolicy {
+            inherit: self.inherit_env,
+            passthrough: self.env_passthrough.clone(),
+        }
+    }
+}
+
+/// How much of geco's own environment a backend gets to see.
+#[derive(Debug, Clone, Default)]
+pub struct EnvPolicy {
+    pub inherit: bool,
+    pub passthrough: Vec<String>,
+}
+
+impl EnvPolicy {
+    /// Pre-0.7 behaviour: the child inherits everything.
+    pub fn inherit_all() -> Self {
+        Self { inherit: true, passthrough: Vec::new() }
+    }
+}
+
+/// Variables a spawned backend gets even under isolation, because without
+/// them ordinary MCP servers break in ways that are hard to diagnose.
+///
+/// The rule for what belongs here: OS/runtime essentials, locale, TLS trust,
+/// and proxy plumbing — never anything that identifies or authenticates a
+/// user. Tool-specific configuration (DOCKER_HOST, NODE_OPTIONS, …) is a
+/// deliberate opt-in via `proxy.env_passthrough` or per-server `pass_env`,
+/// so that adding a secret-shaped variable is always an explicit act.
+pub fn baseline_env_names() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &[
+            // Without these, most Win32 programs fail to start at all.
+            "SystemRoot", "windir", "SystemDrive", "PATH", "PATHEXT", "COMSPEC",
+            "TEMP", "TMP",
+            // Home/profile: npm, pip and friends resolve their caches here.
+            "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "USERNAME", "USERDOMAIN",
+            "APPDATA", "LOCALAPPDATA", "ProgramData",
+            "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
+            "CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432",
+            // Platform/CPU detection used by node-gyp and similar.
+            "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "OS",
+            "PSModulePath",
+            // Locale, TLS trust, proxies.
+            "LANG", "TZ",
+            "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+            "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        &[
+            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM",
+            // XDG dirs: npm, uv and others put caches and config here.
+            "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+            "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+            // Locale — a missing LANG silently changes Python's text encoding.
+            "LANG", "LANGUAGE", "TZ",
+            // TLS trust: corporate CA bundles.
+            "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+            "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+            // Proxies — without these `npx` can't reach the registry.
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+        ]
+    }
+}
+
+/// True if `name` should pass through under `policy` (baseline, LC_*, or an
+/// explicit passthrough glob). Windows environment names are
+/// case-insensitive, so patterns are matched that way there.
+fn passes_env_filter(name: &str, policy: &EnvPolicy) -> bool {
+    // All locale categories, without listing each one.
+    if name.starts_with("LC_") {
+        return true;
+    }
+    if baseline_env_names().iter().any(|b| b.eq_ignore_ascii_case(name)) {
+        return true;
+    }
+    if cfg!(windows) {
+        let lower = name.to_lowercase();
+        policy.passthrough.iter().any(|p| glob_match(&p.to_lowercase(), &lower))
+    } else {
+        policy.passthrough.iter().any(|p| glob_match(p, name))
     }
 }
 
@@ -118,9 +230,13 @@ pub struct ServerConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Environment variables to forward from the proxy's own environment
-    /// to the backend at spawn time. Shortcut for `env: { KEY: "${KEY}" }`
-    /// — useful when multiple backends share the same secret that's already
-    /// in the proxy's env (e.g. `pass_env: ["GITHUB_TOKEN"]`).
+    /// to THIS backend at spawn time, e.g. `pass_env: ["GITHUB_TOKEN"]`.
+    ///
+    /// Since 0.7 backends no longer inherit geco's environment, so this is
+    /// how a server gets an ambient secret — and only the servers that list
+    /// it do. (Before 0.7 it was a no-op: every child already had every
+    /// variable.) Missing variables are skipped silently, which is the right
+    /// behaviour for optional ones; use `env` to fail loudly instead.
     #[serde(default)]
     pub pass_env: Vec<String>,
 }
@@ -152,6 +268,9 @@ impl ServerConfig {
     /// spawn time. Also forwards `pass_env` variables from the proxy's own
     /// environment — missing vars are silently skipped (the backend will
     /// see them as unset, which is the correct behavior for optional vars).
+    ///
+    /// This is only the *declared* part of the environment. What the child
+    /// actually receives is decided by `env_for_spawn`.
     pub fn env_expanded(&self) -> Result<BTreeMap<String, String>> {
         let mut envs: BTreeMap<String, String> = self
             .env
@@ -167,6 +286,26 @@ impl ServerConfig {
             }
         }
         Ok(envs)
+    }
+
+    /// The environment the child actually gets, as `(clear_first, vars)`.
+    ///
+    /// Under the default isolating policy the child starts from nothing and
+    /// receives the baseline, anything matching `env_passthrough`, then the
+    /// declared `env`/`pass_env` on top — so an explicit value always wins
+    /// over an inherited one of the same name. Under `inherit_env: true` the
+    /// child keeps geco's whole environment and we only layer the declared
+    /// vars on, which is what every version before 0.7 did.
+    pub fn env_for_spawn(&self, policy: &EnvPolicy) -> Result<(bool, BTreeMap<String, String>)> {
+        let declared = self.env_expanded()?;
+        if policy.inherit {
+            return Ok((false, declared));
+        }
+        let mut envs: BTreeMap<String, String> = std::env::vars()
+            .filter(|(k, _)| passes_env_filter(k, policy))
+            .collect();
+        envs.extend(declared);
+        Ok((true, envs))
     }
 
     /// Allow/deny filter for a backend tool name. Deny wins.
@@ -783,6 +922,81 @@ mcpServers:
         // Explicit env wins over pass_env.
         assert_eq!(envs["GECO_TEST_OVERRIDE"], "from_config");
         std::env::remove_var("GECO_TEST_OVERRIDE");
+    }
+
+    fn stub_server(json: &str) -> ServerConfig {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn isolated_env_keeps_the_baseline_and_drops_the_rest() {
+        let _env = env_guard();
+        std::env::set_var("GECO_ISO_SECRET", "nope");
+        let s = stub_server(r#"{"command":["npx"]}"#);
+        let (clear, envs) = s.env_for_spawn(&EnvPolicy::default()).unwrap();
+
+        assert!(clear, "isolation must clear the inherited environment first");
+        assert!(envs.contains_key("PATH"), "PATH is baseline: {envs:?}");
+        assert!(
+            !envs.contains_key("GECO_ISO_SECRET"),
+            "an undeclared variable must not be passed: {envs:?}"
+        );
+        std::env::remove_var("GECO_ISO_SECRET");
+    }
+
+    #[test]
+    fn isolated_env_honours_passthrough_globs_and_lc_vars() {
+        let _env = env_guard();
+        std::env::set_var("GECO_GLOBBED_X", "x");
+        std::env::set_var("GECO_UNGLOBBED", "y");
+        std::env::set_var("LC_TELEPHONE", "de_DE.UTF-8");
+        let s = stub_server(r#"{"command":["npx"]}"#);
+        let policy = EnvPolicy { inherit: false, passthrough: vec!["GECO_GLOBBED_*".into()] };
+        let (_, envs) = s.env_for_spawn(&policy).unwrap();
+
+        assert_eq!(envs.get("GECO_GLOBBED_X").map(String::as_str), Some("x"));
+        assert!(!envs.contains_key("GECO_UNGLOBBED"), "glob must not over-match");
+        // Every locale category rides along, so text encoding stays stable.
+        assert!(envs.contains_key("LC_TELEPHONE"), "LC_* should pass: {envs:?}");
+
+        std::env::remove_var("GECO_GLOBBED_X");
+        std::env::remove_var("GECO_UNGLOBBED");
+        std::env::remove_var("LC_TELEPHONE");
+    }
+
+    #[test]
+    fn declared_env_wins_over_the_baseline() {
+        let _env = env_guard();
+        let s = stub_server(r#"{"command":["npx"],"env":{"PATH":"/only/this"}}"#);
+        let (_, envs) = s.env_for_spawn(&EnvPolicy::default()).unwrap();
+        assert_eq!(
+            envs["PATH"], "/only/this",
+            "an explicit env entry must override the inherited baseline"
+        );
+    }
+
+    #[test]
+    fn pass_env_opts_a_single_variable_through_isolation() {
+        let _env = env_guard();
+        std::env::set_var("GECO_OPT_IN", "let-me-through");
+        std::env::set_var("GECO_STAY_OUT", "blocked");
+        let s = stub_server(r#"{"command":["npx"],"pass_env":["GECO_OPT_IN"]}"#);
+        let (_, envs) = s.env_for_spawn(&EnvPolicy::default()).unwrap();
+        assert_eq!(envs.get("GECO_OPT_IN").map(String::as_str), Some("let-me-through"));
+        assert!(!envs.contains_key("GECO_STAY_OUT"));
+        std::env::remove_var("GECO_OPT_IN");
+        std::env::remove_var("GECO_STAY_OUT");
+    }
+
+    #[test]
+    fn inherit_env_restores_pre_0_7_behaviour() {
+        let _env = env_guard();
+        let s = stub_server(r#"{"command":["npx"],"env":{"A":"1"}}"#);
+        let (clear, envs) = s.env_for_spawn(&EnvPolicy::inherit_all()).unwrap();
+        assert!(!clear, "inheriting must NOT clear the environment");
+        // Only the declared vars are layered on; the rest arrives by inheritance.
+        assert_eq!(envs.len(), 1, "inherit mode layers only declared vars: {envs:?}");
+        assert_eq!(envs["A"], "1");
     }
 
     #[test]

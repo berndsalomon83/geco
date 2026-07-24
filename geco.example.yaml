@@ -14,6 +14,13 @@ proxy:
   refresh_on_start: true       # re-scan when this file's hash changes
   health_check_secs: 30        # 0 to disable dead-backend detection
 
+  # Backends do NOT inherit geco's environment (since 0.7). Each child gets
+  # an OS/runtime baseline — PATH, HOME, TMPDIR, locale, TLS trust, proxy
+  # settings — plus whatever its own `env` / `pass_env` declare. So a token
+  # exported in your shell for one server never reaches the others.
+  # inherit_env: true            # restore pre-0.7 behaviour (not recommended)
+  # env_passthrough: ["NODE_*"]  # extra non-secret vars for every backend
+
 mcpServers:
   playwright:
     command: [npx, "@playwright/mcp@latest"]
@@ -30,7 +37,8 @@ mcpServers:
       GITHUB_TOOLSETS: "repos,issues,pull_requests"
     description: "GitHub: repos, issues, pull requests."
     deny: ["delete_*"]
-    # pass_env: ["GITHUB_TOKEN"]  # alternative: forward from proxy's env
+    # pass_env: ["GITHUB_TOKEN"]  # hand THIS server a var from geco's env;
+                                  # servers that don't list it never see it
 
   websearch:
     command: [npx, -y, mcp-searxng]

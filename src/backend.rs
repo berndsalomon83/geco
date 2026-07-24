@@ -14,7 +14,7 @@ use rmcp::ServiceExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::config::{Config, ProxyConfig, ServerConfig};
+use crate::config::{Config, EnvPolicy, ProxyConfig, ServerConfig};
 use crate::snapshot::{ServerSnapshot, Snapshot, ToolSnapshot};
 
 type Conn = Arc<RunningService<RoleClient, ()>>;
@@ -31,6 +31,11 @@ pub enum Status {
 pub struct Backend {
     pub name: String,
     pub cfg: ServerConfig,
+    /// How much of geco's environment this backend's child may see.
+    /// Held here rather than threaded through every call path, since it is
+    /// fixed for the lifetime of the Backend (a config change rebuilds the
+    /// whole Registry).
+    env_policy: EnvPolicy,
     conn: Mutex<Option<Conn>>,
     status: Mutex<Status>,
 }
@@ -40,10 +45,11 @@ pub(crate) fn now() -> String {
 }
 
 impl Backend {
-    pub fn new(name: String, cfg: ServerConfig) -> Self {
+    pub fn new(name: String, cfg: ServerConfig, env_policy: EnvPolicy) -> Self {
         Self {
             name,
             cfg,
+            env_policy,
             conn: Mutex::new(None),
             status: Mutex::new(Status::Cold),
         }
@@ -60,14 +66,27 @@ impl Backend {
     async fn resolve_and_spawn(&self) -> Result<TokioChildProcess> {
         let cfg = self.cfg.clone();
         let name = self.name.clone();
-        let (bin, argv, envs) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let policy = self.env_policy.clone();
+        let (bin, argv, clear_env, envs) = tokio::task::spawn_blocking(move || -> Result<_> {
             let (bin, argv) = cfg.command_line()?;
-            let envs = cfg.env_expanded()?;
-            Ok((bin, argv, envs))
+            let (clear_env, envs) = cfg.env_for_spawn(&policy)?;
+            Ok((bin, argv, clear_env, envs))
         })
         .await??;
+        if clear_env {
+            tracing::debug!(
+                "backend '{}': isolated environment, {} vars passed",
+                name,
+                envs.len()
+            );
+        }
         TokioChildProcess::new(Command::new(&bin).configure(|c| {
             c.args(&argv);
+            // Order matters: clear first, then apply. `envs` already contains
+            // the baseline plus whatever the server declared.
+            if clear_env {
+                c.env_clear();
+            }
             c.envs(&envs);
         }))
         .with_context(|| format!("cannot spawn backend '{}' ({bin})", name))
@@ -278,6 +297,7 @@ pub struct Registry {
 
 impl Registry {
     pub fn from_config(cfg: &Config) -> Self {
+        let policy = cfg.proxy.env_policy();
         let backends = cfg
             .servers
             .iter()
@@ -285,7 +305,7 @@ impl Registry {
             .map(|(name, s)| {
                 (
                     name.clone(),
-                    Arc::new(Backend::new(name.clone(), s.clone())),
+                    Arc::new(Backend::new(name.clone(), s.clone(), policy.clone())),
                 )
             })
             .collect();

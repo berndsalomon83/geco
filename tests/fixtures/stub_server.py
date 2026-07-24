@@ -25,6 +25,9 @@ if os.environ.get("STUB_EXTRA_TOOLS"):
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "crash", "description": "Exit immediately without replying",
          "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "getenv", "description": "Report an env var as seen by this child process",
+         "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}},
+                         "required": ["name"]}},
     ]
 
 def reply(id_, result):
@@ -53,6 +56,9 @@ for line in sys.stdin:
             os._exit(1)
         elif name == "pid":
             reply(id_, {"content": [{"type": "text", "text": str(os.getpid())}], "isError": False})
+        elif name == "getenv":
+            val = os.environ.get(args.get("name", ""), "<unset>")
+            reply(id_, {"content": [{"type": "text", "text": val}], "isError": False})
         elif name == "echo":
             reply(id_, {"content": [{"type": "text", "text": args.get("text", "")}], "isError": False})
         elif name == "add":

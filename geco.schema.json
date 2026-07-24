@@ -46,6 +46,19 @@
           "format": "uint64",
           "minimum": 0,
           "default": 30
+        },
+        "inherit_env": {
+          "description": "Give backends geco's whole environment (pre-0.7 behaviour).\n\nDefault false: a backend starts from a clean environment containing\nonly the OS/runtime baseline (see `env_passthrough`), whatever its\n`env` and `pass_env` declare, and nothing else. That way a\n`GITHUB_TOKEN` exported in your shell for one server isn't handed to\nevery other server you run. Set true to restore inheritance.",
+          "type": "boolean",
+          "default": false
+        },
+        "env_passthrough": {
+          "description": "Extra variables to pass through to every backend when isolating,\nas glob patterns (`*` wildcard), e.g. `[\"NODE_*\", \"DOCKER_HOST\"]`.\n\nThe built-in baseline already covers OS essentials, locale, TLS trust\nand proxy settings — this is for tool-specific configuration that\nisn't a secret. Per-server needs belong in `pass_env` instead.\nIgnored when `inherit_env` is true. Matched case-insensitively on\nWindows, where environment names are case-insensitive.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         }
       }
     },
@@ -119,7 +132,7 @@
           "default": true
         },
         "pass_env": {
-          "description": "Environment variables to forward from the proxy's own environment\nto the backend at spawn time. Shortcut for `env: { KEY: \"${KEY}\" }`\n— useful when multiple backends share the same secret that's already\nin the proxy's env (e.g. `pass_env: [\"GITHUB_TOKEN\"]`).",
+          "description": "Environment variables to forward from the proxy's own environment\nto THIS backend at spawn time, e.g. `pass_env: [\"GITHUB_TOKEN\"]`.\n\nSince 0.7 backends no longer inherit geco's environment, so this is\nhow a server gets an ambient secret — and only the servers that list\nit do. (Before 0.7 it was a no-op: every child already had every\nvariable.) Missing variables are skipped silently, which is the right\nbehaviour for optional ones; use `env` to fail loudly instead.",
           "type": "array",
           "items": {
             "type": "string"

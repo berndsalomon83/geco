@@ -1,6 +1,6 @@
 [package]
 name = "geco"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "geco — the generic connector: MCP gateway that keeps tools, skills, and more out of your context until the moment you summon them"
 license = "MIT"

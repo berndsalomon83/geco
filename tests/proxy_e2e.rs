@@ -1377,6 +1377,136 @@ async fn backend_child_is_reaped_on_shutdown() {
     );
 }
 
+/// Read an env var as the spawned child sees it.
+async fn backend_getenv(
+    backend: &Arc<geco::backend::Backend>,
+    registry: &Registry,
+    name: &str,
+) -> String {
+    let args = serde_json::json!({ "name": name }).as_object().unwrap().clone();
+    let res = backend.call("getenv", Some(args), &registry.proxy).await.unwrap();
+    res.content
+        .iter()
+        .find_map(|b| if let ContentBlock::Text(t) = b { Some(t.text.clone()) } else { None })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn backend_env_is_isolated_by_default() {
+    // The whole point of the isolation work: a secret exported in geco's
+    // shell for ONE server must not be handed to every other server.
+    let Some(py) = python_bin() else { return };
+    std::env::set_var("GECO_AMBIENT_SECRET", "must-not-leak");
+
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "env": { "STUB_EXTRA_TOOLS": "1" },
+        }
+    }));
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+
+    assert_eq!(
+        backend_getenv(&backend, &registry, "GECO_AMBIENT_SECRET").await,
+        "<unset>",
+        "an undeclared ambient variable must not reach the backend"
+    );
+    // ...while the things a server genuinely needs still arrive.
+    assert_eq!(
+        backend_getenv(&backend, &registry, "STUB_EXTRA_TOOLS").await,
+        "1",
+        "declared env must reach the backend"
+    );
+    assert_ne!(
+        backend_getenv(&backend, &registry, "PATH").await,
+        "<unset>",
+        "PATH is in the baseline — without it nothing runs"
+    );
+
+    std::env::remove_var("GECO_AMBIENT_SECRET");
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn pass_env_now_actually_forwards_a_variable() {
+    // Before 0.7 this test could not fail: the child inherited everything,
+    // so pass_env was indistinguishable from doing nothing.
+    let Some(py) = python_bin() else { return };
+    std::env::set_var("GECO_OPTED_IN_SECRET", "forwarded");
+    std::env::set_var("GECO_NOT_OPTED_IN", "withheld");
+
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "env": { "STUB_EXTRA_TOOLS": "1" },
+            "pass_env": ["GECO_OPTED_IN_SECRET"],
+        }
+    }));
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+
+    assert_eq!(
+        backend_getenv(&backend, &registry, "GECO_OPTED_IN_SECRET").await,
+        "forwarded",
+        "pass_env must forward the variable it names"
+    );
+    assert_eq!(
+        backend_getenv(&backend, &registry, "GECO_NOT_OPTED_IN").await,
+        "<unset>",
+        "a sibling variable must stay behind — that's the whole point"
+    );
+
+    std::env::remove_var("GECO_OPTED_IN_SECRET");
+    std::env::remove_var("GECO_NOT_OPTED_IN");
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn env_passthrough_globs_and_inherit_escape_hatch() {
+    let Some(py) = python_bin() else { return };
+    std::env::set_var("GECO_GLOB_ONE", "one");
+    std::env::set_var("GECO_OTHER", "other");
+
+    // Glob passthrough lets a whole family through, nothing else.
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "proxy": { "env_passthrough": ["GECO_GLOB_*"] },
+        "mcpServers": {
+            "stub": {
+                "command": py, "args": [stub_path()],
+                "env": { "STUB_EXTRA_TOOLS": "1" },
+            }
+        }
+    })).unwrap();
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+    assert_eq!(backend_getenv(&backend, &registry, "GECO_GLOB_ONE").await, "one");
+    assert_eq!(backend_getenv(&backend, &registry, "GECO_OTHER").await, "<unset>");
+    registry.shutdown_all().await;
+
+    // inherit_env: true restores the pre-0.7 behaviour wholesale.
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "proxy": { "inherit_env": true },
+        "mcpServers": {
+            "stub": {
+                "command": py, "args": [stub_path()],
+                "env": { "STUB_EXTRA_TOOLS": "1" },
+            }
+        }
+    })).unwrap();
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+    assert_eq!(
+        backend_getenv(&backend, &registry, "GECO_OTHER").await,
+        "other",
+        "inherit_env: true must hand the child everything again"
+    );
+    registry.shutdown_all().await;
+
+    std::env::remove_var("GECO_GLOB_ONE");
+    std::env::remove_var("GECO_OTHER");
+}
+
 #[tokio::test]
 async fn skill_watch_roots_resolves_inside_a_task() {
     // Regression: the skill watcher resolved its watch roots with
