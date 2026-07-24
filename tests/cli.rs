@@ -293,7 +293,7 @@ fn validate_rejects_a_broken_config() {
         .expect("run");
     assert!(
         !out.status.success(),
-        "unparseable config must fail validate:\n{}",
+        "unparsable config must fail validate:\n{}",
         stderr(&out)
     );
 }
