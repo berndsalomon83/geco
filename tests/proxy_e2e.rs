@@ -329,8 +329,9 @@ async fn search_through_proxy() {
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    let hits = json.as_array().unwrap();
+    let hits = json["results"].as_array().unwrap();
     assert!(!hits.is_empty(), "expected at least one hit");
+    assert_eq!(json["count"], hits.len(), "count must match results length: {json}");
     assert_eq!(hits[0]["kind"], "tool");
     assert_eq!(hits[0]["name"], "add");
     assert_eq!(hits[0]["server"], "stub");
@@ -343,7 +344,7 @@ async fn search_through_proxy() {
         .await
         .unwrap();
     let json = extract_json(&result);
-    let hits = json.as_array().unwrap();
+    let hits = json["results"].as_array().unwrap();
     // Tools are limited to 1, skills may also appear (but no skills configured here).
     let tool_hits: Vec<_> = hits.iter().filter(|h| h["kind"] == "tool").collect();
     assert_eq!(tool_hits.len(), 1, "expected exactly 1 tool hit with limit=1: {json}");
@@ -355,7 +356,7 @@ async fn search_through_proxy() {
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    let hits = json.as_array().unwrap();
+    let hits = json["results"].as_array().unwrap();
     assert!(!hits.is_empty());
     assert_eq!(hits[0]["name"], "add");
     assert!(hits[0]["input_schema"]["properties"]["a"].is_object(),
@@ -363,14 +364,17 @@ async fn search_through_proxy() {
     assert!(hits[0]["input_schema"]["properties"]["b"].is_object(),
             "expected input schema with 'b' property: {json}");
 
-    // Search for nonexistent query returns an error.
+    // No matches is an empty result, NOT an error — an is_error response here
+    // told the model the call itself had failed.
     let result = proxy
         .search(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None, kind: None }))
         .await
         .unwrap();
-    assert!(is_error(&result), "expected error for no matches");
+    assert!(!is_error(&result), "no matches must not be an error");
     let json = extract_json(&result);
-    assert_eq!(json["error"]["code"], "no_matches", "expected no_matches: {json}");
+    assert_eq!(json["count"], 0, "expected count 0: {json}");
+    assert!(json["results"].as_array().unwrap().is_empty(), "expected empty results: {json}");
+    assert!(json["hint"].is_string(), "expected a hint on empty results: {json}");
 
     registry.shutdown_all().await;
 }
@@ -475,7 +479,7 @@ async fn skills_through_proxy() {
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    let hits = json.as_array().unwrap();
+    let hits = json["results"].as_array().unwrap();
     assert!(!hits.is_empty(), "expected at least one hit for 'review'");
     assert_eq!(hits[0]["kind"], "skill");
     assert_eq!(hits[0]["name"], "code-reviewer");
@@ -487,18 +491,19 @@ async fn skills_through_proxy() {
         .unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    let hits = json.as_array().unwrap();
+    let hits = json["results"].as_array().unwrap();
     assert!(!hits.is_empty());
     assert_eq!(hits[0]["name"], "test-planner");
 
-    // search with kind="skills": no match returns an error.
+    // search with kind="skills": no match is an empty result, not an error.
     let result = proxy
         .search(Parameters(SearchParams { query: "xyzzy_nothing".into(), limit: None, include_schema: None, kind: Some("skills".into()) }))
         .await
         .unwrap();
-    assert!(is_error(&result), "expected error for no skill matches");
+    assert!(!is_error(&result), "no skill matches must not be an error");
     let json = extract_json(&result);
-    assert_eq!(json["error"]["code"], "no_matches", "expected no_matches: {json}");
+    assert_eq!(json["count"], 0, "expected count 0: {json}");
+    assert!(json["hint"].is_string(), "expected a hint on empty results: {json}");
 
     // search with kind="skills" + no skills configured returns error.
     // (already tested above — the make_proxy_with_skills has skills)
@@ -1051,4 +1056,90 @@ async fn refresh_tools_diff_shows_added_server() {
             "expected stub2 tools in added: {added:?}");
 
     proxy.shutdown_backends().await;
+}
+
+#[tokio::test]
+async fn partial_refresh_leaves_other_backends_running() {
+    // Regression: refresh_tools shut down every registry backend that was
+    // missing from the post-refresh snapshot. A single-server refresh leaves
+    // every OTHER server out of the fresh build, so whenever the snapshot was
+    // partial (empty cache with refresh_on_start=false, or a filtered build),
+    // refreshing one backend killed all the others.
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("snapshot.json");
+    let cfg_path = dir.path().join("config.yaml");
+    std::mem::forget(dir);
+
+    let cfg: Config = serde_json::from_str(&format!(
+        r#"{{"mcpServers":{{
+            "stub":{{"command":"python3","args":["{stub}"],"description":"stub"}},
+            "stub2":{{"command":"python3","args":["{stub}"],"description":"second stub"}}
+        }}}}"#
+    )).unwrap();
+    let registry = Arc::new(Registry::from_config(&cfg));
+
+    // Snapshot deliberately covers only "stub" — "stub2" is configured and
+    // live, but absent from the snapshot.
+    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), Some("stub")).await;
+    let proxy = Proxy::new(
+        (*registry).clone(),
+        snapshot,
+        snap_path,
+        cfg_path,
+        vec![],
+        vec![],
+    );
+
+    // Warm up stub2 so it has a real child process to lose.
+    let stub2 = registry.get("stub2").unwrap();
+    let args = serde_json::json!({"a": 1, "b": 1}).as_object().unwrap().clone();
+    stub2.call("add", Some(args), &registry.proxy).await.unwrap();
+    assert!(matches!(stub2.status().await, geco::backend::Status::Up { .. }),
+            "stub2 should be warm before the refresh");
+
+    // Refresh only "stub".
+    let result = proxy
+        .refresh_tools(Parameters(RefreshParams { server: Some("stub".into()) }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "single-server refresh should succeed");
+
+    let status = stub2.status().await;
+    assert!(matches!(status, geco::backend::Status::Up { .. }),
+            "partial refresh must not shut down unrelated backends, got: {status:?}");
+
+    proxy.shutdown_backends().await;
+}
+
+#[tokio::test]
+async fn skill_watch_roots_resolves_inside_a_task() {
+    // Regression: the skill watcher resolved its watch roots with
+    // RwLock::blocking_read from inside a tokio task. That panics on the spot
+    // ("Cannot block the current thread from within a runtime"), so the
+    // watcher died at startup and skills silently never hot-reloaded. This
+    // exercises the resolver from an async context, where the old code blew up.
+    let Some(cfg) = stub_config() else { return };
+    let lib = make_skill_library();
+    let (proxy, registry) = make_proxy_with_skills(
+        &cfg,
+        vec![lib.path().display().to_string()],
+    )
+    .await;
+
+    let roots = proxy.skill_watch_roots().await;
+    let expected = std::path::PathBuf::from(lib.path().display().to_string());
+    assert_eq!(roots.len(), 1, "expected exactly the configured library: {roots:?}");
+    assert!(roots.contains(&expected), "expected {} in {roots:?}", expected.display());
+
+    // Run it from a spawned task too — that is where the panic actually fired.
+    let proxy2 = proxy.clone();
+    tokio::spawn(async move { proxy2.skill_watch_roots().await })
+        .await
+        .expect("resolving watch roots inside a spawned task must not panic");
+
+    registry.shutdown_all().await;
 }

@@ -198,6 +198,30 @@ fn structured_err_ctx(code: &str, message: &str, context: serde_json::Value) -> 
     CallToolResult::error(vec![ContentBlock::text(body)])
 }
 
+/// Sync a watcher against the desired set of roots: watch what's new, unwatch
+/// what's gone. `desired` is resolved by the caller (it needs async locks —
+/// see `Proxy::skill_watch_roots`), so this stays a plain sync function.
+fn sync_watches(
+    watcher: &mut RecommendedWatcher,
+    watched: &mut std::collections::HashSet<PathBuf>,
+    desired: &std::collections::HashSet<PathBuf>,
+) {
+    let to_add: Vec<PathBuf> = desired.difference(watched).cloned().collect();
+    for root in to_add {
+        match watcher.watch(&root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                watched.insert(root);
+            }
+            Err(e) => tracing::warn!("skill watcher: cannot watch {}: {e}", root.display()),
+        }
+    }
+    let to_remove: Vec<PathBuf> = watched.difference(desired).cloned().collect();
+    for root in &to_remove {
+        let _ = watcher.unwatch(root);
+    }
+    watched.retain(|d| desired.contains(d));
+}
+
 /// Compute the diff between the old and new snapshots for the refresh_tools
 /// response. If `server_filter` is set, only that server is diffed.
 fn compute_diff(
@@ -369,7 +393,14 @@ impl Proxy {
         std::mem::forget(watcher);
 
         tokio::spawn(async move {
-            let mut last_mtime: Option<std::time::SystemTime> = None;
+            // Seed from the config's current mtime. Starting at None would
+            // make the very first event pass the "did it actually change?"
+            // check unconditionally — and since we watch the whole parent
+            // directory (which also holds geco.schema.json, editor swap
+            // files, …), an unrelated write there would trigger a full
+            // reload and re-spawn every backend exactly once per process.
+            let mut last_mtime: Option<std::time::SystemTime> =
+                std::fs::metadata(&config_path).and_then(|m| m.modified()).ok();
             loop {
                 if proxy.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -506,41 +537,11 @@ impl Proxy {
 
             // Track which roots we're currently watching so we can add new
             // ones and remove stale ones when hot-reload changes the config.
+            // The desired set is resolved via `skill_watch_roots().await` —
+            // never with a blocking lock read, which panics inside a task.
             use std::collections::HashSet;
             let mut watched: HashSet<PathBuf> = HashSet::new();
-
-            // Resolve the dirs to watch from the current config and sync the
-            // watcher. Called at startup and after each event cycle.
-            let sync_watches = |watcher: &mut RecommendedWatcher, watched: &mut HashSet<PathBuf>| {
-                let desired: HashSet<PathBuf> = {
-                    let skill_dirs = proxy.skill_dirs.blocking_read();
-                    let absorb_dirs = proxy.absorb_dirs.blocking_read();
-                    skill_dirs.iter().chain(absorb_dirs.iter())
-                        .map(|d| crate::skills::expand_tilde(d))
-                        .filter(|d| d.exists())
-                        .collect()
-                };
-                // Add new roots.
-                let to_add: Vec<PathBuf> = desired.difference(watched).cloned().collect();
-                for root in &to_add {
-                    match watcher.watch(root, RecursiveMode::Recursive) {
-                        Ok(()) => { watched.insert(root.clone()); }
-                        Err(e) => tracing::warn!("skill watcher: cannot watch {}: {e}", root.display()),
-                    }
-                }
-                // Remove stale roots.
-                let to_remove: Vec<PathBuf> = watched.difference(&desired).cloned().collect();
-                for root in &to_remove {
-                    let _ = watcher.unwatch(root);
-                }
-                watched.retain(|d| desired.contains(d));
-            };
-
-            sync_watches(&mut watcher, &mut watched);
-            if watched.is_empty() {
-                // Nothing to watch yet — but keep the task alive so hot-reload
-                // can add dirs later. Poll for config changes periodically.
-            }
+            sync_watches(&mut watcher, &mut watched, &proxy.skill_watch_roots().await);
 
             // Don't leak the watcher — keep it in the task scope so we can
             // reconfigure it. The task lives for the process lifetime.
@@ -553,7 +554,7 @@ impl Proxy {
                 // instead of blocking on recv (which would never fire).
                 if watched.is_empty() {
                     tokio::time::sleep(Duration::from_secs(10)).await;
-                    sync_watches(&mut watcher, &mut watched);
+                    sync_watches(&mut watcher, &mut watched, &proxy.skill_watch_roots().await);
                     continue;
                 }
 
@@ -574,9 +575,23 @@ impl Proxy {
                 tracing::info!("skill watcher: rescan complete");
 
                 // Re-evaluate watch roots in case hot-reload changed the config.
-                sync_watches(&mut watcher, &mut watched);
+                sync_watches(&mut watcher, &mut watched, &proxy.skill_watch_roots().await);
             }
         });
+    }
+
+    /// The directories the skill watcher should currently be watching:
+    /// every configured skill/absorb dir that exists on disk. Async because
+    /// the dir lists live behind the same locks hot-reload writes to.
+    pub async fn skill_watch_roots(&self) -> std::collections::HashSet<PathBuf> {
+        let skill_dirs = self.skill_dirs.read().await.clone();
+        let absorb_dirs = self.absorb_dirs.read().await.clone();
+        skill_dirs
+            .iter()
+            .chain(absorb_dirs.iter())
+            .map(|d| crate::skills::expand_tilde(d))
+            .filter(|d| d.exists())
+            .collect()
     }
 
     /// Reload config: rebuild registry, snapshot, skills, and health.
@@ -874,7 +889,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Find tools AND skills by keywords in one call. Returns hits tagged by kind (\"tool\" or \"skill\"), best match first. For tool hits, set include_schema=true to get each tool's full input schema inline — saves a list_tools call. Use kind=\"tools\" or kind=\"skills\" to search only one surface."
+        description = "Find tools AND skills by keywords in one call. Returns {results, count} where each result is tagged by kind (\"tool\" or \"skill\"), best match first; count 0 means nothing matched (not an error). For tool hits, set include_schema=true to get each tool's full input schema inline — saves a list_tools call. Use kind=\"tools\" or kind=\"skills\" to search only one surface."
     )]
     pub async fn search(
         &self,
@@ -912,9 +927,11 @@ impl Proxy {
             drop(snap);
         }
 
+        let mut skills_configured = true;
         if kind != "tools" {
             let idx = self.skills.read().await;
-            if !idx.skills.is_empty() {
+            skills_configured = !idx.skills.is_empty();
+            if skills_configured {
                 let skill_limit = if limit > 20 { 20 } else { limit };
                 let skill_hits = idx.search(&p.query, skill_limit);
                 for s in &skill_hits {
@@ -927,14 +944,22 @@ impl Proxy {
             }
         }
 
+        // Finding nothing is a valid answer, not a failure — this used to
+        // return is_error, which tells the model the call itself broke.
         if results.is_empty() {
-            return Ok(structured_err_ctx(
-                "no_matches",
-                &format!("no matches for '{}'", p.query),
-                json!({ "query": p.query, "kind": kind }),
-            ));
+            let hint = if !skills_configured && kind == "skills" {
+                "no skill libraries are configured — set `skills.dirs` in the geco config".to_string()
+            } else {
+                format!(
+                    "nothing matched '{}' — try fewer or more general keywords, \
+                     or list_mcp_servers to browse what's available",
+                    p.query
+                )
+            };
+            return Ok(text_result(json!({ "results": [], "count": 0, "hint": hint })));
         }
-        Ok(text_result(json!(results)))
+        let count = results.len();
+        Ok(text_result(json!({ "results": results, "count": count })))
     }
 
     #[tool(
@@ -1050,6 +1075,7 @@ impl Proxy {
                     results[i] = result;
                     let server = results[i]["server"].as_str().unwrap_or("").to_string();
                     let ok = results[i]["ok"].as_bool().unwrap_or(false);
+                    let code = results[i]["error"]["code"].as_str().unwrap_or("").to_string();
                     // If a previously-down backend's status changed (success
                     // or failure), update health so the TUI plugin stays in sync.
                     if was_down {
@@ -1058,22 +1084,24 @@ impl Proxy {
                     // A timeout or transport error on a previously-up backend
                     // flips it to Status::Failed — surface that to health too,
                     // otherwise the TUI toast misses the most common failure mode.
-                    if !ok {
-                        let code = results[i]["error"]["code"].as_str().unwrap_or("");
-                        if matches!(code, "timeout" | "backend_error") {
-                            needs_health_update = true;
-                        }
+                    if !ok && matches!(code.as_str(), "timeout" | "backend_error") {
+                        needs_health_update = true;
                     }
                     let mut metrics = self.metrics.write().await;
                     metrics.total_calls += 1;
                     if !ok { metrics.total_errors += 1; }
-                    let entry = metrics.per_backend.entry(server.clone())
-                        .or_default();
-                    entry.calls += 1;
-                    if !ok { entry.errors += 1; }
-                    if was_down { entry.cold_starts += 1; }
-                    entry.total_latency_ms = entry.total_latency_ms.saturating_add(latency_ms);
-                    entry.last_call_at = Some(crate::backend::now());
+                    // Don't create a per-backend row for a server that doesn't
+                    // exist — a typo'd name would otherwise show up as a
+                    // permanent phantom backend in `geco stats` forever.
+                    if code.as_str() != "unknown_server" {
+                        let entry = metrics.per_backend.entry(server.clone())
+                            .or_default();
+                        entry.calls += 1;
+                        if !ok { entry.errors += 1; }
+                        if was_down { entry.cold_starts += 1; }
+                        entry.total_latency_ms = entry.total_latency_ms.saturating_add(latency_ms);
+                        entry.last_call_at = Some(crate::backend::now());
+                    }
                 }
                 Err(e) => {
                     tracing::error!("execute: task panicked: {e}");
@@ -1221,21 +1249,15 @@ impl Proxy {
             tracing::warn!("cannot persist snapshot: {e:#}");
         }
 
-        // Shut down backends that disappeared from the config, mirroring
-        // reload_from_config. Without this, a manual refresh after removing
-        // a server leaks the child process.
-        let removed_backends: Vec<(String, std::sync::Arc<crate::backend::Backend>)> = {
-            let registry = self.registry.read().await;
-            registry.backends.iter()
-                .filter(|(name, _)| !snapshot_to_save.servers.contains_key(name.as_str()))
-                .map(|(n, b)| (n.clone(), b.clone()))
-                .collect()
-        };
-        for (name, backend) in &removed_backends {
-            backend.shutdown().await;
-            tracing::info!("refresh_tools: shut down removed backend '{name}'");
-        }
-
+        // NOTE: refresh_tools deliberately shuts down nothing. It re-reads
+        // backends' tool catalogues; it does not re-read the config, so the
+        // registry it started with is still the current one. An earlier
+        // version shut down "backends missing from the snapshot", which is a
+        // different set entirely: a single-server refresh leaves every other
+        // server out of `fresh`, so refreshing one backend killed all the
+        // others whenever the snapshot was partial (empty cache with
+        // refresh_on_start=false, or a filtered build). Backend lifecycle
+        // belongs to reload_from_config, which compares old and new *configs*.
         self.rescan_skills().await;
         Ok(text_result(json!({
             "summary": summary,

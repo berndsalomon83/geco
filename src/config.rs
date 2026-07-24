@@ -260,7 +260,19 @@ fn keychain_lookup(service: &str) -> Result<String> {
         // Windows Credential Manager via PowerShell + Win32 CredReadW.
         // The service name is passed via the GECO_KEYCHAIN_SERVICE env var
         // to avoid PowerShell injection through string interpolation.
+        //
+        // Two things this script must get exactly right, both of which have
+        // bitten us: `Marshal` has no PowerShell type accelerator, so it needs
+        // its full name ([Runtime.InteropServices.Marshal]) — and pointer
+        // arithmetic must happen in Int64 *before* the [IntPtr] cast, because
+        // .NET Framework's IntPtr has no addition operator. Both failures are
+        // non-terminating by default, which would let the script fall through
+        // to Write-Output with a zero-filled buffer and exit 0 — handing back
+        // a string of NULs as if it were the secret. ErrorActionPreference=Stop
+        // plus the try/catch turn any such slip into a hard, loud exit 1.
         let ps_script = "\
+         $ErrorActionPreference='Stop';\
+         try{\
          $sig='[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\
          public static extern bool CredReadW(string t, uint ty, uint f, out System.IntPtr c);\
          [DllImport(\"advapi32.dll\")] public static extern void CredFree(System.IntPtr c);';\
@@ -269,13 +281,14 @@ fn keychain_lookup(service: &str) -> Result<String> {
          $svc=$env:GECO_KEYCHAIN_SERVICE;\
          if($t::CredReadW($svc,1,0,[ref]$p)){\
          $base=$p.ToInt64();\
-         $cb=([Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]$base+32));\
+         $cb=[Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]($base+32));\
          $blob=[IntPtr]($base+40);\
          $b=New-Object byte[] $cb;\
-         [Marshal]::Copy($blob,$b,0,$cb);\
+         [Runtime.InteropServices.Marshal]::Copy($blob,$b,0,$cb);\
          $pw=[Text.Encoding]::Unicode.GetString($b);\
          $t::CredFree($p);\
-         Write-Output $pw}else{exit 1}";
+         Write-Output $pw}else{exit 1}\
+         }catch{exit 1}";
         let mut cmd = std::process::Command::new("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_script]);
         cmd.env("GECO_KEYCHAIN_SERVICE", service);
@@ -290,6 +303,11 @@ fn keychain_lookup(service: &str) -> Result<String> {
         let secret = secret.to_string();
         if secret.is_empty() {
             bail!("keychain item '{service}' resolved to an empty value");
+        }
+        // A NUL means we decoded an unwritten buffer, not a credential.
+        // No real secret contains one, so refuse rather than pass it on.
+        if secret.contains('\0') {
+            bail!("keychain item '{service}' resolved to a malformed value (embedded NUL)");
         }
         return Ok(secret);
     } else {
@@ -555,6 +573,19 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// Serializes every test that touches the process environment.
+    /// `set_var`/`remove_var` mutate process-global state that other threads
+    /// may be reading concurrently — and the test harness runs tests in
+    /// parallel by default. Any test that sets, removes, or reads an env var
+    /// (directly, or via `validate` / `env_expanded` / `command_line`) takes
+    /// this guard first.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        // A panicking test poisons the lock; the data is (), so recover.
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn parses_claude_style() {
         let cfg: Config = serde_json::from_str(
@@ -604,6 +635,7 @@ mod tests {
 
     #[test]
     fn env_expansion() {
+        let _env = env_guard();
         std::env::set_var("OM_TEST_VAR", "hello");
         assert_eq!(expand_value("${OM_TEST_VAR}/x").unwrap(), "hello/x");
         assert_eq!(expand_value("no vars").unwrap(), "no vars");
@@ -700,6 +732,7 @@ mcpServers:
 
     #[test]
     fn pass_env_forwards_from_process_env() {
+        let _env = env_guard();
         std::env::set_var("GECO_TEST_PASS_ENV", "secret123");
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_TEST_PASS_ENV"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
@@ -710,6 +743,7 @@ mcpServers:
 
     #[test]
     fn pass_env_missing_var_is_silently_skipped() {
+        let _env = env_guard();
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_NONEXISTENT_VAR_XYZ"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let envs = cfg.servers["s"].env_expanded().unwrap();
@@ -718,6 +752,7 @@ mcpServers:
 
     #[test]
     fn pass_env_does_not_override_explicit_env() {
+        let _env = env_guard();
         std::env::set_var("GECO_TEST_OVERRIDE", "from_process");
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"GECO_TEST_OVERRIDE":"from_config"},"pass_env":["GECO_TEST_OVERRIDE"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
@@ -729,6 +764,7 @@ mcpServers:
 
     #[test]
     fn validate_catches_missing_keychain() {
+        let _env = env_guard();
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${keychain:nonexistent-xyz-123}"}}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -738,6 +774,7 @@ mcpServers:
 
     #[test]
     fn validate_warns_missing_pass_env() {
+        let _env = env_guard();
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["GECO_NONEXISTENT_XYZ"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -747,6 +784,7 @@ mcpServers:
 
     #[test]
     fn validate_warns_missing_skills_dir() {
+        let _env = env_guard();
         let raw = r#"{"skills":{"dirs":["/nonexistent/path/xyz"]},"mcpServers":{"s":{"command":["npx"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -756,6 +794,7 @@ mcpServers:
 
     #[test]
     fn validate_passes_clean_config() {
+        let _env = env_guard();
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"FOO":"bar"}}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -765,6 +804,7 @@ mcpServers:
 
     #[test]
     fn validate_catches_zero_startup_timeout() {
+        let _env = env_guard();
         let raw = r#"{"proxy":{"startup_timeout_secs":0},"mcpServers":{"s":{"command":["npx"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -774,6 +814,7 @@ mcpServers:
 
     #[test]
     fn validate_catches_zero_call_timeout() {
+        let _env = env_guard();
         let raw = r#"{"proxy":{"call_timeout_secs":0},"mcpServers":{"s":{"command":["npx"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -783,6 +824,7 @@ mcpServers:
 
     #[test]
     fn validate_warns_missing_binary() {
+        let _env = env_guard();
         let raw = r#"{"mcpServers":{"s":{"command":["geco-nonexistent-binary-xyz"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -792,6 +834,7 @@ mcpServers:
 
     #[test]
     fn validate_does_not_warn_for_npx() {
+        let _env = env_guard();
         // npx is a known package manager — even if missing, it's not a config typo.
         let raw = r#"{"mcpServers":{"s":{"command":["npx","-y","some-server"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
@@ -802,6 +845,7 @@ mcpServers:
 
     #[test]
     fn validate_warns_unset_env_var() {
+        let _env = env_guard();
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${GECO_TYPO_VAR_XYZ}"}}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -811,6 +855,7 @@ mcpServers:
 
     #[test]
     fn validate_warns_unset_env_var_in_args() {
+        let _env = env_guard();
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"args":["${GECO_TYPO_ARG_XYZ}"]}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
         let findings = cfg.validate();
@@ -820,6 +865,7 @@ mcpServers:
 
     #[test]
     fn validate_does_not_warn_set_env_var() {
+        let _env = env_guard();
         std::env::set_var("GECO_SET_VAR_TEST", "value");
         let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"X":"${GECO_SET_VAR_TEST}"}}}}"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();
