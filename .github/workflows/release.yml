@@ -121,11 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
-          cargo cyclonedx --format json --locked
-          # cargo-cyclonedx writes <crate>.cdx.json next to the manifest.
+          # NB: cargo-cyclonedx takes no --locked flag. It writes
+          # <crate>.cdx.json next to the manifest.
+          cargo cyclonedx --format json
           mkdir -p dist
           cp geco.cdx.json "dist/geco-${version}-sbom.cdx.json"
-          echo "components: $(grep -o '"type"' "dist/geco-${version}-sbom.cdx.json" | wc -l)"
+          echo "components: $(grep -c '"bom-ref"' "dist/geco-${version}-sbom.cdx.json")"
       - uses: actions/upload-artifact@v7
         with:
           name: geco-sbom
