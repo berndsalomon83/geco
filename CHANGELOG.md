@@ -39,6 +39,26 @@ minor bump may break.
 
 ### Changed
 
+- **The `refresh_tools` meta-tool is gone; `geco refresh` covers it.** At 480
+  bytes it was the third-largest thing in the always-on surface, and it exists
+  for a moment that only ever follows a human action: you installed or
+  upgraded a backend. Config edits are already picked up live by the config
+  watcher, and backends that change their own tools already send
+  `tools/list_changed`, so the only case left is a backend upgraded in place —
+  a human act with a human fix.
+
+  `geco refresh` now **bumps the config file's mtime** as well as rewriting
+  the snapshot. Without that it did nothing for a live session: a running
+  proxy holds its snapshot in memory, only ever *writes* that file, and would
+  have overwritten what the CLI just saved. Since the config watcher gates on
+  mtime, the touch makes a running instance rebuild — registry, snapshot and
+  skills. File content is untouched; `File::set_times` moves the timestamp
+  only, so an interrupted call cannot damage a config.
+
+  **Migration:** `geco refresh`, or edit/save the config, or restart the
+  agent. Note this drops the added/removed/changed diff the tool returned —
+  `geco refresh` prints per-server tool counts instead.
+
 - **The `health` meta-tool is gone; `geco health` replaces it (new command).**
   It cost 218 bytes of every session's context — 5% of the schema surface —
   to answer a question that only arises once something is already broken, and
@@ -48,8 +68,10 @@ minor bump may break.
   Diagnostics belong in the payload, where they cost nothing until needed.
 
   Net saving is 162 B (schema 4305 → 4143), since describing the new `issues`
-  field spent 56 B back. The headline figure stays ~4.7 KB: this was a
-  redundancy removed, not a meaningful reduction.
+  field spent 56 B back — a redundancy removed rather than a meaningful
+  reduction. Together with `refresh_tools` the schema goes **4305 → 3662 B**
+  and the always-on total **4675 → 4258 B**, so the advertised figure moves
+  from ~4.7 KB to ~4.3 KB.
 
   **Migration:** run `geco health` (new; exits non-zero when there are
   errors, zero for warnings alone). Agents get gateway-level problems from

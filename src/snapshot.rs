@@ -1,7 +1,7 @@
 //! The tool snapshot: what each backend offers, captured once and cached on
 //! disk. This replaces lazy-mcp's separate `structure_generator` binary —
 //! the proxy refreshes the snapshot itself whenever the config hash changes
-//! (or on demand via the `refresh_tools` meta-tool).
+//! (or on demand via `geco refresh`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

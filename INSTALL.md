@@ -159,12 +159,12 @@ skills:
   dirs: ["~/.config/opencode/skills-library"]
 ```
 
-Restart the agent. `list_skills` shows the whole catalogue; `search` with `kind="skills"` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `refresh_tools` re-scans the library. Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
+Restart the agent. `list_skills` shows the whole catalogue; `search` with `kind="skills"` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `geco refresh` re-scans the library (the gateway also watches it and picks up changes on its own). Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
 
 ### The absorb model (nothing is ever native)
 
 The library is the single home for every skill, and the gateway enforces
-it: at startup and on every `refresh_tools`, any skill found in the
+it: at startup and on every refresh, any skill found in the
 configured `absorb` dirs is MOVED into the library. Wherever a model, an
 installer, or a playbook drops a skill, it gets swept behind the gate —
 the native auto-loaded dir stays empty forever, so no skill ever costs
@@ -178,7 +178,7 @@ skills:
 
 Name collisions are skipped and logged for the human; non-skill files are
 left untouched. Agents are additionally instructed (AGENTS.md) to create
-skills in the library directly and call `refresh_tools` afterwards.
+skills in the library directly; the gateway's watcher picks them up, or run `geco refresh`.
 
 ---
 
