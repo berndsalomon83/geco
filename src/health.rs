@@ -100,9 +100,12 @@ pub fn health_path() -> PathBuf {
 
 /// Write the current problem set to a specific path (test-friendly; the
 /// production path is `health_path()`). Empty issues == healthy.
+///
 /// Skips the disk write entirely if the content (issues + metrics) hasn't
-/// changed since the last write — avoids SSD wear on repeated publish_health
-/// calls with no state change.
+/// changed since the last write. Note this only elides genuinely redundant
+/// writes: once any tool call has run, `metrics.last_call_at` and the counters
+/// differ every time, so the skip mostly covers the idle case (repeated
+/// publish_health with no calls in between) rather than the busy one.
 pub fn write_to(path: &Path, client: Option<&str>, issues: Vec<Issue>, metrics: Option<Metrics>) {
     // Build the report body (without generation/updated_at, which always
     // change and would defeat the content-hash check).

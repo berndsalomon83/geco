@@ -5,7 +5,12 @@
  * blocking startup. Hooks into session events and checks health on
  * each session update.
  *
- * Install: copy to ~/.config/opencode/plugin/geco-tui.ts
+ * Status: PARKED — see TODO.md. It loads, but no hooks ever fire.
+ *
+ * Install: copy to ~/.config/opencode/plugins/geco-tui.ts — which is what
+ * install.sh and install.ps1 do. Note TODO.md records the opposite finding
+ * (that opencode scans the singular `plugin/`); the uninstallers clean both,
+ * and settling which is right is part of un-parking this.
  */
 
 import * as fs from "node:fs"

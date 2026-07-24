@@ -55,7 +55,16 @@ impl Snapshot {
 
     pub fn load(path: &Path) -> Option<Snapshot> {
         let raw = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&raw).ok()
+        match serde_json::from_str(&raw) {
+            Ok(snap) => Some(snap),
+            Err(e) => {
+                // Distinguish "corrupt" from "absent" — both used to surface
+                // as the same "no snapshot yet" message, which sends you
+                // hunting for a missing file that is sitting right there.
+                tracing::warn!("ignoring corrupt snapshot {}: {e}", path.display());
+                None
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {

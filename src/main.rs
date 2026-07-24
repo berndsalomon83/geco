@@ -55,7 +55,7 @@ fn find_config(cli: &Cli) -> Result<PathBuf> {
     }
     // ~/.config/geco/config.{yaml,yml,json} on every platform (predictable).
     // On Windows, HOME is typically unset — fall back to USERPROFILE.
-    let home = std::env::var_os("HOME").or(std::env::var_os("USERPROFILE"));
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     if let Some(home) = home {
         let dir = PathBuf::from(&home).join(".config/geco");
         for name in ["config.yaml", "config.yml", "config.json"] {
@@ -212,6 +212,12 @@ async fn main() -> Result<()> {
                 }
                 snap
             } else {
+                if stale && cached.is_some() {
+                    tracing::warn!(
+                        "serving a STALE snapshot — the config changed since it was built; \
+                         run `geco refresh` or call refresh_tools"
+                    );
+                }
                 cached.unwrap_or_else(|| {
                     tracing::warn!("serving with EMPTY snapshot — run refresh_tools");
                     Snapshot { config_hash: hash.clone(), ..Default::default() }

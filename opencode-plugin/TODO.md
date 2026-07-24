@@ -24,6 +24,19 @@ This version of opencode:
 7. `setInterval` with `unref()` — timer never fires
 8. `setInterval` without `unref()` — timer still never fires
 
+## Open Question: `plugin/` or `plugins/`?
+Unresolved, and the repo has said both. The Root Cause section above records
+`plugin/` (singular); commit 810f7fe switched the installers to `plugins/`
+(plural), which is what `install.sh` and `install.ps1` write today. Both
+uninstallers clean up either. Settle this before un-parking — installing into
+the directory opencode does not scan would look exactly like "hooks don't
+fire", and may well be part of what is recorded above.
+
+There was also a second, divergent copy of the plugin checked in at
+`.opencode/plugin/geco-tui.ts` (the project-local dir), left behind by that
+same commit. It has been removed; `opencode-plugin/geco-tui.ts` is the only
+source of truth.
+
 ## Next Steps
 1. Check opencode version — upgrade may fix TUI plugin support
 2. Check if `hooks.ts` plugin's hooks actually fire (vs just loading) — if they don't, it's an opencode-wide issue
