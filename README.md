@@ -125,6 +125,40 @@ mv ~/.config/opencode/skills/* ~/.config/opencode/skills-library/
 
 Add one line to your global AGENTS.md so models reach for it: *Before specialized work, search (kind="skills") → read_skill and follow the playbook.*
 
+### Which tools' skills work
+
+Any of them. geco has no notion of opencode here — a skill is just a directory
+containing a `SKILL.md` with YAML frontmatter, which is the Agent Skills
+layout Claude Code, Claude Desktop and opencode all use. Point `dirs` at a
+library and `absorb` at whatever directory your agent auto-loads from:
+
+```yaml
+skills:
+  dirs: ["~/.config/geco/skills-library"]   # served on demand
+  absorb:                                    # swept into the library at startup
+    - "~/.claude/skills"                     # Claude Code
+    - "~/.config/opencode/skills"            # opencode
+```
+
+Three things to know:
+
+- **`absorb` MOVES directories**, which is the point — the auto-loaded dir
+  stays empty so nothing costs always-on context. Never point it at a
+  project-level skills dir (`.claude/skills/` inside a repo): that is
+  version-controlled content and absorbing it would rewrite the working tree.
+  Use `dirs` for those instead, which only reads.
+- **Only `name`, `description` and `version` are read** from the frontmatter.
+  Host-specific fields are ignored rather than honoured — the SKILL.md body
+  reaches the model intact, but anything the host tool *enforced* from
+  frontmatter (tool restrictions, for instance) is not reproduced by geco.
+- **Bundled scripts are as portable as you wrote them.** `read_skill` hands
+  back absolute paths and the agent runs them through its own shell, so a
+  skill shipping `run.sh` needs a POSIX shell on Windows regardless of geco.
+
+The scanner itself is platform-neutral: `~` expands via `HOME` or
+`USERPROFILE`, and CRLF `SKILL.md` files parse identically to LF ones — both
+covered by tests that run on Linux, macOS and Windows.
+
 ## Config reference
 
 **Format:** YAML is the standard (`config.yaml`); JSON works identically for paste-compat with agent configs. A JSON Schema — generated from the binary's own structs, so it can't drift — powers editor validation and autocomplete: `geco schema > ~/.config/geco/geco.schema.json`, referenced from the YAML via the `# yaml-language-server: $schema=…` header (see the example file).

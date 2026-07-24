@@ -348,6 +348,25 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_survives_crlf_line_endings() {
+        // A SKILL.md authored on Windows, or checked out with
+        // core.autocrlf=true, has \r\n endings. The delimiter scan looks for
+        // "\n---", which "\r\n---" still contains — the real risk is a stray
+        // carriage return surviving inside the parsed VALUES and travelling
+        // into descriptions the model reads and search indexes.
+        let fm = parse_frontmatter(
+            "---\r\nname: a-skill\r\ndescription: does a thing\r\nversion: 1.2.0\r\n---\r\n\r\n# Body\r\n",
+        )
+        .expect("CRLF frontmatter should parse");
+        assert_eq!(fm.name.as_deref(), Some("a-skill"));
+        assert_eq!(
+            fm.description, "does a thing",
+            "no stray carriage return in the description"
+        );
+        assert_eq!(fm.version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
     fn frontmatter_absent_or_unterminated_yields_none() {
         assert!(parse_frontmatter("# No frontmatter at all\n").is_none());
         assert!(parse_frontmatter("").is_none());
