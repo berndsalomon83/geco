@@ -304,6 +304,16 @@ impl ServerConfig {
         let mut envs: BTreeMap<String, String> = std::env::vars()
             .filter(|(k, _)| passes_env_filter(k, policy))
             .collect();
+        // Windows environment names are case-insensitive, but it reports them
+        // in their stored case — `Path`, not `PATH` — and BTreeMap keys are
+        // case-sensitive. Without this, a config declaring `PATH` would leave
+        // the inherited `Path` in place too and the child would receive both,
+        // with no defined winner. Unix keeps exact matching, where `Path` and
+        // `PATH` really are two different variables.
+        #[cfg(windows)]
+        for key in declared.keys() {
+            envs.retain(|existing, _| !existing.eq_ignore_ascii_case(key));
+        }
         envs.extend(declared);
         Ok((true, envs))
     }
@@ -936,7 +946,11 @@ mcpServers:
         let (clear, envs) = s.env_for_spawn(&EnvPolicy::default()).unwrap();
 
         assert!(clear, "isolation must clear the inherited environment first");
-        assert!(envs.contains_key("PATH"), "PATH is baseline: {envs:?}");
+        // Case-insensitive: Windows reports the variable as `Path`.
+        assert!(
+            envs.keys().any(|k| k.eq_ignore_ascii_case("PATH")),
+            "PATH is baseline: {envs:?}"
+        );
         assert!(
             !envs.contains_key("GECO_ISO_SECRET"),
             "an undeclared variable must not be passed: {envs:?}"
@@ -962,6 +976,26 @@ mcpServers:
         std::env::remove_var("GECO_GLOBBED_X");
         std::env::remove_var("GECO_UNGLOBBED");
         std::env::remove_var("LC_TELEPHONE");
+    }
+
+    #[test]
+    fn isolated_env_has_no_case_duplicate_keys() {
+        // Regression (found by CI on windows-latest): the OS reports `Path`
+        // while a config declares `PATH`. With case-sensitive map keys the
+        // child received BOTH, and which one won was undefined. Meaningful
+        // only on Windows, but harmless and cheap to assert everywhere.
+        let _env = env_guard();
+        let s = stub_server(r#"{"command":["npx"],"env":{"PATH":"/only/this"}}"#);
+        let (_, envs) = s.env_for_spawn(&EnvPolicy::default()).unwrap();
+        let mut lowered: Vec<String> = envs.keys().map(|k| k.to_lowercase()).collect();
+        lowered.sort();
+        let before = lowered.len();
+        lowered.dedup();
+        assert_eq!(
+            before,
+            lowered.len(),
+            "two spellings of the same variable reach the child: {envs:?}"
+        );
     }
 
     #[test]

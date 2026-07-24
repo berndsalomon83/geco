@@ -290,7 +290,12 @@ mod tests {
 
         let (body, files) = read_skill(idx.get("council-of-minds").unwrap()).unwrap();
         assert!(body.contains("Do things"));
-        assert!(files.iter().any(|f| f.ends_with("scripts/run.sh")));
+        // Normalise separators: these are real filesystem paths, so on Windows
+        // they come back as `scripts\run.sh`.
+        assert!(
+            files.iter().any(|f| f.replace('\\', "/").ends_with("scripts/run.sh")),
+            "expected the bundled script in the inventory: {files:?}"
+        );
     }
 
     #[test]

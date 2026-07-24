@@ -54,11 +54,13 @@ jobs:
     runs-on: ubuntu-latest
     # Advisory on purpose: the codebase uses deliberate compact formatting in
     # places (single-line guard clauses, hand-aligned tables) that rustfmt
-    # would rewrite wholesale. Running it as a blocking check would mean
-    # either a large reformat commit or a pile of #[rustfmt::skip]. Left
-    # visible so the drift is known; flip continue-on-error off after a
-    # deliberate `cargo fmt` pass, if that's the direction you want.
-    continue-on-error: true
+    # would rewrite wholesale — ~177 diff hunks. Blocking on it would mean
+    # either a large reformat commit or a pile of #[rustfmt::skip].
+    #
+    # The step reports drift as a warning annotation and exits 0, so the run
+    # stays green and a genuine failure elsewhere is never lost in the noise
+    # of a permanently-red advisory job. Make this blocking (drop the `if !`)
+    # after a deliberate `cargo fmt` pass, if that's the direction you want.
     steps:
       - uses: actions/checkout@v4
 
@@ -66,4 +68,8 @@ jobs:
         with:
           components: rustfmt
 
-      - run: cargo fmt --check
+      - name: cargo fmt --check (advisory)
+        run: |
+          if ! cargo fmt --check; then
+            echo "::warning::rustfmt drift present — advisory only, see log above"
+          fi
