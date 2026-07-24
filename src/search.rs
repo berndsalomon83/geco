@@ -129,6 +129,16 @@ fn stem(t: &str) -> String {
 /// in stemmed form, since queries and documents are stemmed before lookup.
 const SYNONYM_GROUPS: &[&[&str]] = &[
     &["issue", "bug", "ticket", "defect"],
+    // NOT here, and measured rather than assumed: ["create", "open"]. The
+    // verb is what should pick create_issue out of {get_issue,
+    // add_issue_comment, create_issue}, since "open a bug report" and "file a
+    // ticket" both mean create. It lifted the semantic set (recall@1 54.5% ->
+    // 63.6%) — the very queries the table was built from — while the HELD-OUT
+    // set fell (87.5% -> 75.0%, MRR 0.938 -> 0.875) and overall MRR stayed
+    // flat. "any open defects?" wants list_issues, and open->create promotes
+    // create_issue over it. Trading unseen accuracy for training accuracy at
+    // no net gain is the definition of overfitting; re-measure both groups
+    // before reintroducing any verb mapping.
     &["write", "save"],
     &["size", "big", "large"],
     &["store", "remember", "memorize"],

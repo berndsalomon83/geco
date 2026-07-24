@@ -227,6 +227,34 @@ fn evaluate() -> Report {
     }
 }
 
+/// Not a gate — a window. Prints what search actually returns for a handful
+/// of representative queries, so "why did it pick that?" can be answered by
+/// looking rather than guessing. The eval only prints outright misses, which
+/// hides the near-misses and the reasons behind a correct-but-lucky hit.
+#[test]
+fn show_top_hits_for_sample_queries() {
+    let corpus = load_corpus();
+    let snap = build_snapshot(&corpus);
+
+    eprintln!("\n=== what search returns (top 3) ===");
+    for q in [
+        "open a bug report",
+        "file a ticket",
+        "save text to disk",
+        "remember this",
+        "what do you know about this project",
+        "take a picture of the page",
+    ] {
+        let hits = geco::search::search(&snap, q, 3);
+        let shown: Vec<String> = hits
+            .iter()
+            .map(|h| format!("{}({:.2})", h.tool, h.coverage))
+            .collect();
+        eprintln!("  {q:38} -> {}", shown.join(", "));
+    }
+    eprintln!();
+}
+
 /// Standalone experiment, not a gate. Reports whether IDF-weighted coverage
 /// of the top hit separates correct answers from confidently-wrong ones, and
 /// what a threshold would cost in false alarms on answers that were right.
