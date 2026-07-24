@@ -26,3 +26,14 @@ updates:
       interval: weekly
     commit-message:
       prefix: "ci"
+    ignore:
+      # dtolnay/rust-toolchain is pinned TWICE for different reasons. The msrv
+      # job pins it to the exact Rust version in Cargo.toml's `rust-version`,
+      # where it is a floor to test against, not a dependency to keep fresh.
+      # Dependabot proposed 1.88.0 -> 1.100.0, which would have left that job
+      # green while testing nothing: it would compile against a toolchain 12
+      # releases past the floor it exists to guard.
+      #
+      # Raising the MSRV should start in Cargo.toml, deliberately, with the
+      # job following. Until then this action moves by hand.
+      - dependency-name: "dtolnay/rust-toolchain"
