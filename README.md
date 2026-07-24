@@ -306,7 +306,9 @@ That covers the one case nothing else does: a backend **upgraded in place**, whe
 
 ## Self-healing backends
 
-Warm backends that crash silently (child process exits) are detected by a background health check every 30 seconds (configurable via `health_check_secs`, 0 to disable). The dead connection is reset so the next `execute` reconnects fresh instead of erroring — the agent never sees a stale failure.
+Warm backends that crash silently (child process exits) are detected two ways, and it takes both. Any `execute` against a dead backend notices immediately and reconnects fresh — that path is reactive, so the triggering call still fails once. To close that window, a background check every 30 seconds (configurable via `health_check_secs`, `0` to disable) **actively probes** each warm backend with a `list_tools` round-trip and resets the ones that don't answer, so an idle backend that died between calls is usually cleared before the next `execute` reaches it.
+
+The probe is necessary rather than incidental: a dead child leaves the connection *looking* open — the client only notices the broken pipe when it next sends something — so a passive "is the socket closed?" check reports an idle-dead backend as healthy indefinitely. `list_tools` is used rather than the spec's `ping` because every backend geco can proxy answers it (it is how the snapshot is built), whereas a live server that happens not to implement `ping` would be reset on every sweep.
 
 ## Reporting problems
 
