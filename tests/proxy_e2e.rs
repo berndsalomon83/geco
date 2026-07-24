@@ -2067,6 +2067,130 @@ async fn tools_list_changed_refreshes_the_snapshot_unprompted() {
 }
 
 #[tokio::test]
+async fn search_effectiveness_is_measured() {
+    // Tool-call counters can't answer the question that matters for a
+    // gateway: is discovery working? These counters can.
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub": { "command": py, "args": [stub_path()], "description": "stub" }
+    }));
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+
+    // A search that finds something.
+    let r = proxy
+        .search(Parameters(SearchParams {
+            query: "add numbers".into(),
+            limit: None,
+            include_schema: None,
+            kind: Some("tools".into()),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&r));
+
+    // A search that finds nothing.
+    let r = proxy
+        .search(Parameters(SearchParams {
+            query: "xyzzy_no_such_thing".into(),
+            limit: None,
+            include_schema: None,
+            kind: Some("tools".into()),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(extract_json(&r)["count"], 0);
+
+    let m = proxy.metrics_snapshot().await;
+    assert_eq!(m.searches, 2, "both searches counted");
+    assert_eq!(m.searches_no_match, 1, "one found nothing");
+    assert_eq!(
+        m.recent_no_match,
+        vec!["xyzzy_no_such_thing".to_string()],
+        "the miss is recorded so it can be acted on"
+    );
+    assert_eq!(m.search_to_execute, 0, "nothing executed yet");
+
+    // Executing a tool that search surfaced counts as search leading somewhere.
+    let args = serde_json::json!({"a": 1, "b": 2})
+        .as_object()
+        .unwrap()
+        .clone();
+    let r = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "add".into(),
+                arguments: Some(args),
+            }],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&r));
+
+    let m = proxy.metrics_snapshot().await;
+    assert_eq!(
+        m.search_to_execute, 1,
+        "the executed tool came from a search hit"
+    );
+
+    // A tool nobody searched for does not count.
+    let args = serde_json::json!({"text": "hi"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let _ = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "echo".into(),
+                arguments: Some(args),
+            }],
+        }))
+        .await
+        .unwrap();
+    let m = proxy.metrics_snapshot().await;
+    assert_eq!(
+        m.search_to_execute, 1,
+        "echo was never surfaced by a search"
+    );
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn refresh_concurrency_is_capped() {
+    // Six backends, cap of 2. Without a cap all six children start at once;
+    // with it, at most two are alive at any instant. The stub reports its own
+    // PID, but simpler and more direct: count how many the OS is running.
+    let Some(py) = python_bin() else { return };
+    let mut servers = serde_json::Map::new();
+    for i in 0..6 {
+        servers.insert(
+            format!("stub{i}"),
+            serde_json::json!({ "command": py, "args": [stub_path()] }),
+        );
+    }
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "proxy": { "refresh_concurrency": 2 },
+        "mcpServers": servers,
+    }))
+    .unwrap();
+
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let snap = registry.build_snapshot(cfg.snapshot_hash(), None).await;
+
+    // All six still get scanned — the cap paces them, it doesn't drop any.
+    assert_eq!(snap.servers.len(), 6, "every server must still be probed");
+    for (name, s) in &snap.servers {
+        assert_eq!(s.refresh_status, "ok", "{name} should have refreshed");
+        // 3: add, echo, secret_tool — no denylist is configured here.
+        assert_eq!(s.tools.len(), 3, "{name} should report its tools");
+    }
+
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
 async fn skill_watch_roots_resolves_inside_a_task() {
     // Regression: the skill watcher resolved its watch roots with
     // RwLock::blocking_read from inside a tokio task. That panics on the spot

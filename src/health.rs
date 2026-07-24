@@ -74,12 +74,28 @@ pub struct BackendMetrics {
     pub last_call_at: Option<String>,
 }
 
+/// `#[serde(default)]` at the struct level so a health.json written by an
+/// older geco still loads when fields are added.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Metrics {
     pub started_at: String,
     pub total_calls: u64,
     pub total_errors: u64,
     pub per_backend: std::collections::BTreeMap<String, BackendMetrics>,
+    /// Search effectiveness. A tool the agent cannot find may as well not be
+    /// installed, so these answer the question the tool-call counters can't:
+    /// is discovery actually working?
+    pub searches: u64,
+    /// Searches that returned nothing at all.
+    pub searches_no_match: u64,
+    /// Executions of a tool that a recent search had surfaced — i.e. search
+    /// led somewhere, rather than the agent finding the tool another way.
+    pub search_to_execute: u64,
+    /// The most recent queries that matched nothing, capped. This is the
+    /// actionable list: each one is either a missing tool or a description
+    /// that doesn't say what the tool is for.
+    pub recent_no_match: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

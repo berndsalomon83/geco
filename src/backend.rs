@@ -223,18 +223,13 @@ impl Backend {
                 self.name
             );
         }
-        let conn = self
-            .connection(Duration::from_secs(proxy.startup_timeout_secs))
-            .await?;
+        let conn = self.connection(self.cfg.startup_timeout(proxy)).await?;
         let mut params = CallToolRequestParams::new(tool.to_string());
         if let Some(args) = arguments {
             params = params.with_arguments(args);
         }
-        let res = tokio::time::timeout(
-            Duration::from_secs(proxy.call_timeout_secs),
-            conn.call_tool(params),
-        )
-        .await;
+        let call_timeout = self.cfg.call_timeout(proxy);
+        let res = tokio::time::timeout(call_timeout, conn.call_tool(params)).await;
         match res {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(e)) => {
@@ -278,7 +273,7 @@ impl Backend {
                 Err(anyhow!(
                     "backend '{}' timed out after {}s calling '{tool}'",
                     self.name,
-                    proxy.call_timeout_secs
+                    call_timeout.as_secs()
                 ))
             }
         }
@@ -287,8 +282,8 @@ impl Backend {
     /// List tools for the snapshot. Reuses a live connection if present,
     /// otherwise connects briefly and tears down again (stays lazy).
     pub async fn snapshot_tools(&self, proxy: &ProxyConfig) -> Result<Vec<ToolSnapshot>> {
-        let startup = Duration::from_secs(proxy.startup_timeout_secs);
-        let list_timeout = Duration::from_secs(proxy.call_timeout_secs);
+        let startup = self.cfg.startup_timeout(proxy);
+        let list_timeout = self.cfg.call_timeout(proxy);
         let (conn, ephemeral) = {
             let guard = self.conn.lock().await;
             match guard.as_ref() {
@@ -390,6 +385,16 @@ impl Registry {
             generated_at: now(),
             ..Default::default()
         };
+        // Cap how many backends start at once. Every one of these spawns a
+        // child process, so an uncapped refresh of a large config is a
+        // process storm at exactly the wrong moment — agent startup.
+        let limit = if self.proxy.refresh_concurrency == 0 {
+            usize::MAX
+        } else {
+            self.proxy.refresh_concurrency
+        };
+        let permits = Arc::new(tokio::sync::Semaphore::new(limit));
+
         let mut join = tokio::task::JoinSet::new();
         for (name, backend) in &self.backends {
             if let Some(filter) = only {
@@ -400,7 +405,13 @@ impl Registry {
             let backend = backend.clone();
             let proxy = self.proxy.clone();
             let name = name.clone();
+            let permits = permits.clone();
             join.spawn(async move {
+                // Held until this backend is done being probed. A closed
+                // semaphore can't happen here (nothing closes it), so failing
+                // to acquire just means proceeding uncapped rather than
+                // silently dropping the server from the snapshot.
+                let _permit = permits.acquire_owned().await.ok();
                 let result = backend.snapshot_tools(&proxy).await;
                 (name, backend.cfg.description.clone(), result)
             });

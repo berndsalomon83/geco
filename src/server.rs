@@ -167,6 +167,10 @@ pub struct Proxy {
     client: Arc<RwLock<Option<String>>>,
     metrics: Arc<RwLock<crate::health::Metrics>>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// (server, tool) pairs recently surfaced by `search`, so `execute` can
+    /// tell whether search actually led anywhere. Bounded ring buffer — this
+    /// is a coarse signal, not an audit trail.
+    recent_search_hits: Arc<RwLock<std::collections::VecDeque<(String, String)>>>,
     /// Backends report `tools/list_changed` here. Kept so reload_from_config
     /// can wire up the registry it builds.
     tool_change_tx: tokio::sync::mpsc::Sender<String>,
@@ -174,6 +178,12 @@ pub struct Proxy {
     /// Clone and a Receiver is not, hence the Option-in-a-Mutex.
     tool_change_rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<String>>>>,
 }
+
+/// How many (server, tool) hits to remember for the search→execute signal.
+const RECENT_HITS_CAP: usize = 64;
+/// How many zero-result queries to keep in metrics. Bounded because this ends
+/// up in health.json on disk, and it's a diagnostic aid, not a query log.
+const RECENT_NO_MATCH_CAP: usize = 20;
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
     let text = serde_json::to_string_pretty(&v).unwrap_or_else(|e| format!("serialize error: {e}"));
@@ -376,6 +386,7 @@ impl Proxy {
             client: Arc::new(RwLock::new(None)),
             metrics: Arc::new(RwLock::new(metrics)),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            recent_search_hits: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             tool_change_tx,
             tool_change_rx: Arc::new(std::sync::Mutex::new(Some(tool_change_rx))),
         }
@@ -1078,6 +1089,36 @@ impl Proxy {
             }
         }
 
+        // Record what search did, so its effectiveness is measurable in
+        // production and not only against the eval corpus.
+        {
+            let mut m = self.metrics.write().await;
+            m.searches += 1;
+            if results.is_empty() {
+                m.searches_no_match += 1;
+                // Keep the misses: each is either a tool that doesn't exist
+                // or one whose description doesn't say what it's for.
+                m.recent_no_match.push(p.query.clone());
+                let overflow = m.recent_no_match.len().saturating_sub(RECENT_NO_MATCH_CAP);
+                if overflow > 0 {
+                    m.recent_no_match.drain(0..overflow);
+                }
+            }
+        }
+        if !results.is_empty() {
+            let mut recent = self.recent_search_hits.write().await;
+            for r in &results {
+                if r["kind"] == "tool" {
+                    if let (Some(s), Some(t)) = (r["server"].as_str(), r["name"].as_str()) {
+                        recent.push_back((s.to_string(), t.to_string()));
+                    }
+                }
+            }
+            while recent.len() > RECENT_HITS_CAP {
+                recent.pop_front();
+            }
+        }
+
         // Finding nothing is a valid answer, not a failure — this used to
         // return is_error, which tells the model the call itself broke.
         if results.is_empty() {
@@ -1127,6 +1168,18 @@ impl Proxy {
         let (registry, proxy_cfg) = {
             let guard = self.registry.read().await;
             (guard.clone(), guard.proxy.clone())
+        };
+        // Did search lead here? Snapshot the recent hits before running, so a
+        // concurrent search can't retroactively take credit.
+        let from_search: std::collections::HashSet<(String, String)> = {
+            let recent = self.recent_search_hits.read().await;
+            let wanted: std::collections::HashSet<(String, String)> =
+                call_names.iter().cloned().collect();
+            recent
+                .iter()
+                .filter(|p| wanted.contains(*p))
+                .cloned()
+                .collect()
         };
 
         let mut join = tokio::task::JoinSet::new();
@@ -1235,10 +1288,14 @@ impl Proxy {
                     if !ok && matches!(code.as_str(), "timeout" | "backend_error") {
                         needs_health_update = true;
                     }
+                    let tool = results[i]["tool"].as_str().unwrap_or("").to_string();
                     let mut metrics = self.metrics.write().await;
                     metrics.total_calls += 1;
                     if !ok {
                         metrics.total_errors += 1;
+                    }
+                    if from_search.contains(&(server.clone(), tool)) {
+                        metrics.search_to_execute += 1;
                     }
                     // Don't create a per-backend row for a server that doesn't
                     // exist — a typo'd name would otherwise show up as a

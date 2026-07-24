@@ -109,7 +109,26 @@ async fn main() -> Result<()> {
                     eprintln!("geco metrics (since {})", metrics.started_at);
                     eprintln!("  total calls:    {}", metrics.total_calls);
                     eprintln!("  total errors:   {}", metrics.total_errors);
+                    if metrics.searches > 0 {
+                        let miss_pct =
+                            metrics.searches_no_match as f64 * 100.0 / metrics.searches as f64;
+                        eprintln!(
+                            "  searches:       {} ({} found nothing, {:.0}%)",
+                            metrics.searches, metrics.searches_no_match, miss_pct
+                        );
+                        eprintln!(
+                            "  search → exec:  {} (calls to a tool search had surfaced)",
+                            metrics.search_to_execute
+                        );
+                    }
                     eprintln!();
+                    if !metrics.recent_no_match.is_empty() {
+                        eprintln!("queries that matched nothing (most recent last):");
+                        for q in &metrics.recent_no_match {
+                            eprintln!("  {q}");
+                        }
+                        eprintln!();
+                    }
                     eprintln!(
                         "{:24} {:>6} {:>6} {:>5} {:>8}  last_call",
                         "server", "calls", "errors", "cold", "avg_ms"

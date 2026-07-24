@@ -13,6 +13,7 @@ proxy:
   startup_timeout_secs: 60     # first npx run downloads — be generous
   refresh_on_start: true       # re-scan when this file's hash changes
   health_check_secs: 30        # 0 to disable dead-backend detection
+  refresh_concurrency: 8       # backends probed at once on refresh (0 = all)
 
   # Backends do NOT inherit geco's environment (since 0.7). Each child gets
   # an OS/runtime baseline — PATH, HOME, TMPDIR, locale, TLS trust, proxy
@@ -25,6 +26,10 @@ mcpServers:
   playwright:
     command: [npx, "@playwright/mcp@latest"]
     description: "Browser automation: navigate, click, screenshots, E2E checks."
+    # Per-server timeout overrides, for the one backend that's legitimately
+    # slow — rather than loosening the bound for every other server too.
+    startup_timeout_secs: 120
+    call_timeout_secs: 300
 
   context7:
     command: [npx, -y, "@upstash/context7-mcp"]

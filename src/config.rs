@@ -43,6 +43,13 @@ pub struct ProxyConfig {
     /// `GITHUB_TOKEN` exported in your shell for one server isn't handed to
     /// every other server you run. Set true to restore inheritance.
     pub inherit_env: bool,
+    /// How many backends may be probed at once during a snapshot refresh.
+    ///
+    /// A refresh spawns every configured server to ask for its tool list. With
+    /// no cap, twenty `npx` backends means twenty node processes starting at
+    /// the same instant — a memory and CPU spike right at agent startup, which
+    /// is the worst possible moment for it. 0 means unlimited.
+    pub refresh_concurrency: usize,
     /// Extra variables to pass through to every backend when isolating,
     /// as glob patterns (`*` wildcard), e.g. `["NODE_*", "DOCKER_HOST"]`.
     ///
@@ -63,6 +70,7 @@ impl Default for ProxyConfig {
             health_check_secs: 30,
             inherit_env: false,
             env_passthrough: Vec::new(),
+            refresh_concurrency: 8,
         }
     }
 }
@@ -301,6 +309,15 @@ pub struct ServerConfig {
     /// behaviour for optional ones; use `env` to fail loudly instead.
     #[serde(default)]
     pub pass_env: Vec<String>,
+    /// Override `proxy.call_timeout_secs` for this server only.
+    /// For the one backend that is legitimately slow, instead of loosening
+    /// the bound for every other server too.
+    #[serde(default)]
+    pub call_timeout_secs: Option<u64>,
+    /// Override `proxy.startup_timeout_secs` for this server only — e.g. a
+    /// backend whose first run downloads a large package.
+    #[serde(default)]
+    pub startup_timeout_secs: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -378,6 +395,19 @@ impl ServerConfig {
         }
         envs.extend(declared);
         Ok((true, envs))
+    }
+
+    /// Seconds allowed for a call to this backend, per-server override first.
+    pub fn call_timeout(&self, proxy: &ProxyConfig) -> std::time::Duration {
+        std::time::Duration::from_secs(self.call_timeout_secs.unwrap_or(proxy.call_timeout_secs))
+    }
+
+    /// Seconds allowed for this backend to start and initialize.
+    pub fn startup_timeout(&self, proxy: &ProxyConfig) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.startup_timeout_secs
+                .unwrap_or(proxy.startup_timeout_secs),
+        )
     }
 
     /// Allow/deny filter for a backend tool name. Deny wins.
@@ -752,6 +782,22 @@ impl Config {
                         format!("server '{name}': pass_env '{var}' not set in proxy environment"),
                     ));
                 }
+            }
+            // Per-server timeout overrides get the same zero check as the
+            // proxy-level ones — a 0 here fails just as instantly.
+            if s.call_timeout_secs == Some(0) {
+                findings.push((
+                    "error".into(),
+                    format!(
+                        "server '{name}': call_timeout_secs is 0 — every call times out instantly"
+                    ),
+                ));
+            }
+            if s.startup_timeout_secs == Some(0) {
+                findings.push((
+                    "error".into(),
+                    format!("server '{name}': startup_timeout_secs is 0 — it will never finish starting"),
+                ));
             }
             // Empty glob patterns.
             for p in s.allow.iter().chain(s.deny.iter()) {
@@ -1177,6 +1223,54 @@ mcpServers:
             "inherit mode layers only declared vars: {envs:?}"
         );
         assert_eq!(envs["A"], "1");
+    }
+
+    #[test]
+    fn per_server_timeouts_override_the_proxy_defaults() {
+        let proxy = ProxyConfig::default();
+        let plain = stub_server(r#"{"command":["npx"]}"#);
+        assert_eq!(
+            plain.call_timeout(&proxy).as_secs(),
+            proxy.call_timeout_secs
+        );
+        assert_eq!(
+            plain.startup_timeout(&proxy).as_secs(),
+            proxy.startup_timeout_secs
+        );
+
+        // One slow backend shouldn't force a loose bound on all the others.
+        let slow = stub_server(
+            r#"{"command":["npx"],"call_timeout_secs":600,"startup_timeout_secs":900}"#,
+        );
+        assert_eq!(slow.call_timeout(&proxy).as_secs(), 600);
+        assert_eq!(slow.startup_timeout(&proxy).as_secs(), 900);
+    }
+
+    #[test]
+    fn validate_catches_zero_per_server_timeouts() {
+        let _env = env_guard();
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"call_timeout_secs":0,"startup_timeout_secs":0}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "error" && m.contains("call_timeout_secs is 0")),
+            "expected error for zero per-server call timeout: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "error" && m.contains("startup_timeout_secs is 0")),
+            "expected error for zero per-server startup timeout: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_concurrency_has_a_sane_default() {
+        // 0 means unlimited, which is a deliberate opt-in rather than the
+        // default — an uncapped refresh is a process storm at startup.
+        assert_eq!(ProxyConfig::default().refresh_concurrency, 8);
     }
 
     #[test]
