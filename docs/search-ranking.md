@@ -132,6 +132,19 @@ The cheap middle paths were investigated and ruled out (above). This is a
 genuine architecture decision, and it now rests on measured evidence rather than
 hope.
 
+**Attempted, and rejected as packaged (branch `fix/search-generalization`,
+2026-07):** a prototype wired in `fastembed` / all-MiniLM-L6-v2 as a BM25F →
+embedding rerank. The *architecture* was right — the exact option 2 above,
+with graceful fallback to lexical. But it overshot everything that makes geco
+geco: it committed the 22 MB model into git (the download cache), pulled
+onnxruntime *and* an OpenSSL system dependency (it would not compile without
+`libssl-dev`), defaulted the heavy path ON, and deleted this very document and
+the eval harness. The one number that decides the fork — does rerank beat 13%
+on `labeled_eval`? — was never obtained, because it would not build. Kept as
+proof the wiring is possible; the branch itself was deleted. If the fork is
+taken, build it opt-in (off by default, `rustls` not OpenSSL, model downloaded
+not committed, harness kept) and **measure before committing to onnxruntime.**
+
 ---
 
 ## Reproducing the measurements
