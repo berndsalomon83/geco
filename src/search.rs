@@ -129,16 +129,14 @@ fn stem(t: &str) -> String {
 /// in stemmed form, since queries and documents are stemmed before lookup.
 const SYNONYM_GROUPS: &[&[&str]] = &[
     &["issue", "bug", "ticket", "defect"],
-    // NOT here, and measured rather than assumed: ["create", "open"]. The
-    // verb is what should pick create_issue out of {get_issue,
-    // add_issue_comment, create_issue}, since "open a bug report" and "file a
-    // ticket" both mean create. It lifted the semantic set (recall@1 54.5% ->
-    // 63.6%) — the very queries the table was built from — while the HELD-OUT
-    // set fell (87.5% -> 75.0%, MRR 0.938 -> 0.875) and overall MRR stayed
-    // flat. "any open defects?" wants list_issues, and open->create promotes
-    // create_issue over it. Trading unseen accuracy for training accuracy at
-    // no net gain is the definition of overfitting; re-measure both groups
-    // before reintroducing any verb mapping.
+    // NOT here, deliberately: ["create", "open"]. As a symmetric entry it
+    // lifted the semantic set (recall@1 54.5% -> 63.6%) — the very queries
+    // the table was built from — while the HELD-OUT set fell (87.5% ->
+    // 75.0%) and overall MRR stayed flat. "any open defects?" wants
+    // list_issues, and open->create promotes create_issue over it.
+    // The mapping is real; making it symmetric was the mistake. It lives in
+    // leading_verb_synonyms() instead, where position disambiguates verb
+    // from adjective. Keep verb mappings out of this table.
     &["write", "save"],
     &["size", "big", "large"],
     &["store", "remember", "memorize"],
@@ -158,6 +156,25 @@ const SYNONYM_GROUPS: &[&[&str]] = &[
 /// Without the discount, "bug" hitting a tool that says "issue" would rank
 /// level with one that says "bug", and literal matches should win.
 const SYNONYM_WEIGHT: f64 = 0.6;
+
+/// Verb synonyms applied ONLY to the first token of a query, and only in one
+/// direction.
+///
+/// The failure this targets: "open a bug report" and "file a ticket" put
+/// create_issue THIRD, behind get_issue and add_issue_comment, because
+/// bug/ticket -> issue matches all three equally. The word that picks one out
+/// is the verb, and both phrases mean create.
+///
+/// A plain symmetric entry for this measured WORSE — see the note in
+/// SYNONYM_GROUPS. Position is what makes it safe: in "any open defects?"
+/// the same word is an adjective, and it isn't leading, so nothing fires. An
+/// imperative request puts its verb first; that is the whole heuristic.
+fn leading_verb_synonyms(token: &str) -> &'static [&'static str] {
+    match token {
+        "open" | "file" | "raise" | "log" => &["create"],
+        _ => &[],
+    }
+}
 
 fn synonym_table() -> &'static HashMap<String, Vec<String>> {
     static TABLE: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
@@ -246,8 +263,11 @@ pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<Ranked> {
     if docs.is_empty() {
         return Vec::new();
     }
+    let ordered = tokenize(query);
+    // Position is lost by the sort below, so capture the leading token first.
+    let leading = ordered.first().cloned();
     let q_tokens = {
-        let mut t = tokenize(query);
+        let mut t = ordered;
         t.sort();
         t.dedup();
         t
@@ -255,9 +275,20 @@ pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<Ranked> {
     let table = synonym_table();
     let q_terms: Vec<QueryTerm> = q_tokens
         .iter()
-        .map(|t| QueryTerm {
-            token: t.clone(),
-            synonyms: table.get(t).cloned().unwrap_or_default(),
+        .map(|t| {
+            let mut synonyms = table.get(t).cloned().unwrap_or_default();
+            if leading.as_deref() == Some(t.as_str()) {
+                for extra in leading_verb_synonyms(t) {
+                    let extra = (*extra).to_string();
+                    if !synonyms.contains(&extra) {
+                        synonyms.push(extra);
+                    }
+                }
+            }
+            QueryTerm {
+                token: t.clone(),
+                synonyms,
+            }
         })
         .collect();
     let fields: Vec<Fields> = docs.iter().map(Fields::of).collect();
@@ -487,5 +518,40 @@ mod tests {
     #[test]
     fn no_match_returns_nothing() {
         assert!(search(&snap(), "xyzzy_nonexistent", 5).is_empty());
+    }
+
+    /// Position is the entire justification for the leading-verb table, so
+    /// test position rather than the mapping. A symmetric open -> create
+    /// passes the first assertion and fails the second.
+    #[test]
+    fn leading_verb_expands_but_the_same_word_later_does_not() {
+        let mut s = Snapshot::default();
+        s.servers.insert(
+            "github".into(),
+            ServerSnapshot {
+                tools: vec![
+                    ToolSnapshot {
+                        name: "create_issue".into(),
+                        description: "Create a new issue in a repository".into(),
+                        input_schema: serde_json::json!({}),
+                    },
+                    ToolSnapshot {
+                        name: "list_issues".into(),
+                        description: "List issues in a repository".into(),
+                        input_schema: serde_json::json!({}),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        // Leading: a verb. "open a bug report" means create one.
+        let hits = search(&s, "open a bug report", 5);
+        assert_eq!(hits[0].tool, "create_issue", "got {hits:?}");
+
+        // Not leading: an adjective describing existing issues, so the same
+        // word must not drag create_issue to the top.
+        let hits = search(&s, "any open defects", 5);
+        assert_eq!(hits[0].tool, "list_issues", "got {hits:?}");
     }
 }
