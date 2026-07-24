@@ -1971,3 +1971,142 @@ async fn skill_watch_roots_resolves_inside_a_task() {
 
     registry.shutdown_all().await;
 }
+
+// ---------------------------------------------------------------------------
+// The background watchers.
+//
+// spawn_hot_reload, spawn_skill_reload and spawn_health_check were called by
+// exactly one place — main.rs — and by no test at all. Coverage put src/
+// server.rs at 70% with ~291 uncovered lines, and this is most of them.
+//
+// That gap has already cost real money once: the skill watcher resolved its
+// paths with a blocking lock read inside an async task, which panics on the
+// spot, so hot-reload never ran for anyone. Nothing failed, nothing logged,
+// the feature was simply absent. A test that only calls reload_from_config
+// directly — as the existing ones do, deliberately — cannot see that, because
+// the bug is in the wiring, not the work.
+//
+// These drive the real thing: touch a file, wait, assert the proxy noticed.
+// Filesystem events are asynchronous and platform-dependent, so they poll
+// with a generous ceiling rather than sleeping a fixed amount, and they fail
+// loudly rather than skipping when nothing happens.
+// ---------------------------------------------------------------------------
+
+/// Poll `check` until it returns true, or fail after `secs`.
+async fn wait_until<F, Fut>(secs: u64, what: &str, mut check: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if check().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("timed out after {secs}s waiting for: {what}");
+}
+
+#[tokio::test]
+async fn config_watcher_rebuilds_the_snapshot_on_a_real_file_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.yaml");
+    let write_config = |desc: &str| {
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "mcpServers:\n  s:\n    command: [\"/nonexistent/binary\"]\n    description: \"{desc}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+
+    // The backend cannot spawn, which is fine and even useful: the server's
+    // *description* comes from the config, so it proves the config was
+    // re-read without needing a working MCP server on the test machine.
+    write_config("before");
+    let cfg = Config::load(&cfg_path).unwrap();
+    let registry = Registry::from_config(&cfg);
+    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), None).await;
+    let proxy = Proxy::new(
+        registry,
+        snapshot,
+        dir.path().join("snapshot.json"),
+        cfg_path.clone(),
+        vec![],
+        vec![],
+    );
+
+    proxy.clone().spawn_hot_reload();
+    // Give the watcher time to arm before touching the file, or the event is
+    // missed and the test fails for the wrong reason.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // The watcher gates on mtime, and some filesystems have coarse
+    // granularity — make sure the timestamp genuinely differs.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    write_config("after");
+
+    // Asserted through list_mcp_servers rather than the private snapshot
+    // field: what matters is that the AGENT sees the new config, which is a
+    // stronger claim than an internal struct having been updated.
+    wait_until(30, "the config watcher to rebuild the snapshot", || async {
+        let json = extract_json(&proxy.list_mcp_servers().await.unwrap());
+        json["servers"]
+            .as_array()
+            .and_then(|a| a.first())
+            .map(|s| s["description"] == "after")
+            .unwrap_or(false)
+    })
+    .await;
+
+    proxy.set_shutdown();
+}
+
+#[tokio::test]
+async fn skill_watcher_picks_up_a_skill_added_on_disk() {
+    let lib = make_skill_library();
+    let lib_path = lib.path().to_string_lossy().to_string();
+
+    let cfg = config_from(serde_json::json!({}));
+    let (proxy, _registry) = make_proxy_with_skills(&cfg, vec![lib_path.clone()]).await;
+
+    let skill_count = |p: &Proxy| {
+        let p = p.clone();
+        async move {
+            extract_json(&p.list_skills().await.unwrap())["count"]
+                .as_u64()
+                .unwrap_or(0)
+        }
+    };
+    assert_eq!(
+        skill_count(&proxy).await,
+        2,
+        "fixture should start with two skills"
+    );
+
+    proxy.clone().spawn_skill_reload();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Add a third skill the way a user would — by dropping a directory in.
+    let new_skill = lib.path().join("db-migrator");
+    std::fs::create_dir_all(&new_skill).unwrap();
+    std::fs::write(
+        new_skill.join("SKILL.md"),
+        "---\nname: db-migrator\ndescription: Migrate database schemas safely\n---\n\n# DB Migrator\n",
+    )
+    .unwrap();
+
+    // If the watcher task panicked on startup — the real bug this guards —
+    // nothing here ever changes and this fails rather than passing silently.
+    wait_until(30, "the skill watcher to notice a new skill", || async {
+        extract_json(&proxy.list_skills().await.unwrap())["skills"]
+            .as_array()
+            .map(|a| a.iter().any(|s| s["name"] == "db-migrator"))
+            .unwrap_or(false)
+    })
+    .await;
+
+    proxy.set_shutdown();
+}

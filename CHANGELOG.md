@@ -8,6 +8,18 @@ minor bump may break.
 
 ### Added
 
+- **The config and skill watchers are finally tested.** `spawn_hot_reload`
+  and `spawn_skill_reload` were called by exactly one place — `main.rs` — and
+  by no test at all; the existing hot-reload test called `reload_from_config`
+  directly and said so in a comment. That gap already cost one silent
+  feature: the skill watcher resolved paths with a blocking lock read inside
+  an async task, which panics instantly, so hot-reload never ran for anyone
+  and nothing reported it. A test that skips the wiring cannot catch a bug in
+  the wiring. These drive the real thing — write a file, poll, assert the
+  agent sees the change through `list_mcp_servers` / `list_skills` rather
+  than through a private field. Verified by disabling both watchers, which
+  fails both tests. `server.rs` coverage 70% → 81%.
+
 - **`scripts/lint.sh`** — runs CI's `lint` job locally (shellcheck,
   actionlint, typos, gitleaks, PSScriptAnalyzer). Missing tools are skipped
   rather than fatal, but it always prints which ones it did **not** run: a
