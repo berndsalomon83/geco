@@ -19,6 +19,12 @@ use crate::snapshot::{ServerSnapshot, Snapshot, ToolSnapshot};
 
 type Conn = Arc<RunningService<RoleClient, BackendClient>>;
 
+/// How long a health probe may take before the backend is presumed dead.
+/// Short, because the probe is a local `list_tools` round-trip over a pipe —
+/// a live child answers in milliseconds — but not so short that a briefly
+/// busy backend is killed for one slow response.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The client half of a backend connection.
 ///
 /// Exists so geco can react to `notifications/tools/list_changed`. The unit
@@ -324,23 +330,76 @@ impl Backend {
         *self.status.lock().await = Status::Cold;
     }
 
-    /// Check if a warm backend's connection is still alive. If the child
-    /// process has died, `RunningService::is_closed()` returns true and we
-    /// reset the connection so the next `call` reconnects fresh.
+    /// Is a warm backend's connection actually alive? A cold backend has
+    /// nothing to check and passes.
+    ///
+    /// This ACTIVELY PROBES, because `is_closed()` alone is not enough.
+    /// `is_closed()` reports whether *our* side tore the service down — it
+    /// flips when the peer read loop sees EOF while a request is in flight,
+    /// but an rmcp client only reads the transport when it has an outstanding
+    /// request. A child that dies while IDLE therefore leaves `is_closed()`
+    /// false indefinitely: measured, the connection still reported healthy 10
+    /// seconds after the child was killed, while a real call failed at once.
+    /// So the periodic checker — whose entire job is to catch a silently-dead
+    /// idle backend before the agent does — was blind to exactly that case.
+    ///
+    /// The probe is `list_tools`, not the spec's `ping`, on purpose. Ping is
+    /// a MUST that real servers nonetheless skip, and a live backend that
+    /// ignored ping would be reset on every sweep — worse than the bug this
+    /// fixes. Every backend geco can proxy answers `list_tools`, because geco
+    /// calls it to build the snapshot in the first place; a server that
+    /// didn't could not be used at all. It travels the same transport a real
+    /// call would, so a dead child fails it.
     pub async fn check_health(&self) -> bool {
-        let mut guard = self.conn.lock().await;
-        let is_dead = guard.as_ref().map(|c| c.is_closed()).unwrap_or(false);
-        if is_dead {
-            tracing::warn!("backend '{}' connection is dead — resetting", self.name);
-            *guard = None;
-            drop(guard);
-            *self.status.lock().await = Status::Failed {
-                error: "connection lost (child process exited)".into(),
-                at: now(),
-            };
-            return false;
+        // Snapshot the connection, then release the lock: the probe can take
+        // up to HEALTH_PROBE_TIMEOUT, and holding the lock across it would
+        // stall every concurrent call and shutdown for that long.
+        let conn = {
+            let guard = self.conn.lock().await;
+            match guard.as_ref() {
+                Some(c) => c.clone(),
+                None => return true, // cold — nothing to check
+            }
+        };
+
+        let dead = if conn.is_closed() {
+            true // definitively torn down; no need to probe
+        } else {
+            match tokio::time::timeout(HEALTH_PROBE_TIMEOUT, conn.list_all_tools()).await {
+                Ok(Ok(_)) => false, // answered — alive
+                Ok(Err(_)) => true, // transport/protocol error — dead
+                Err(_) => true,     // no answer in time — treat as dead
+            }
+        };
+
+        if !dead {
+            return true;
         }
-        true
+
+        // Reset — but only if the connection we probed is still the current
+        // one. A concurrent `call` may have already detected the death and
+        // reconnected, or a `shutdown` may have cleared it; clobbering either
+        // would be its own bug. If it was replaced, the death we saw belongs
+        // to a connection nobody uses anymore, so report healthy.
+        let mut guard = self.conn.lock().await;
+        let same = guard
+            .as_ref()
+            .map(|c| Arc::ptr_eq(c, &conn))
+            .unwrap_or(false);
+        if !same {
+            return true;
+        }
+        tracing::warn!(
+            "backend '{}' failed its health probe — resetting",
+            self.name
+        );
+        *guard = None;
+        drop(guard);
+        *self.status.lock().await = Status::Failed {
+            error: "connection lost (health probe failed)".into(),
+            at: now(),
+        };
+        false
     }
 }
 

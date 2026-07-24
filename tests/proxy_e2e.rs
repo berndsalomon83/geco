@@ -1993,6 +1993,15 @@ async fn skill_watch_roots_resolves_inside_a_task() {
 // ---------------------------------------------------------------------------
 
 /// Poll `check` until it returns true, or fail after `secs`.
+///
+/// The tests that use this depend on OS filesystem-notification and
+/// process-death timing, which `notify` and the kernel deliver on their own
+/// schedule and differently across Linux, macOS and Windows. If one of them
+/// ever goes flaky in CI, the cause is almost always that timing — not a
+/// logic error in the watcher or the health loop. Raise the `secs` ceiling
+/// here before suspecting the code under test; these have run green on all
+/// three platforms with the current values, so a *new* flake means the
+/// environment got slower, not that the assertion got wrong.
 async fn wait_until<F, Fut>(secs: u64, what: &str, mut check: F)
 where
     F: FnMut() -> Fut,
@@ -2109,4 +2118,89 @@ async fn skill_watcher_picks_up_a_skill_added_on_disk() {
     .await;
 
     proxy.set_shutdown();
+}
+
+/// Kill a process by PID the way an OOM killer or `kill -9` would — no chance
+/// for the child to shut its transport down politely.
+fn kill_pid(pid: u32) {
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status();
+}
+
+/// The health-check loop, exercised against the case it exists for: a warm
+/// backend whose child dies while nobody is calling it.
+///
+/// This test could not pass before the active probe landed. `is_closed()`
+/// stays false for an idle rmcp client whose child died — measured, ten
+/// seconds after a confirmed kill it still reported healthy — so the loop was
+/// blind to exactly the failure the README promised it caught. The fix probes
+/// with `list_tools`; this proves the loop now notices with no call to help
+/// it, and the mutation check below proves the probe is what does it.
+#[tokio::test]
+async fn health_check_loop_notices_a_backend_killed_while_idle() {
+    let Some(py) = python_bin() else { return };
+    isolate_health();
+
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "mcpServers": {
+            "stub": {
+                "command": py,
+                "args": [stub_path()],
+                "env": { "STUB_EXTRA_TOOLS": "1" },
+            }
+        },
+        // The loop sleeps this long between sweeps; the 30s default would
+        // outlast the test's own ceiling.
+        "proxy": { "health_check_secs": 1 }
+    }))
+    .expect("test config must deserialize");
+
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+    let backend = registry.get("stub").unwrap();
+
+    // Warm it and learn the child's real PID in the same call. Read the text
+    // block properly — scraping digits from a Debug-formatted content array
+    // picks up unrelated struct fields and yields a plausible non-PID.
+    let result = backend
+        .call("pid", None, &registry.proxy)
+        .await
+        .expect("pid call should succeed");
+    let text = result
+        .content
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .expect("pid tool should return text");
+    let pid: u32 = text
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("bad pid {text:?}: {e}"));
+    assert!(matches!(
+        backend.status().await,
+        geco::backend::Status::Up { .. }
+    ));
+
+    proxy.clone().spawn_health_check();
+
+    // Kill the child behind geco's back. No call goes through the connection,
+    // so nothing but the health loop can notice.
+    kill_pid(pid);
+
+    wait_until(
+        60,
+        "the health-check loop to notice a backend killed while idle",
+        || async { matches!(backend.status().await, geco::backend::Status::Failed { .. }) },
+    )
+    .await;
+
+    proxy.set_shutdown();
+    registry.shutdown_all().await;
 }

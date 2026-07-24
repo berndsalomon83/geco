@@ -35,6 +35,18 @@ minor bump may break.
 
 ### Fixed
 
+- **The periodic health check could not detect a backend that died while
+  idle** — the exact case it exists for. It relied on `is_closed()`, which an
+  rmcp client only flips when it next sends on the connection; a child killed
+  between calls left the connection reporting healthy indefinitely (measured:
+  still "Up" ten seconds after a confirmed kill, while a real call failed at
+  once). So the README's promise that the check resets a silently-dead
+  backend "so the agent never sees a stale failure" was false for idle death.
+  The check now **actively probes** with a `list_tools` round-trip (not the
+  spec's `ping`, which a live server may not implement and which would then
+  cause false resets) and resets non-responders. Found by killing a warm
+  backend's child from outside and watching the loop miss it. The reactive
+  path — detect-on-next-call — always worked and is unchanged.
 - **The pre-push hook never ran on Windows.** It looked for `cargo` on `PATH`
   only, so a toolchain installed inside WSL — invisible to Git Bash, which is
   what git runs hooks with — made it print "skipping" on every push and check
