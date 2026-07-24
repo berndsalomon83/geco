@@ -4,6 +4,57 @@ Notable changes per release. Format follows [Keep a Changelog](https://keepachan
 versioning is [semver](https://semver.org/), with the pre-1.0 caveat that a
 minor bump may break.
 
+## [Unreleased]
+
+### Added
+
+- **Hidden skills are now discoverable.** When a library is configured, geco's
+  MCP instructions state how many skills exist, that they're invisible
+  otherwise, that they are not callable tools, and to search first. Measured
+  against three local models on a task where a playbook applied, the model
+  consulted geco in 0–1 runs out of 12 before this; 8–12 after. Listing skill
+  names was tested and rejected: it costs context proportional to the library
+  AND scored worse, because two of three models tried to call a skill name as
+  a tool. Cost is one fixed-size sentence, added only when skills exist.
+- **Synonym expansion in search.** Covers requests that use different words
+  than the tool does — "bug"/"ticket" for issue, "save" for write, "folder"
+  for directory. Semantic recall@5 went 36.4% → 90.9% with no loss on queries
+  that already worked. Validated against held-out queries written after the
+  table, which score identically to the lexical set.
+- **Leading-verb expansion**, which fixes the rank-1 problem the table left
+  behind. "open a bug report" reached create_issue only at rank 3, because
+  bug → issue matched get_issue and add_issue_comment just as well; the word
+  that separates them is the verb. Expanding it symmetrically overfits — "any
+  open defects?" wants list_issues — so the mapping fires only on a query's
+  *first* token, where an imperative puts its verb. Semantic recall@1 54.5% →
+  72.7%, MRR 0.697 → 0.818, held-out and lexical groups unchanged to the
+  decimal. Rank 1 is the number that matters: a model acts on the first
+  result rather than rephrasing.
+- Search-effectiveness and skill-usage counters in `geco stats`:
+  `skill_surfaces`, `skill_reads`, plus the recent queries that matched
+  nothing — the actionable list for improving descriptions.
+- `proxy.refresh_concurrency` (default 8) caps how many backends spawn at once
+  during a refresh, and per-server `call_timeout_secs` /
+  `startup_timeout_secs` override the proxy defaults for one slow backend.
+
+### Changed
+
+- **`list_skills` and `read_skill` are no longer advertised when no skill
+  library is configured** — 640 bytes, 14% of geco's whole always-on surface,
+  returned to anyone using it purely as a tool gateway.
+- The context-budget test now counts the MCP `instructions` string, which is
+  always-on exactly like the tool schemas and was previously unmeasured. The
+  advertised figure moves from ~4.3 KB to ~4.7 KB; the number was always the
+  larger one, only the measurement was wrong.
+
+### Fixed
+
+- Windows keychain lookup read the *address* of the credential-blob pointer
+  rather than the pointer's target, returning NUL-padded rubbish where the
+  secret should be. Third and final fault in that script; the OS credential
+  store is now covered by a round-trip test on macOS in CI and by hand on
+  Windows, where the Actions runner cannot create the fixture.
+
 ## [0.7.0] — 2026-07-24
 
 ### Breaking

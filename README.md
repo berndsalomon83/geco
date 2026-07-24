@@ -152,7 +152,20 @@ mkdir -p ~/.config/opencode/skills-library
 mv ~/.config/opencode/skills/* ~/.config/opencode/skills-library/
 ```
 
-Add one line to your global AGENTS.md so models reach for it: *Before specialized work, search (kind="skills") → read_skill and follow the playbook.*
+### Why your agent now searches before acting
+
+A hidden library only pays off if the model reaches for it — and left to itself it doesn't. Measured against three local models on a task where a playbook clearly applied, the model consulted geco in **0–1 runs out of 12**. Not "sometimes missed": effectively never.
+
+So when a skill library is configured, geco tells the model so in its MCP instructions — the count, that skills are invisible otherwise, that they are not callable tools, and to search first. That lifts it to **8–12 out of 12**.
+
+Two things that did *not* work, in case you're tempted:
+
+- **Listing skill names.** It costs context proportional to your library, which is the one thing geco exists to avoid — and it measured *worse*: two of three models replied `CALL code-reviewer`, treating a skill name as a tool name and producing invalid calls. The instruction says "NOT callable tools" specifically to block that.
+- **Putting the hint in the `search` tool description** instead of the instructions. Same words, 0–3 out of 12. The decision to consult at all comes from the system framing, not from individual tool descriptions.
+
+The cost is one sentence, fixed size regardless of library size, added only when you actually have skills. The trade-off: your agent will sometimes search on trivial turns too. A search is a cached-snapshot lookup with no process spawn, so over-triggering is much the cheaper error.
+
+You can reinforce it in your global AGENTS.md: *Before specialized work, search (kind="skills") → read_skill and follow the playbook.*
 
 ### Which tools' skills work
 
@@ -194,7 +207,24 @@ covered by tests that run on Linux, macOS and Windows.
 
 Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `pass_env` (hand this server a variable from geco's own environment), `description` (shown in `list_mcp_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`, and `call_timeout_secs` / `startup_timeout_secs` to override the proxy defaults for one slow backend.
 
-`geco stats` reports search effectiveness alongside call counts: how many searches ran, how many found nothing, how often a search hit was actually executed, and the recent queries that matched nothing — each of those is either a tool you don't have or a description that doesn't say what the tool is for.
+`geco stats` reports search effectiveness alongside call counts: how many searches ran, how many found nothing, how often a search hit was actually executed, how often a skill was surfaced and then read, and the recent queries that matched nothing — each of those is either a tool you don't have or a description that doesn't say what the tool is for.
+
+### How search ranks
+
+BM25F over tokenised names, server names and descriptions: identifiers split on separators and camelCase (`browser_takeScreenshot` → `browser`, `take`, `screenshot`), conservative plural stemming, a hit in the name weighted above one in the description, and IDF so a word appearing all over your corpus counts for little. A small synonym table covers the gap where a request and a tool use different words for the same thing — "bug"/"ticket" for issue, "save" for write, "folder" for directory.
+
+One rule depends on word order: a verb leading a request is expanded where the same word later in the sentence is not. "open a bug report" means *create* one; "any open defects?" does not. That single distinction is worth 18 points of rank-1 accuracy on the synonym row below, and rank 1 is what counts — a model acts on the first result and rarely rephrases.
+
+It is lexical, deliberately: no model, no index, no state. Ranking a few hundred tools costs microseconds and there is nothing to invalidate when the snapshot changes.
+
+The limits are measured rather than assumed, against a 59-query corpus in the test suite:
+
+| | recall@1 | recall@5 |
+|---|---|---|
+| queries sharing vocabulary with the tool | 87.5% | 100% |
+| queries needing a synonym | 72.7% | 90.9% |
+
+Eight of those queries are held out — written after the synonym table and never consulted while building it — so every change is checked against queries the table was not fitted to. That guard has already rejected one change that looked obviously right: a symmetric create/open synonym that raised the group it was derived from while lowering the group it wasn't. If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
 
 ### What geco proxies (and what it doesn't)
 
@@ -289,7 +319,7 @@ The command isn't on geco's `PATH`. Note that geco's PATH is not necessarily you
 The item doesn't exist under that exact service name, or the OS keychain is locked. Check with `security find-generic-password -s x -w` (macOS), `secret-tool lookup service x` (Linux), `cmdkey /list:x` (Windows). A missing item is deliberately fatal — secrets fail loudly rather than expanding to an empty string.
 
 **The agent can't find a tool you know is there.**
-Check `geco inspect` first — if the tool isn't in the snapshot, it's a refresh or an `allow`/`deny` problem, not a search problem. If it *is* there, the search wording is the issue: `geco stats` lists recent queries that matched nothing. Search is lexical, so a query sharing no vocabulary with the tool's name or description won't find it — improve the server's `description`, which is what the model actually reads.
+Check `geco inspect` first — if the tool isn't in the snapshot, it's a refresh or an `allow`/`deny` problem, not a search problem. If it *is* there, the search wording is the issue: `geco stats` lists recent queries that matched nothing. Search is lexical with a small synonym table ([how search ranks](#how-search-ranks)) — a query sharing no vocabulary and no synonym with the tool's name or description won't find it. Improve the server's `description`, which is what the model actually reads.
 
 **Tools changed on a backend but geco still shows the old set.**
 geco follows `notifications/tools/list_changed`, but not every server sends it. Force it with the `refresh_tools` meta-tool or `geco refresh`.

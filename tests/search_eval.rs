@@ -227,6 +227,34 @@ fn evaluate() -> Report {
     }
 }
 
+/// Not a gate — a window. Prints what search actually returns for a handful
+/// of representative queries, so "why did it pick that?" can be answered by
+/// looking rather than guessing. The eval only prints outright misses, which
+/// hides the near-misses and the reasons behind a correct-but-lucky hit.
+#[test]
+fn show_top_hits_for_sample_queries() {
+    let corpus = load_corpus();
+    let snap = build_snapshot(&corpus);
+
+    eprintln!("\n=== what search returns (top 3) ===");
+    for q in [
+        "open a bug report",
+        "file a ticket",
+        "save text to disk",
+        "remember this",
+        "what do you know about this project",
+        "take a picture of the page",
+    ] {
+        let hits = geco::search::search(&snap, q, 3);
+        let shown: Vec<String> = hits
+            .iter()
+            .map(|h| format!("{}({:.2})", h.tool, h.coverage))
+            .collect();
+        eprintln!("  {q:38} -> {}", shown.join(", "));
+    }
+    eprintln!();
+}
+
 /// Standalone experiment, not a gate. Reports whether IDF-weighted coverage
 /// of the top hit separates correct answers from confidently-wrong ones, and
 /// what a threshold would cost in false alarms on answers that were right.
@@ -278,11 +306,12 @@ fn search_quality_meets_floors() {
         r.semantic.line("semantic")
     );
 
-    // Floors sit just under measured performance (BM25F + synonyms, 2026-07):
+    // Floors sit just under measured performance (BM25F + synonyms +
+    // leading-verb expansion, 2026-07):
     //   lexical  recall@1 87.5%  recall@5 100%   MRR 0.938
-    //   semantic recall@1 54.5%  recall@5 90.9%  MRR 0.697
+    //   semantic recall@1 72.7%  recall@5 90.9%  MRR 0.818
     //   heldout  recall@1 87.5%  recall@5 100%   MRR 0.938
-    //   overall  MRR 0.893
+    //   overall  recall@1 84.7%  MRR 0.915
     // They catch a scoring change that makes things worse. They do NOT
     // certify that search is good — read the report for that.
 
@@ -296,23 +325,37 @@ fn search_quality_meets_floors() {
         r.lexical.pct(r.lexical.hit1) >= 80.0,
         "lexical recall@1 regressed below 80%{summary}"
     );
-    // Semantic queries need synonym knowledge. The synonym table lifted this
-    // from 36.4% to 90.9%; the floor guards that gain.
+    // Semantic queries need synonym knowledge. The synonym table lifted
+    // recall@5 from 36.4% to 90.9%; the floor guards that gain.
     assert!(
         r.semantic.pct(r.semantic.hit5) >= 80.0,
         "semantic recall@5 regressed below 80%{summary}"
     );
-    // The honest one. The synonym table was DERIVED from the semantic
+    // Rank 1 is the one that matters in practice: a model acts on the first
+    // result and rarely rephrases. Leading-verb expansion took this from
+    // 54.5% to 72.7% — being in the top 5 is not the same as being found.
+    assert!(
+        r.semantic.pct(r.semantic.hit1) >= 65.0,
+        "semantic recall@1 regressed below 65%{summary}"
+    );
+    // The honest ones. The synonym table was DERIVED from the semantic
     // queries above, so their score flatters it — measuring on your own
     // training set always does. These queries were written afterwards and
-    // never consulted while building the table, so this floor is what
-    // catches a table that has been tuned into memorising the corpus.
+    // never consulted while building the table, so these floors are what
+    // catch a table that has been tuned into memorising the corpus.
+    //
+    // This is not hypothetical: a symmetric create/open synonym raised the
+    // semantic group and lowered THIS one, which is how it was caught.
     assert!(
         r.heldout.pct(r.heldout.hit5) >= 85.0,
         "held-out recall@5 regressed below 85% — synonyms may be overfitted{summary}"
     );
     assert!(
-        r.overall.mrr() >= 0.85,
-        "overall MRR regressed below 0.85{summary}"
+        r.heldout.pct(r.heldout.hit1) >= 80.0,
+        "held-out recall@1 regressed below 80% — synonyms may be overfitted{summary}"
+    );
+    assert!(
+        r.overall.mrr() >= 0.90,
+        "overall MRR regressed below 0.90{summary}"
     );
 }
