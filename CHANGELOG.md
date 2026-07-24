@@ -8,6 +8,16 @@ minor bump may break.
 
 ### Added
 
+- **`docs/search-ranking.md`** — the permanent research log for search: the
+  scorer, every change that was kept (with the measured evidence), every change
+  that was **rejected and why** (stopword list, confidence annotation, symmetric
+  create/open, four mined synonyms, an external branch's pm/am hack and
+  param-search-tuned constants), the honest ~13% rank-1 ceiling on pure-intent
+  queries measured against 5,216 real tools, the parameter sweep that proved
+  tuning cannot move it, and the open accept-the-ceiling-vs-embeddings fork.
+  Written so the dead ends are not re-walked. Roughly 30% of confident-looking
+  ranking changes survive measurement; the log exists so the other 70% stay
+  dead.
 - **User-configurable search synonyms** (`proxy.search_synonyms`). The escape
   hatch for the one thing geco's lexical ranking cannot do on its own: bridge
   a query and a tool that share no vocabulary. Each entry is a group of

@@ -20,14 +20,19 @@
 
 use std::collections::HashMap;
 
-/// BM25 term-frequency saturation. Higher = repeated terms keep mattering.
+// BM25 term-frequency saturation. Higher = repeated terms keep mattering.
 const K1: f64 = 1.2;
-/// BM25 length normalisation. Keeps verbose descriptions from dominating.
+// BM25 length normalisation. Keeps verbose descriptions from dominating.
 const B: f64 = 0.75;
-
 const W_NAME: f64 = 3.0;
 const W_SERVER: f64 = 1.0;
 const W_DESC: f64 = 1.0;
+// These were swept — W_NAME x W_DESC x B — against 5,216 real tools with 210
+// vocabulary-banned semantic queries (2026-07). The best cell (W_NAME=2,
+// W_DESC=1) reached 13.8% rank-1 vs these values' 13.3%: one query out of 210,
+// noise. Nothing meaningfully beat the shipped settings, and detuning W_NAME
+// away from 3 would trade the lexical-query performance it exists for. Do not
+// re-tune without new evidence. Full write-up: docs/search-ranking.md.
 
 /// Minimum query-token length for a prefix match ("config" -> "configuration").
 /// Below this, prefixes match far too much ("is" -> "issue", "island", ...).
