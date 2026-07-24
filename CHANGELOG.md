@@ -39,6 +39,29 @@ minor bump may break.
 
 ### Changed
 
+- **The `health` meta-tool is gone; `geco health` replaces it (new command).**
+  It cost 218 bytes of every session's context — 5% of the schema surface —
+  to answer a question that only arises once something is already broken, and
+  by then the answer had already been delivered: `execute` returns a typed
+  `error.code` with the reason at the moment of failure, and
+  `list_mcp_servers` carries per-server `status` and `last_refresh`.
+  Diagnostics belong in the payload, where they cost nothing until needed.
+
+  Net saving is 162 B (schema 4305 → 4143), since describing the new `issues`
+  field spent 56 B back. The headline figure stays ~4.7 KB: this was a
+  redundancy removed, not a meaningful reduction.
+
+  **Migration:** run `geco health` (new; exits non-zero when there are
+  errors, zero for warnings alone). Agents get gateway-level problems from
+  `list_mcp_servers`, which now includes an `issues` array — see below.
+
+- **`list_mcp_servers` returns `{servers: [...]}` instead of a bare array**,
+  and adds `issues` when the gateway has a problem — the config- and
+  skill-level faults that were previously only visible through the retired
+  meta-tool. The key is omitted when there is nothing wrong, but the envelope
+  is unconditional: a response that changes shape between healthy and broken
+  is a trap, and broken is when you least want a surprise.
+
 - **`list_skills` and `read_skill` are no longer advertised when no skill
   library is configured** — 640 bytes, 14% of geco's whole always-on surface,
   returned to anyone using it purely as a tool gateway.
