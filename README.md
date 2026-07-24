@@ -213,7 +213,7 @@ Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expans
 
 BM25F over tokenised names, server names and descriptions: identifiers split on separators and camelCase (`browser_takeScreenshot` → `browser`, `take`, `screenshot`), conservative plural stemming, a hit in the name weighted above one in the description, and IDF so a word appearing all over your corpus counts for little. A small synonym table covers the gap where a request and a tool use different words for the same thing — "bug"/"ticket" for issue, "save" for write, "folder" for directory.
 
-One rule depends on word order: a verb leading a request is expanded where the same word later in the sentence is not. "open a bug report" means *create* one; "any open defects?" does not. That single distinction is worth 18 points of rank-1 accuracy, and rank 1 is what counts — a model acts on the first result and rarely rephrases.
+One rule depends on word order: a verb leading a request is expanded where the same word later in the sentence is not. "open a bug report" means *create* one; "any open defects?" does not. That single distinction is worth 18 points of rank-1 accuracy on the synonym row below, and rank 1 is what counts — a model acts on the first result and rarely rephrases.
 
 It is lexical, deliberately: no model, no index, no state. Ranking a few hundred tools costs microseconds and there is nothing to invalidate when the snapshot changes.
 
@@ -224,7 +224,7 @@ The limits are measured rather than assumed, against a 59-query corpus in the te
 | queries sharing vocabulary with the tool | 87.5% | 100% |
 | queries needing a synonym | 72.7% | 90.9% |
 
-Eight of those queries are held out — written after the synonym table and never consulted while building it — so every change is checked against queries the table was not fitted to. That guard has already rejected two changes that looked obviously right and measured worse. If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
+Eight of those queries are held out — written after the synonym table and never consulted while building it — so every change is checked against queries the table was not fitted to. That guard has already rejected one change that looked obviously right: a symmetric create/open synonym that raised the group it was derived from while lowering the group it wasn't. If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
 
 ### What geco proxies (and what it doesn't)
 
