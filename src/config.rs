@@ -959,6 +959,99 @@ mod tests {
         assert!(msg.contains("om-test-nonexistent-item-xyz"), "got: {msg}");
     }
 
+    /// Opt-in because it writes a throwaway item to the real OS credential
+    /// store. CI sets it on macOS and Windows; a developer running `cargo
+    /// test` locally gets a skip rather than a surprise keychain prompt.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn keychain_tests_enabled() -> bool {
+        std::env::var("GECO_TEST_KEYCHAIN")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// The success path had never been exercised on any platform — only
+    /// "item missing" was covered, and that passes whether the lookup works
+    /// or is broken in a way that always fails. This checks the secret comes
+    /// back VERBATIM, which is where the subtlety is: `security -w` appends a
+    /// newline, and stripping it wrongly would hand every backend a token
+    /// with a trailing \n and produce opaque auth failures.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_roundtrip_returns_the_exact_secret() {
+        if !keychain_tests_enabled() {
+            eprintln!("skipping: set GECO_TEST_KEYCHAIN=1 (writes to the login keychain)");
+            return;
+        }
+        let _env = env_guard();
+        let service = "geco-selftest-item";
+        let secret = "s3cr3t value with spaces";
+
+        let del = || {
+            let _ = std::process::Command::new("security")
+                .args(["delete-generic-password", "-s", service])
+                .output();
+        };
+        del(); // any leftover from a previous run
+        let added = std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                service,
+                "-a",
+                "geco",
+                "-w",
+                secret,
+            ])
+            .status()
+            .expect("failed to run `security`");
+        assert!(added.success(), "could not create the test keychain item");
+
+        let got = expand_value(&format!("${{keychain:{service}}}"));
+        del();
+        assert_eq!(
+            got.expect("keychain lookup should succeed"),
+            secret,
+            "the secret must come back byte-for-byte"
+        );
+    }
+
+    /// Windows counterpart. This is the path that shipped two real bugs — a
+    /// missing type accelerator and pointer arithmetic on the wrong side of a
+    /// cast — both of which could return a NUL-filled string with exit 0.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn keychain_roundtrip_returns_the_exact_secret() {
+        if !keychain_tests_enabled() {
+            eprintln!("skipping: set GECO_TEST_KEYCHAIN=1 (writes to Credential Manager)");
+            return;
+        }
+        let _env = env_guard();
+        let service = "geco-selftest-item";
+        let secret = "s3cr3t value with spaces";
+
+        let del = || {
+            let _ = std::process::Command::new("cmdkey")
+                .arg(format!("/delete:{service}"))
+                .output();
+        };
+        del();
+        let added = std::process::Command::new("cmdkey")
+            .arg(format!("/generic:{service}"))
+            .arg("/user:geco")
+            .arg(format!("/pass:{secret}"))
+            .status()
+            .expect("failed to run `cmdkey`");
+        assert!(added.success(), "could not create the test credential");
+
+        let got = expand_value(&format!("${{keychain:{service}}}"));
+        del();
+        assert_eq!(
+            got.expect("keychain lookup should succeed"),
+            secret,
+            "the secret must come back byte-for-byte, with no NUL padding"
+        );
+    }
+
     #[test]
     fn keychain_empty_service_rejected() {
         assert!(expand_value("${keychain:}").is_err());

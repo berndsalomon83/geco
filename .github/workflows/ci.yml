@@ -48,6 +48,10 @@ jobs:
         run: cargo test --locked
         env:
           GECO_REQUIRE_E2E: 1
+          # Exercise the real OS credential store where there is one. Opt-in
+          # because the test writes a throwaway item; CI runners are
+          # disposable, a developer's login keychain is not.
+          GECO_TEST_KEYCHAIN: ${{ (runner.os == 'macOS' || runner.os == 'Windows') && '1' || '' }}
 
   fmt:
     name: rustfmt
