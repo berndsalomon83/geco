@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # geco installer
-#   1. cargo build --release
+#   1. download a prebuilt binary (or --from-source / fall back to cargo build)
 #   2. install the binary (existing install > /opt/homebrew/bin > ~/.local/bin)
 #      — remove-then-copy, never overwrite in place (macOS signature cache)
 #   3. scaffold ~/.config/geco/config.yaml if missing
@@ -8,6 +8,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GH_REPO="berndsalomon83/geco"
 CFG_DIR="$HOME/.config/geco"
 CFG="$CFG_DIR/config.yaml"
 CFG_LEGACY="$CFG_DIR/config.json"
@@ -16,13 +17,89 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mERROR\033[0m %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] && die "do not run with sudo"
-command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust first: https://rustup.rs"
-[ -f "$REPO_DIR/Cargo.toml" ] || die "run this from the geco checkout"
+# Parse arguments before any environment checks, so --help always works.
+FROM_SOURCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --from-source) FROM_SOURCE=1 ;;
+        -h|--help)
+            printf 'usage: %s [--from-source]\n\n' "$0"
+            printf '  --from-source   build with cargo instead of downloading a release\n'
+            exit 0 ;;
+        *) die "unknown option: $arg (try --help)" ;;
+    esac
+done
 
-say "Building geco (release)…"
-( cd "$REPO_DIR" && cargo build --release )
-NEW_BIN="$REPO_DIR/target/release/geco"
+[ "$(id -u)" -eq 0 ] && die "do not run with sudo"
+
+# Map this machine to a release target triple. Empty = no prebuilt for it.
+detect_target() {
+    case "$(uname -s)" in
+        Darwin) case "$(uname -m)" in
+                    arm64)  echo "aarch64-apple-darwin" ;;
+                    x86_64) echo "x86_64-apple-darwin" ;;
+                esac ;;
+        Linux)  case "$(uname -m)" in
+                    x86_64)          echo "x86_64-unknown-linux-musl" ;;
+                    aarch64|arm64)   echo "aarch64-unknown-linux-gnu" ;;
+                esac ;;
+    esac
+}
+
+# Print the path to an extracted prebuilt binary, or nothing. Never fatal:
+# every failure here falls back to building from source.
+fetch_prebuilt() {
+    target="$(detect_target)"
+    [ -n "$target" ] || return 1
+    tmp="$(mktemp -d)"
+
+    # `gh` first: it carries credentials, which is what a private repo needs.
+    # Plain curl works once the repo is public.
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        gh release download --repo "$GH_REPO" --pattern "*${target}*" \
+            --pattern "SHA256SUMS" --dir "$tmp" >/dev/null 2>&1 || return 1
+    else
+        api="https://api.github.com/repos/$GH_REPO/releases/latest"
+        url="$(curl -fsSL "$api" 2>/dev/null \
+               | grep -o "https://[^\"]*${target}[^\"]*\.tar\.gz" | head -1)" || return 1
+        [ -n "$url" ] || return 1
+        curl -fsSL -o "$tmp/$(basename "$url")" "$url" || return 1
+        curl -fsSL -o "$tmp/SHA256SUMS" "${url%/*}/SHA256SUMS" >/dev/null 2>&1 || true
+    fi
+
+    archive="$(ls "$tmp"/*.tar.gz 2>/dev/null | head -1)" || return 1
+    [ -n "$archive" ] || return 1
+
+    # Verify if we got sums; a missing SHA256SUMS is not fatal, a mismatch is.
+    if [ -s "$tmp/SHA256SUMS" ] && command -v sha256sum >/dev/null 2>&1; then
+        want="$(grep "$(basename "$archive")" "$tmp/SHA256SUMS" | awk '{print $1}' | head -1)"
+        if [ -n "$want" ]; then
+            got="$(sha256sum "$archive" | awk '{print $1}')"
+            [ "$want" = "$got" ] || die "checksum mismatch on $(basename "$archive") — refusing to install"
+        fi
+    fi
+
+    tar xzf "$archive" -C "$tmp" || return 1
+    found="$(find "$tmp" -type f -name geco -perm -u+x | head -1)"
+    [ -n "$found" ] || return 1
+    echo "$found"
+}
+
+NEW_BIN=""
+if [ "$FROM_SOURCE" -eq 0 ]; then
+    say "Looking for a prebuilt geco…"
+    NEW_BIN="$(fetch_prebuilt || true)"
+    [ -n "$NEW_BIN" ] && say "Using prebuilt binary (no Rust toolchain needed)"
+fi
+
+if [ -z "$NEW_BIN" ]; then
+    [ "$FROM_SOURCE" -eq 1 ] || warn "no prebuilt binary available — falling back to a source build"
+    command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust first: https://rustup.rs"
+    [ -f "$REPO_DIR/Cargo.toml" ] || die "run this from the geco checkout"
+    say "Building geco (release)…"
+    ( cd "$REPO_DIR" && cargo build --release )
+    NEW_BIN="$REPO_DIR/target/release/geco"
+fi
 
 OLD_BIN="$(command -v geco 2>/dev/null || true)"
 if [ -n "$OLD_BIN" ] && [ "$OLD_BIN" != "$NEW_BIN" ]; then

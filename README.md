@@ -34,19 +34,23 @@ Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it 
 
 ## Install
 
-### Build & install (macOS / Linux)
+Prebuilt binaries are published for macOS (arm64, x86_64), Linux (x86_64 static, aarch64) and Windows (x86_64) — **no Rust toolchain required**. The installers download the right one, verify its SHA-256, and fall back to a source build for any other platform.
+
+### macOS / Linux
 
 ```bash
 git clone <repo> && cd geco
 bash install.sh
 ```
 
-### Build & install (Windows)
+### Windows
 
 ```powershell
 git clone <repo>; cd geco
 .\install.ps1
 ```
+
+Add `--from-source` (`-FromSource` on Windows) to build with cargo instead. See [INSTALL.md](INSTALL.md) for checksums, macOS Gatekeeper, and the private-repo caveat.
 
 ### Wire it into your agent
 
@@ -75,8 +79,7 @@ Remove the individual server entries you moved behind geco — restart the agent
 ## Quick start
 
 ```bash
-cargo build --release
-cp target/release/geco ~/.local/bin/   # or use install.sh
+bash install.sh          # downloads a prebuilt binary, or builds if none matches
 ```
 
 Create `~/.config/geco/config.yaml` (see `geco.example.yaml`; JSON is equally accepted) — entries are copy-paste compatible with both Claude Desktop and OpenCode shapes:

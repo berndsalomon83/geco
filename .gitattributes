@@ -1,0 +1,10 @@
+# Shell and Python files must keep LF endings in the working tree, not just
+# in the repository. With core.autocrlf=true a Windows clone gets CRLF, and a
+# CRLF `install.sh` fails the moment it is run from WSL or Git Bash:
+#   install.sh: line 23: syntax error near unexpected token `$'do\r''
+# Git already stored these as LF; this makes the checkout match.
+*.sh    text eol=lf
+*.py    text eol=lf
+
+# PowerShell is happy either way, but CRLF is the platform norm.
+*.ps1   text eol=crlf

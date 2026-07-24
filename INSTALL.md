@@ -2,7 +2,9 @@
 
 ## Requirements
 
-Rust toolchain (rustup.rs). On macOS/Linux: `python3` (used by the install script for JSON verification). Backends need whatever they always needed (`npx`, `uvx`, binaries…) — the proxy just spawns them later instead of your agent spawning them at startup.
+**No Rust toolchain needed** for the platforms with published binaries: macOS (arm64, x86_64), Linux (x86_64 static/musl, aarch64), Windows (x86_64). Anything else falls back to a source build and needs rustup.rs.
+
+On macOS/Linux: `python3` (used by the install script for JSON verification). Backends need whatever they always needed (`npx`, `uvx`, binaries…) — the proxy just spawns them later instead of your agent spawning them at startup.
 
 ## Install
 
@@ -12,7 +14,9 @@ Rust toolchain (rustup.rs). On macOS/Linux: `python3` (used by the install scrip
 bash install.sh
 ```
 
-Builds the release binary, installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid), scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 8 meta-tools.
+Downloads the prebuilt binary for your platform, verifies its SHA-256 against the release's `SHA256SUMS`, and installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid). Then scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 8 meta-tools.
+
+Pass `--from-source` to build with cargo instead. That also happens automatically if no prebuilt binary matches your platform, or the download fails.
 
 ### Windows
 
@@ -20,7 +24,13 @@ Builds the release binary, installs it (existing location → `/opt/homebrew/bin
 .\install.ps1
 ```
 
-Builds the release binary, installs it to `~/.local/bin/geco.exe` (adds to PATH if needed), scaffolds `~/.config/geco/config.yaml`, builds the first snapshot, and verifies 8 meta-tools.
+Same flow, installing to `~/.local/bin/geco.exe` (adds to PATH if needed). Use `-FromSource` to build locally. Windows on ARM64 always builds from source — the published Windows binary is x86_64 and would otherwise run under emulation.
+
+### Notes on downloads
+
+- **The repository is private.** Release assets therefore need credentials: install `gh` and run `gh auth login`, and the installers will use it. Without that they fall back to a source build. Once the repo is public, plain `curl` works and no auth is needed.
+- **macOS Gatekeeper.** The binaries are unsigned, so a downloaded geco may be quarantined. If macOS refuses to run it: `xattr -d com.apple.quarantine "$(command -v geco)"`. The installer already re-signs ad-hoc as a fallback.
+- **Verifying by hand:** every release carries `SHA256SUMS`; `sha256sum -c SHA256SUMS` in the download directory checks all of them.
 
 ## Migrate servers behind the proxy
 
