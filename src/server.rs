@@ -1,6 +1,6 @@
 //! The proxy's own MCP surface: eight small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~4.3 KB no matter how many tools hide behind the gate. That number is
+//! ~4.7 KB no matter how many tools hide behind the gate. That number is
 //! measured, not asserted by hand: see
 //! `param_tests::meta_tool_surface_stays_within_its_context_budget`.
 
@@ -178,6 +178,19 @@ pub struct Proxy {
     /// Clone and a Receiver is not, hence the Option-in-a-Mutex.
     tool_change_rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<String>>>>,
 }
+
+/// The instruction text every client injects into the model's context on
+/// connect. This is always-on cost exactly like the tool schemas, so it is a
+/// const rather than an inline literal: the context-budget test measures it.
+///
+/// It must stay O(1) — a fixed policy, never a catalogue. Anything that grows
+/// with the number of servers or skills belongs in a tool RESPONSE, which is
+/// paid only when asked for.
+const INSTRUCTIONS: &str = "Gateway to multiple MCP servers whose tools load on demand instead of \
+     polluting your context. Flow: search (with include_schema=true to get \
+     input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute \
+     (1–10 calls in one round-trip, cross-backend parallel), or \
+     list_mcp_servers → list_tools → execute. Backends start lazily on first execution.";
 
 /// How many (server, tool) hits to remember for the search→execute signal.
 const RECENT_HITS_CAP: usize = 64;
@@ -1091,9 +1104,13 @@ impl Proxy {
 
         // Record what search did, so its effectiveness is measurable in
         // production and not only against the eval corpus.
+        let surfaced_skill = results.iter().any(|r| r["kind"] == "skill");
         {
             let mut m = self.metrics.write().await;
             m.searches += 1;
+            if surfaced_skill {
+                m.skill_surfaces += 1;
+            }
             if results.is_empty() {
                 m.searches_no_match += 1;
                 // Keep the misses: each is either a tool that doesn't exist
@@ -1375,6 +1392,7 @@ impl Proxy {
             .map_err(|e| McpError::internal_error(format!("read_skill task failed: {e}"), None))?;
         match result {
             Ok((body, files)) => {
+                self.metrics.write().await.skill_reads += 1;
                 let tree = if files.is_empty() {
                     String::new()
                 } else {
@@ -1505,14 +1523,7 @@ impl ServerHandler for Proxy {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                "Gateway to multiple MCP servers whose tools load on demand instead of \
-                 polluting your context. Flow: search (with include_schema=true to get \
-                 input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute \
-                 (1–10 calls in one round-trip, cross-backend parallel), or \
-                 list_mcp_servers → list_tools → execute. Backends start lazily on first execution."
-                    .to_string(),
-            )
+            .with_instructions(INSTRUCTIONS.to_string())
     }
 }
 
@@ -1603,13 +1614,19 @@ mod param_tests {
         assert_eq!(tools.len(), 8, "expected 8 meta-tools, got {}", tools.len());
 
         let wire = serde_json::to_string(&tools).expect("tools must serialize");
-        let bytes = wire.len();
+        // The instructions ride in the initialize result and stay in context
+        // for the whole session, exactly like the schemas do. Omitting them
+        // understated the headline number and — worse — left an unguarded
+        // channel where always-on cost could grow without any test noticing.
+        let bytes = wire.len() + INSTRUCTIONS.len();
         // Visible with `cargo test -- --nocapture` when you want the number.
         eprintln!(
-            "meta-tool surface: {} tools, {bytes} bytes on the wire",
-            tools.len()
+            "meta-tool surface: {} tools, {} B schema + {} B instructions = {bytes} B",
+            tools.len(),
+            wire.len(),
+            INSTRUCTIONS.len()
         );
-        // Measured at 4305 bytes; the budget leaves ~40% headroom.
+        // Measured at 4305 + 370 bytes; the budget leaves ~28% headroom.
         assert!(
             bytes <= 6000,
             "meta-tool surface grew to {bytes} bytes (budget 6000). This is the \
