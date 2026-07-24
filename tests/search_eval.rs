@@ -13,6 +13,10 @@
 //!              create_issue). Reported separately so it is never mistaken
 //!              for lexical headroom, and so the value of ever adding
 //!              embeddings can be read straight off the numbers.
+//!   heldout  — semantic queries written AFTER the synonym table and never
+//!              consulted while building it. The semantic group scores its
+//!              own training set; this group is the generalisation check,
+//!              and the one to believe.
 //!
 //! Run `cargo test --test search_eval -- --nocapture` for the full report
 //! including every miss.
@@ -135,6 +139,7 @@ struct Report {
     overall: Stats,
     lexical: Stats,
     semantic: Stats,
+    heldout: Stats,
     misses: Vec<String>,
     /// Coverage of the TOP hit, split by whether that top hit was right.
     /// The question this answers: can coverage tell a confident-and-correct
@@ -169,6 +174,7 @@ fn evaluate() -> Report {
     let mut overall = Stats::default();
     let mut lexical = Stats::default();
     let mut semantic = Stats::default();
+    let mut heldout = Stats::default();
     let mut misses = Vec::new();
     let mut cov_top_right = Vec::new();
     let mut cov_top_wrong = Vec::new();
@@ -190,6 +196,11 @@ fn evaluate() -> Report {
         match q.kind.as_str() {
             "lexical" => lexical.record(rank),
             "semantic" => semantic.record(rank),
+            // Written AFTER the synonym table, deliberately not consulted
+            // while building it. The semantic numbers are measured on the
+            // queries the table was derived from, so they flatter it; this
+            // group is the honest generalisation check.
+            "heldout" => heldout.record(rank),
             other => panic!("unknown query kind {other:?} in fixture"),
         }
 
@@ -209,6 +220,7 @@ fn evaluate() -> Report {
         overall,
         lexical,
         semantic,
+        heldout,
         misses,
         cov_top_right,
         cov_top_wrong,
@@ -250,6 +262,7 @@ fn search_quality_meets_floors() {
     eprintln!("{}", r.overall.line("overall"));
     eprintln!("{}", r.lexical.line("lexical"));
     eprintln!("{}", r.semantic.line("semantic"));
+    eprintln!("{}", r.heldout.line("heldout"));
     if !r.misses.is_empty() {
         eprintln!("\nnot found in top 5 ({}):", r.misses.len());
         for m in &r.misses {
@@ -265,10 +278,11 @@ fn search_quality_meets_floors() {
         r.semantic.line("semantic")
     );
 
-    // Floors sit just under measured performance (BM25F, 2026-07):
-    //   lexical  recall@1 87.5%  recall@3 100%  recall@5 100%  MRR 0.938
-    //   semantic recall@1 36.4%  recall@3 36.4% recall@5 36.4% MRR 0.364
-    //   overall  MRR 0.814
+    // Floors sit just under measured performance (BM25F + synonyms, 2026-07):
+    //   lexical  recall@1 87.5%  recall@5 100%   MRR 0.938
+    //   semantic recall@1 54.5%  recall@5 90.9%  MRR 0.697
+    //   heldout  recall@1 87.5%  recall@5 100%   MRR 0.938
+    //   overall  MRR 0.893
     // They catch a scoring change that makes things worse. They do NOT
     // certify that search is good — read the report for that.
 
@@ -282,17 +296,23 @@ fn search_quality_meets_floors() {
         r.lexical.pct(r.lexical.hit1) >= 80.0,
         "lexical recall@1 regressed below 80%{summary}"
     );
-    // Semantic queries need synonym or world knowledge no lexical scorer has
-    // ("bug report" -> issue, "big" -> size). The floor is low on purpose: it
-    // tracks the number so a change that helps or hurts is visible, without
-    // pretending weight-tuning can fix it. This gap IS the measured case for
-    // embeddings, should we ever want them.
+    // Semantic queries need synonym knowledge. The synonym table lifted this
+    // from 36.4% to 90.9%; the floor guards that gain.
     assert!(
-        r.semantic.pct(r.semantic.hit5) >= 30.0,
-        "semantic recall@5 regressed below 30%{summary}"
+        r.semantic.pct(r.semantic.hit5) >= 80.0,
+        "semantic recall@5 regressed below 80%{summary}"
+    );
+    // The honest one. The synonym table was DERIVED from the semantic
+    // queries above, so their score flatters it — measuring on your own
+    // training set always does. These queries were written afterwards and
+    // never consulted while building the table, so this floor is what
+    // catches a table that has been tuned into memorising the corpus.
+    assert!(
+        r.heldout.pct(r.heldout.hit5) >= 85.0,
+        "held-out recall@5 regressed below 85% — synonyms may be overfitted{summary}"
     );
     assert!(
-        r.overall.mrr() >= 0.75,
-        "overall MRR regressed below 0.75{summary}"
+        r.overall.mrr() >= 0.85,
+        "overall MRR regressed below 0.85{summary}"
     );
 }
