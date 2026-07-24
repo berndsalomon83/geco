@@ -1,16 +1,21 @@
-<img align="right" src="geco_logo.png" alt="geco" width="35%" style="margin-left: 24px;">
+<img align="right" src="geco_logo.png" alt="geco" width="35%">
 
 # geco
 
-*the <span style="color: #B7410E; font-weight: bold;">ge</span>neric <span style="color: #B7410E; font-weight: bold;">co</span>nnector*
+*the **ge**neric **co**nnector*
 
 ## Why it exists
-The more mcp tools you expose to your llm, the more the context gets prefilled with ballast that most likely is not even used and reduces the available space you have to work with.
-The same is true for skills. Skills are great recipes to have but they also land as descriptive text in the context of your llm and yet again, more skills means lesser remaining context for the actual task to be done.
 
-So here comes this rusty reptile geco that helps you to tackle this. It sits between your IDE and the skills and mcp tools that you have and gives your llm the same 8 tools always, no matter how much you have in your tool shed!
+[MCP](https://modelcontextprotocol.io) (Model Context Protocol) is how agents connect to external tools — GitHub, a browser, your filesystem. Each connected server hands the model its full tool catalogue: every tool name, description and JSON input schema, in the system prompt, on every request.
 
-<span style="color: #B7410E; font-weight: bold;">geco is an MCP and SKILL gateway </span> that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools instead of every schema on every request.
+The more MCP tools you expose to your LLM, the more the context gets prefilled with ballast that most likely is not even used, reducing the space you have to work with.
+The same is true for skills. Skills are great recipes to have but they also land as descriptive text in the context of your LLM — and again, more skills means less remaining context for the actual task.
+
+So here comes this rusty reptile geco to tackle it. It sits between your IDE and the skills and MCP tools that you have, and gives your LLM the same 8 tools always, no matter how much you have in your tool shed.
+
+**geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools instead of every schema on every request.
+
+The cost is fixed: **~4.7 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
 
 Built with Rust as single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
 
@@ -32,6 +37,35 @@ The agent sees exactly eight meta-tools:
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
 
+A full round trip, cold backend included:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant G as geco
+    participant B as Backend
+
+    A->>G: search("open a bug report")
+    Note right of G: answered from the cached<br/>snapshot — no process starts
+    G-->>A: server + tool + description
+
+    A->>G: execute({calls:[{server, tool, arguments}]})
+    G->>G: allow / deny check
+
+    alt backend is cold
+        G->>B: spawn child process
+        Note right of B: clean environment:<br/>baseline + declared vars only,<br/>keychain resolved now
+        B-->>G: MCP initialize
+    end
+
+    G->>B: tools/call
+    B-->>G: result
+    G-->>A: results, in input order
+    Note over G,B: stays warm for the next call
+```
+
+Calls to *different* backends in one `execute` run in parallel; results always come back in the order you sent them.
+
 ## Install
 
 Prebuilt binaries are published for macOS (arm64, x86_64), Linux (x86_64 static, aarch64) and Windows (x86_64) — **no Rust toolchain required**. The installers download the right one, verify its SHA-256, and fall back to a source build for any other platform.
@@ -39,14 +73,14 @@ Prebuilt binaries are published for macOS (arm64, x86_64), Linux (x86_64 static,
 ### macOS / Linux
 
 ```bash
-git clone <repo> && cd geco
+git clone https://github.com/berndsalomon83/geco.git && cd geco
 bash install.sh
 ```
 
 ### Windows
 
 ```powershell
-git clone <repo>; cd geco
+git clone https://github.com/berndsalomon83/geco.git; cd geco
 .\install.ps1
 ```
 
@@ -120,6 +154,40 @@ mv ~/.config/opencode/skills/* ~/.config/opencode/skills-library/
 
 Add one line to your global AGENTS.md so models reach for it: *Before specialized work, search (kind="skills") → read_skill and follow the playbook.*
 
+### Which tools' skills work
+
+Any of them. geco has no notion of opencode here — a skill is just a directory
+containing a `SKILL.md` with YAML frontmatter, which is the Agent Skills
+layout Claude Code, Claude Desktop and opencode all use. Point `dirs` at a
+library and `absorb` at whatever directory your agent auto-loads from:
+
+```yaml
+skills:
+  dirs: ["~/.config/geco/skills-library"]   # served on demand
+  absorb:                                    # swept into the library at startup
+    - "~/.claude/skills"                     # Claude Code
+    - "~/.config/opencode/skills"            # opencode
+```
+
+Three things to know:
+
+- **`absorb` MOVES directories**, which is the point — the auto-loaded dir
+  stays empty so nothing costs always-on context. Never point it at a
+  project-level skills dir (`.claude/skills/` inside a repo): that is
+  version-controlled content and absorbing it would rewrite the working tree.
+  Use `dirs` for those instead, which only reads.
+- **Only `name`, `description` and `version` are read** from the frontmatter.
+  Host-specific fields are ignored rather than honoured — the SKILL.md body
+  reaches the model intact, but anything the host tool *enforced* from
+  frontmatter (tool restrictions, for instance) is not reproduced by geco.
+- **Bundled scripts are as portable as you wrote them.** `read_skill` hands
+  back absolute paths and the agent runs them through its own shell, so a
+  skill shipping `run.sh` needs a POSIX shell on Windows regardless of geco.
+
+The scanner itself is platform-neutral: `~` expands via `HOME` or
+`USERPROFILE`, and CRLF `SKILL.md` files parse identically to LF ones — both
+covered by tests that run on Linux, macOS and Windows.
+
 ## Config reference
 
 **Format:** YAML is the standard (`config.yaml`); JSON works identically for paste-compat with agent configs. A JSON Schema — generated from the binary's own structs, so it can't drift — powers editor validation and autocomplete: `geco schema > ~/.config/geco/geco.schema.json`, referenced from the YAML via the `# yaml-language-server: $schema=…` header (see the example file).
@@ -150,7 +218,19 @@ The point: a `GITHUB_TOKEN` exported in your shell for one server is no longer h
 
 If a server needs an ambient variable, name it: `pass_env: ["GITHUB_TOKEN"]`. For non-secret tool configuration wanted by *every* backend, use `proxy.env_passthrough: ["NODE_*"]` (glob patterns). To restore the old behaviour wholesale, `proxy.inherit_env: true` — but then any server can read anything.
 
-`proxy` section: `call_timeout_secs` (default 120), `startup_timeout_secs` (30), `refresh_on_start` (true), `health_check_secs` (30; 0 disables dead-backend detection).
+### The `proxy` block
+
+Gateway-wide settings, all optional:
+
+| Key | Default | What it does |
+|---|---|---|
+| `call_timeout_secs` | 120 | Seconds allowed for a proxied tool call. Override per server for one slow backend. |
+| `startup_timeout_secs` | 30 | Seconds allowed for a backend to spawn and initialize. Raise it if a first `npx` run downloads. |
+| `refresh_on_start` | true | Re-scan backends at startup when the config hash changed. |
+| `health_check_secs` | 30 | How often to check warm backends are still alive. `0` disables. |
+| `refresh_concurrency` | 8 | How many backends may be probed at once during a refresh. `0` = unlimited. Caps the process storm when many servers are configured. |
+| `inherit_env` | false | Give backends geco's whole environment (pre-0.7 behaviour). See above. |
+| `env_passthrough` | `[]` | Extra non-secret variables every backend receives, as globs. |
 
 ### Secrets
 
@@ -195,9 +275,55 @@ The gateway is headless, so a dead backend or a partial refresh would otherwise 
 - **The `health` meta-tool** — ask the agent "is the gateway healthy?" and it returns the failing backends and reasons.
 - **The opencode toast plugin** (`opencode-plugin/geco-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick.
 
+## Troubleshooting
+
+Start with `geco validate` (config mistakes), then `geco inspect` (what the snapshot actually holds) and `geco stats` (what the agent has been doing). The `health` meta-tool answers the same question from inside the agent.
+
+**A server worked before 0.7 and now fails with an auth or config error.**
+The most likely cause, and the nastiest to spot, because it fails *late*: since 0.7 backends no longer inherit geco's environment, so a server that quietly relied on a variable exported in your shell now starts without it. There is no startup error — it fails on first `execute`, with whatever opaque message the backend produces. Name the variable: `pass_env: ["THE_VAR"]`. To confirm that's the cause, set `proxy.inherit_env: true` temporarily; if it works again, that was it.
+
+**`cannot spawn backend 'x' (npx): program not found`.**
+The command isn't on geco's `PATH`. Note that geco's PATH is not necessarily your shell's — an agent launched from a GUI often has a much shorter one. Use an absolute path in `command`, or check with `geco validate`, which warns about commands it can't resolve.
+
+**`keychain item 'x' not found`.**
+The item doesn't exist under that exact service name, or the OS keychain is locked. Check with `security find-generic-password -s x -w` (macOS), `secret-tool lookup service x` (Linux), `cmdkey /list:x` (Windows). A missing item is deliberately fatal — secrets fail loudly rather than expanding to an empty string.
+
+**The agent can't find a tool you know is there.**
+Check `geco inspect` first — if the tool isn't in the snapshot, it's a refresh or an `allow`/`deny` problem, not a search problem. If it *is* there, the search wording is the issue: `geco stats` lists recent queries that matched nothing. Search is lexical, so a query sharing no vocabulary with the tool's name or description won't find it — improve the server's `description`, which is what the model actually reads.
+
+**Tools changed on a backend but geco still shows the old set.**
+geco follows `notifications/tools/list_changed`, but not every server sends it. Force it with the `refresh_tools` meta-tool or `geco refresh`.
+
+**macOS: "cannot be opened because the developer cannot be verified".**
+The released binaries are unsigned. `xattr -d com.apple.quarantine "$(command -v geco)"`.
+
+**Nothing is happening / no output.**
+`RUST_LOG=debug geco serve`. All logging goes to stderr by design — stdout carries the MCP protocol, so anything printed there would corrupt the session.
+
 ## Which servers belong behind the proxy?
 
 Servers you use *sometimes*. A server whose tools you want the model to reach for proactively on every task (e.g. a memory store like [icm-slim](https://github.com/rtk-ai/icm)) can stay directly connected — visibility is the point there. Everything else is a candidate.
+
+## Working on geco
+
+`main` is protected: force-pushes and deletion are blocked, and the CI checks
+must pass before a merge. Repository admins keep a bypass — deliberately, so
+that a broken pipeline can still be repaired.
+
+```bash
+git config core.hooksPath .githooks   # once per clone: fmt/clippy/tests before push
+
+git switch -c fix/thing
+# ...
+git push -u origin HEAD
+gh pr create --fill
+gh pr merge --auto --squash           # merges itself once CI is green
+```
+
+The pre-push hook is a convenience, not the gate. CI is the gate: it runs on
+Linux, macOS and Windows and enforces things a local run can't — the e2e suite
+against a guaranteed Python, the macOS keychain round-trip, the MSRV floor,
+supply-chain and secret scanning. `git push --no-verify` skips the hook.
 
 ## License
 

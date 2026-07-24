@@ -1,6 +1,6 @@
 //! The proxy's own MCP surface: eight small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~4.3 KB no matter how many tools hide behind the gate. That number is
+//! ~4.7 KB no matter how many tools hide behind the gate. That number is
 //! measured, not asserted by hand: see
 //! `param_tests::meta_tool_surface_stays_within_its_context_budget`.
 
@@ -11,8 +11,9 @@ use std::time::Duration;
 use anyhow::Result as AnyhowResult;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rmcp::{
-    handler::server::wrapper::Parameters, model::*, service::RequestContext, tool, tool_handler,
-    tool_router, ErrorData as McpError, RoleServer, ServerHandler,
+    handler::server::router::tool::ToolRouter, handler::server::wrapper::Parameters, model::*,
+    service::RequestContext, tool, tool_handler, tool_router, ErrorData as McpError, RoleServer,
+    ServerHandler,
 };
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -177,6 +178,56 @@ pub struct Proxy {
     /// Receiver, parked until `spawn_tool_change_listener` takes it. Proxy is
     /// Clone and a Receiver is not, hence the Option-in-a-Mutex.
     tool_change_rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<String>>>>,
+    /// Per-instance router, so the advertised surface can depend on config.
+    /// `list_skills` and `read_skill` are disabled when no skill library is
+    /// configured: they are 392 bytes of permanent context describing a
+    /// capability that user does not have, and an invitation to call a tool
+    /// that can only answer "nothing here".
+    tool_router: ToolRouter<Proxy>,
+    /// Always-on instruction text, built once from config. Carries the skill
+    /// nudge only when there is a library to nudge towards.
+    instructions: String,
+}
+
+/// The instruction text every client injects into the model's context on
+/// connect. This is always-on cost exactly like the tool schemas, so it is a
+/// const rather than an inline literal: the context-budget test measures it.
+///
+/// It must stay O(1) — a fixed policy, never a catalogue. Anything that grows
+/// with the number of servers or skills belongs in a tool RESPONSE, which is
+/// paid only when asked for.
+const INSTRUCTIONS_BASE: &str =
+    "Gateway to multiple MCP servers whose tools load on demand instead of \
+     polluting your context. Flow: search (with include_schema=true to get \
+     input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute \
+     (1–10 calls in one round-trip, cross-backend parallel), or \
+     list_mcp_servers → list_tools → execute. Backends start lazily on first execution.";
+
+/// Appended only when a skill library actually exists.
+///
+/// Skills are a "push" resource: nothing in a user's request names one, so the
+/// model must reach for it unprompted — and measured against three local
+/// models, it essentially never did. Baseline was 0-1 out of 12 runs each.
+///
+/// Every clause here earned its place in an A/B against those models:
+///   - the COUNT is O(1); listing names would be O(N) and is what this whole
+///     design refuses to do. It also measured WORSE — two of three models
+///     replied `CALL code-reviewer`, treating a skill name as a tool name,
+///     producing invalid calls 6/12 and 12/12 of the time.
+///   - "NOT callable tools" exists to prevent exactly that failure.
+///   - "ALWAYS ... before doing anything else" beat a hedged "before any
+///     non-trivial task, a playbook may exist" by roughly 2x on every model.
+///
+/// Result: 8-12 out of 12, versus 0-1 for the base wording, and better than
+/// the O(N) name list on all three. The same nudge placed in the `search`
+/// tool DESCRIPTION instead scored 0-3/12 — placement matters enormously,
+/// which is why this lives in the instructions.
+fn skill_instructions(count: usize) -> String {
+    format!(
+        " {count} SKILLS (written playbooks for specialised work) are hidden behind search — \
+         you cannot see them otherwise, and they are NOT callable tools. ALWAYS call search \
+         first with a one-line description of the task, before doing anything else."
+    )
 }
 
 /// How many (server, tool) hits to remember for the search→execute signal.
@@ -373,6 +424,26 @@ impl Proxy {
         // refresh subsumes any number of them.
         let (tool_change_tx, tool_change_rx) = tokio::sync::mpsc::channel::<String>(16);
         registry.set_tool_change_notifier(tool_change_tx.clone());
+
+        // Advertise the skill meta-tools only when there is a library behind
+        // them. Disabled routes are hidden from tools/list AND rejected by
+        // call, so a client cannot reach a capability that isn't configured.
+        // Note this is decided once, at construction: adding skills.dirs to a
+        // running proxy needs a restart before the two tools appear.
+        let mut tool_router = Self::tool_router();
+        if skill_dirs.is_empty() {
+            tool_router.disable_route("list_skills");
+            tool_router.disable_route("read_skill");
+        }
+
+        // Only claim skills exist when some were actually found. A count of
+        // zero would be a lie, and a nudge towards an empty library wastes a
+        // call on every task.
+        let instructions = match skills.skills.len() {
+            0 => INSTRUCTIONS_BASE.to_string(),
+            n => format!("{INSTRUCTIONS_BASE}{}", skill_instructions(n)),
+        };
+
         Self {
             registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -389,6 +460,8 @@ impl Proxy {
             recent_search_hits: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             tool_change_tx,
             tool_change_rx: Arc::new(std::sync::Mutex::new(Some(tool_change_rx))),
+            tool_router,
+            instructions,
         }
     }
 
@@ -1091,9 +1164,13 @@ impl Proxy {
 
         // Record what search did, so its effectiveness is measurable in
         // production and not only against the eval corpus.
+        let surfaced_skill = results.iter().any(|r| r["kind"] == "skill");
         {
             let mut m = self.metrics.write().await;
             m.searches += 1;
+            if surfaced_skill {
+                m.skill_surfaces += 1;
+            }
             if results.is_empty() {
                 m.searches_no_match += 1;
                 // Keep the misses: each is either a tool that doesn't exist
@@ -1375,6 +1452,7 @@ impl Proxy {
             .map_err(|e| McpError::internal_error(format!("read_skill task failed: {e}"), None))?;
         match result {
             Ok((body, files)) => {
+                self.metrics.write().await.skill_reads += 1;
                 let tree = if files.is_empty() {
                     String::new()
                 } else {
@@ -1486,7 +1564,9 @@ impl Proxy {
     }
 }
 
-#[tool_handler]
+// Per-instance router rather than the static one, so the advertised tool
+// surface can depend on configuration.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for Proxy {
     async fn initialize(
         &self,
@@ -1505,14 +1585,7 @@ impl ServerHandler for Proxy {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                "Gateway to multiple MCP servers whose tools load on demand instead of \
-                 polluting your context. Flow: search (with include_schema=true to get \
-                 input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute \
-                 (1–10 calls in one round-trip, cross-backend parallel), or \
-                 list_mcp_servers → list_tools → execute. Backends start lazily on first execution."
-                    .to_string(),
-            )
+            .with_instructions(self.instructions.clone())
     }
 }
 
@@ -1592,6 +1665,64 @@ mod param_tests {
         assert_eq!(diff["unchanged"], 0, "{diff}");
     }
 
+    /// A Proxy with no backends and the given skill dirs, for surface tests.
+    /// `Proxy::new` is sync and touches the filesystem only through
+    /// absorb/scan, which are no-ops for empty or missing dirs.
+    fn surface_probe(skill_dirs: Vec<String>) -> Proxy {
+        let cfg: crate::config::Config =
+            serde_json::from_value(json!({"mcpServers": {"s": {"command": ["true"]}}})).unwrap();
+        Proxy::new(
+            crate::backend::Registry::from_config(&cfg),
+            Snapshot::default(),
+            PathBuf::from("geco-test-snapshot.json"),
+            PathBuf::from("geco-test-config.yaml"),
+            skill_dirs,
+            vec![],
+        )
+    }
+
+    /// Two of the eight meta-tools exist only to serve a skill library. If
+    /// none is configured they are permanent context describing a capability
+    /// the user doesn't have — and an invitation to call something that can
+    /// only answer "nothing here".
+    #[test]
+    fn skill_meta_tools_are_hidden_without_a_library() {
+        let with = surface_probe(vec!["/nonexistent/skills".into()]);
+        let without = surface_probe(vec![]);
+
+        let names = |p: &Proxy| -> Vec<String> {
+            p.tool_router
+                .list_all()
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let (a, b) = (names(&with), names(&without));
+
+        assert_eq!(a.len(), 8, "a configured library advertises all 8: {a:?}");
+        assert!(a.contains(&"list_skills".to_string()));
+        assert!(a.contains(&"read_skill".to_string()));
+
+        assert_eq!(b.len(), 6, "no library should advertise 6: {b:?}");
+        assert!(!b.contains(&"list_skills".to_string()), "got {b:?}");
+        assert!(!b.contains(&"read_skill".to_string()), "got {b:?}");
+        // search survives — it still finds tools, and explains itself when
+        // asked for skills that aren't there.
+        assert!(b.contains(&"search".to_string()), "got {b:?}");
+
+        let cost = |p: &Proxy| {
+            serde_json::to_string(&p.tool_router.list_all())
+                .unwrap()
+                .len()
+        };
+        let (ca, cb) = (cost(&with), cost(&without));
+        eprintln!(
+            "surface: with skills {ca} B, without {cb} B (saves {} B)",
+            ca - cb
+        );
+        assert!(cb < ca, "hiding two tools must cost fewer bytes");
+    }
+
     /// The whole product claim: the agent's context carries a small, FIXED
     /// meta-tool surface no matter how many backend tools hide behind it.
     /// Nothing asserted that, so a verbose description could quietly inflate
@@ -1603,13 +1734,23 @@ mod param_tests {
         assert_eq!(tools.len(), 8, "expected 8 meta-tools, got {}", tools.len());
 
         let wire = serde_json::to_string(&tools).expect("tools must serialize");
-        let bytes = wire.len();
+        // The instructions ride in the initialize result and stay in context
+        // for the whole session, exactly like the schemas do. Omitting them
+        // understated the headline number and — worse — left an unguarded
+        // channel where always-on cost could grow without any test noticing.
+        // Worst case: base instructions plus the skill nudge. A 3-digit count
+        // is as long as the sentence ever gets, since it carries a number
+        // rather than names.
+        let instr = format!("{INSTRUCTIONS_BASE}{}", skill_instructions(999));
+        let bytes = wire.len() + instr.len();
         // Visible with `cargo test -- --nocapture` when you want the number.
         eprintln!(
-            "meta-tool surface: {} tools, {bytes} bytes on the wire",
-            tools.len()
+            "meta-tool surface: {} tools, {} B schema + {} B instructions = {bytes} B",
+            tools.len(),
+            wire.len(),
+            instr.len()
         );
-        // Measured at 4305 bytes; the budget leaves ~40% headroom.
+        // Measured at 4305 + 370 bytes; the budget leaves ~28% headroom.
         assert!(
             bytes <= 6000,
             "meta-tool surface grew to {bytes} bytes (budget 6000). This is the \

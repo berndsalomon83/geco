@@ -120,6 +120,14 @@ async fn main() -> Result<()> {
                             "  search → exec:  {} (calls to a tool search had surfaced)",
                             metrics.search_to_execute
                         );
+                        // Skills are a "push" resource: nothing in a request
+                        // names them, so surfaces-without-reads means the
+                        // descriptions don't match how work gets described,
+                        // while near-zero surfaces means nobody is looking.
+                        eprintln!(
+                            "  skills:         surfaced in {} search(es), read {} time(s)",
+                            metrics.skill_surfaces, metrics.skill_reads
+                        );
                     }
                     eprintln!();
                     if !metrics.recent_no_match.is_empty() {

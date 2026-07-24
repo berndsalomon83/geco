@@ -168,6 +168,15 @@
     { "q": "what time is it", "expect": ["get_current_time"], "kind": "lexical" },
     { "q": "convert a timezone", "expect": ["convert_time"], "kind": "lexical" },
 
+    { "q": "show me the folders in here", "expect": ["list_directory"], "kind": "heldout" },
+    { "q": "capture the screen", "expect": ["browser_take_screenshot"], "kind": "heldout" },
+    { "q": "modify a config file", "expect": ["edit_file"], "kind": "heldout" },
+    { "q": "post a note to the team channel", "expect": ["slack_post_message"], "kind": "heldout" },
+    { "q": "any open defects?", "expect": ["list_issues", "get_issue"], "kind": "heldout" },
+    { "q": "look up a rust crate on the internet", "expect": ["searxng_web_search"], "kind": "heldout" },
+    { "q": "how large is this document", "expect": ["get_file_info"], "kind": "heldout" },
+    { "q": "drop everything remembered about a topic", "expect": ["icm_memory_forget_topic"], "kind": "heldout" },
+
     { "q": "screenshot", "expect": ["browser_take_screenshot"], "kind": "lexical" },
     { "q": "memory", "expect": ["icm_memory_store", "icm_memory_recall", "icm_memory_forget_topic"], "kind": "lexical" },
     { "q": "icm_wake_up", "expect": ["icm_wake_up"], "kind": "lexical" }

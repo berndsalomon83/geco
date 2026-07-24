@@ -74,7 +74,24 @@ The entries are the same shape — copy, paste, add a `description` (that's what
 geco refresh     # snapshot the moved servers once
 ```
 
-Restart the agent. Context cost for those servers drops to ~4.3 KB flat.
+Restart the agent. Context cost for those servers drops to ~4.7 KB flat.
+
+> **Moving a server that reads a token from your shell? Read this.**
+> Since 0.7 a backend does **not** inherit geco's environment. A server that
+> worked directly because `GITHUB_TOKEN` was exported in your shell will start
+> without it once it sits behind geco. Nothing fails at startup — it fails at
+> the first `execute`, with whatever opaque auth error the backend produces.
+>
+> Name what it needs:
+> ```yaml
+> github:
+>   command: [github-mcp-server, stdio]
+>   pass_env: ["GITHUB_TOKEN"]        # hand THIS server that one variable
+> ```
+> Better still, take it out of the shell entirely with
+> `${keychain:github_token}` as above. `proxy.inherit_env: true` restores the
+> old behaviour wholesale, but then every server can read every secret you
+> have — see the README for why that is the thing being fixed.
 
 **Rule of thumb:** keep proactive-use servers (memory, core workflow) direct; gate everything you use occasionally.
 
@@ -89,7 +106,12 @@ In the agent: ask it to `search` for something you know is behind the proxy, the
 
 ## Config knobs
 
-`proxy.call_timeout_secs` (120), `proxy.startup_timeout_secs` (30 — raise for slow `npx` first-runs), `proxy.refresh_on_start` (true; refresh only happens when the config hash changed), `proxy.health_check_secs` (30; 0 disables). Per server: `allow`/`deny` glob lists (deny wins, enforced at listing *and* execution), `enabled`, `${VAR}` expansion in `command`/`args`/`env`, and `${keychain:SERVICE}` for secrets resolved from the OS keychain at spawn time (see README → Secrets).
+The full reference lives in **[README → Config reference](README.md#config-reference)** — every `proxy` key with its default, the per-server keys, environment isolation and secrets. It is deliberately not repeated here: this file had a copy that fell three keys behind the code, which is what a second copy always does eventually.
+
+The two you are most likely to want while installing:
+
+- `proxy.startup_timeout_secs` — raise it if a first `npx`/`uvx` run downloads a large package.
+- `pass_env` on a server — the thing to reach for when a migrated backend suddenly can't authenticate (see the callout above).
 
 ## Uninstall
 
@@ -111,14 +133,17 @@ Re-add any servers you still want directly to your agent config afterwards.
 
 ## Troubleshooting
 
-- **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing env var or binary. Fix, then `geco refresh`.
-- **First `execute` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm: `geco refresh`.
-- **Agent can't see a newly installed backend tool** — `refresh_tools` meta-tool, or `geco refresh`.
-- **Where are logs?** stderr of the proxy process (your agent's MCP log view), `RUST_LOG=debug` for detail.
+Install-specific issues:
+
+- **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing binary, or a variable it no longer inherits (see the callout under Migrate). Fix, then `geco refresh`.
+- **First `execute` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm with `geco refresh`.
+- **Installer fell back to a source build** — it couldn't fetch a release asset. The repo is private, so `gh auth login` first; or pass `--from-source` deliberately.
+
+Everything else — PATH differences under a GUI-launched agent, keychain misses, "the agent can't find a tool", stale tool lists, macOS quarantine — is in **[README → Troubleshooting](README.md#troubleshooting)**.
 
 ---
 
-## Skills on demand (v0.4)
+## Skills on demand
 
 Move your skill library behind the gateway (zero session cost until used):
 
@@ -159,4 +184,4 @@ skills in the library directly and call `refresh_tools` afterwards.
 
 ## Health toasts in opencode
 
-The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugin/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. You can also ask any model "is the geco gateway healthy?" — the `health` meta-tool answers with the failing backends and why.
+The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugins/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. You can also ask any model "is the geco gateway healthy?" — the `health` meta-tool answers with the failing backends and why.

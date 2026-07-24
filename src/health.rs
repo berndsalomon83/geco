@@ -96,6 +96,16 @@ pub struct Metrics {
     /// actionable list: each one is either a missing tool or a description
     /// that doesn't say what the tool is for.
     pub recent_no_match: Vec<String>,
+    /// Searches that surfaced at least one SKILL. Skills are a "push"
+    /// resource — nothing in a user's request names them, so the model has to
+    /// reach for one unprompted. These two counters answer the only question
+    /// that matters about that: are skills being found, and then actually
+    /// read? A library with many surfaces and no reads means the descriptions
+    /// don't match how work is described; near-zero surfaces means the model
+    /// isn't looking at all, which is a different problem entirely.
+    pub skill_surfaces: u64,
+    /// Successful `read_skill` calls — a skill that actually got used.
+    pub skill_reads: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
