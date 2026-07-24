@@ -1,0 +1,136 @@
+name: release
+
+# Installing geco has required a Rust toolchain and a from-source build,
+# which is a steep ask for an audience that mostly just wants to wire up MCP
+# servers. This builds ready-to-run binaries.
+#
+# Two entry points on purpose:
+#   push a v* tag     -> build everything AND publish a GitHub Release
+#   workflow_dispatch -> build everything, upload as run artifacts, publish
+#                        nothing. Lets the matrix be exercised without
+#                        creating an outward-facing release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl, so the Linux x86_64 build is static and doesn't inherit the
+          # builder's glibc version as a minimum requirement.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest }
+          # macos-latest is arm64; the x86_64 build cross-compiles against the
+          # SDK Xcode already ships.
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Cross-compile deps (musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Cross-compile deps (aarch64 linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Smoke-test whatever we can actually execute here. Cross-built binaries
+      # (aarch64 on x86 runners) can't run, so they're skipped rather than
+      # pretended about.
+      - name: Smoke test
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/geco"
+          [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
+          "$bin" --version
+          "$bin" schema > /dev/null
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          name="geco-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/geco.exe" "dist/${name}/"
+          else
+            cp "target/${{ matrix.target }}/release/geco" "dist/${name}/"
+          fi
+          cp README.md LICENSE geco.example.yaml "dist/${name}/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "${name}.zip" "${name}" > /dev/null
+          else
+            tar czf "${name}.tar.gz" "${name}"
+          fi
+          ls -la
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: geco-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    # Only a tag publishes. workflow_dispatch stops after `build`, so the
+    # matrix can be verified without minting a release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            artifacts/*
