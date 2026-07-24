@@ -61,6 +61,14 @@ elsewhere, does not belong in a schema that every request carries.
 
 ### Added
 
+- **Unit tests for `src/backend.rs`** — 461 lines that had none. They pin
+  behaviour nothing asserted: `enabled: false` servers never enter the
+  registry at all (rather than being filtered later, one stray lookup away
+  from spawning), `deny` is enforced at *execution* and before connecting
+  (hiding a tool is cosmetic if calling it by name still works), a backend
+  that cannot spawn fails only itself and still appears in the snapshot with
+  its reason, and a filtered refresh contains exactly the filtered server.
+  The first run found a real panic — see Fixed.
 - **CLI tests** (`tests/cli.rs`, 11 of them), run against the real binary.
   `src/main.rs` was 441 lines no test could reach — it is a binary, and none
   of its logic lives in the library. Two bugs shipped through that gap in a
@@ -120,6 +128,12 @@ elsewhere, does not belong in a schema that every request carries.
 
 ### Fixed
 
+- **`proxy.refresh_concurrency: 0` panicked the refresh.** Zero is documented
+  as "unlimited" and was implemented as `Semaphore::new(usize::MAX)` — but
+  tokio panics above `MAX_PERMITS` (`usize::MAX >> 3`), so the documented way
+  to disable the cap crashed the task instead. Found by the first unit test
+  ever written against `backend.rs`, which had 461 lines and no direct
+  coverage.
 - Windows keychain lookup read the *address* of the credential-blob pointer
   rather than the pointer's target, returning NUL-padded rubbish where the
   secret should be. Third and final fault in that script; the OS credential
