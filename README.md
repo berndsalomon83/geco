@@ -329,8 +329,8 @@ Start with `geco health` (what's broken right now), then `geco validate` (config
 **A server worked before 0.7 and now fails with an auth or config error.**
 The most likely cause, and the nastiest to spot, because it fails *late*: since 0.7 backends no longer inherit geco's environment, so a server that quietly relied on a variable exported in your shell now starts without it. There is no startup error — it fails on first `execute`, with whatever opaque message the backend produces. Name the variable: `pass_env: ["THE_VAR"]`. To confirm that's the cause, set `proxy.inherit_env: true` temporarily; if it works again, that was it.
 
-**`cannot spawn backend 'x' (npx): program not found`.**
-The command isn't on geco's `PATH`. Note that geco's PATH is not necessarily your shell's — an agent launched from a GUI often has a much shorter one. Use an absolute path in `command`, or check with `geco validate`, which warns about commands it can't resolve.
+**`backend 'x': command 'npx' not found. Is it installed and on the PATH geco was started with?`**
+The command isn't on geco's `PATH`, and geco's PATH is not necessarily your shell's. Two common causes: the agent launched geco from a GUI (which often has a much shorter PATH than your terminal), or the tool was installed by a version manager — `nvm`, `fnm`, `volta` — that only edits the PATH in your shell's rc file. Fix by launching the agent from a shell where the command works, or use an absolute path in `command`. `geco validate` warns about commands it can't resolve before you hit this at runtime.
 
 **`keychain item 'x' not found`.**
 The item doesn't exist under that exact service name, or the OS keychain is locked. Check with `security find-generic-password -s x -w` (macOS), `secret-tool lookup service x` (Linux), `cmdkey /list:x` (Windows). A missing item is deliberately fatal — secrets fail loudly rather than expanding to an empty string.

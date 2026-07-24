@@ -6,6 +6,23 @@ minor bump may break.
 
 ## [Unreleased]
 
+### Changed
+
+- **Dogfooded end-to-end against real MCP servers for the first time.** Every
+  prior test ran against a Python stub; this stood geco up in front of three
+  real, official servers (`filesystem`, `everything`, `context7`) via `npx`
+  and drove the full agent loop through `geco serve`: spawn → snapshot →
+  `list_mcp_servers` → `search` (found the right real tool at rank 1) →
+  `execute` proxied to the real backend and returned the real result. It works.
+- **A backend whose command isn't installed now says so, and how to fix it.**
+  The message was `cannot spawn backend 'x' (npx)` with the real cause (OS
+  "not found") buried — a first-run stumble that sent even the author hunting
+  the wrong thing. It now reads: *command 'npx' not found — is it installed and
+  on the PATH geco was started with?*, with a note that a tool installed via
+  nvm/fnm/volta or only on a shell's PATH is invisible to a GUI-launched agent.
+  Decided from the error type (`NotFound`), not its text, so it survives locale
+  and platform. README troubleshooting updated to match.
+
 ### Added
 
 - **`docs/search-ranking.md`** — the permanent research log for search: the

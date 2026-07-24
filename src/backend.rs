@@ -143,7 +143,27 @@ impl Backend {
             }
             c.envs(&envs);
         }))
-        .with_context(|| format!("cannot spawn backend '{}' ({bin})", name))
+        .map_err(|e| {
+            // "Command not found" is the most common first-run stumble, and a
+            // bare "cannot spawn (npx)" sends people hunting the wrong thing.
+            // Decided from the error TYPE, not its text, so it survives locale
+            // and platform differences. The PATH hint matters because geco
+            // isolates each backend's environment: a tool installed via nvm /
+            // fnm / volta, or only on a shell's PATH, is invisible unless geco
+            // itself was launched from that shell (a GUI-launched agent won't
+            // have it).
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow!(
+                    "backend '{name}': command '{bin}' not found. Is it installed \
+                     and on the PATH geco was started with? geco runs backends in \
+                     an isolated environment, so a tool installed via a version \
+                     manager (nvm/fnm/volta) or only on your shell's PATH may be \
+                     invisible unless geco itself is launched from that shell."
+                )
+            } else {
+                anyhow::Error::new(e).context(format!("cannot spawn backend '{name}' ({bin})"))
+            }
+        })
     }
 
     async fn connect_raw(&self, startup: Duration) -> Result<Conn> {
@@ -658,6 +678,15 @@ mod tests {
         assert!(
             entry.refresh_status.starts_with("error:"),
             "status should carry the reason: {:?}",
+            entry.refresh_status
+        );
+        // A missing command is the #1 first-run stumble (dogfooding hit it as
+        // "cannot spawn (npx)" with no clue). The message must name the missing
+        // command and point at PATH, not just say "spawn failed".
+        let msg = entry.refresh_status.to_lowercase();
+        assert!(
+            msg.contains("not found") && msg.contains("path"),
+            "a not-found command must explain itself and mention PATH: {:?}",
             entry.refresh_status
         );
         assert!(entry.tools.is_empty());
