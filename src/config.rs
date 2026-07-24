@@ -59,6 +59,14 @@ pub struct ProxyConfig {
     /// Ignored when `inherit_env` is true. Matched case-insensitively on
     /// Windows, where environment names are case-insensitive.
     pub env_passthrough: Vec<String>,
+    /// Extra synonym groups for tool and skill search — the escape hatch for
+    /// the case geco's lexical ranking cannot reach on its own: when your
+    /// users describe a goal in words the tool's name and description never
+    /// use. Each inner list is a set of interchangeable words, e.g.
+    /// `[["k8s", "kubernetes"], ["repo", "repository"]]`. Words are matched
+    /// after the same stemming queries and tools get, so write them plainly.
+    /// Applied on top of the built-in table; picked up on config hot-reload.
+    pub search_synonyms: Vec<Vec<String>>,
 }
 
 impl Default for ProxyConfig {
@@ -71,6 +79,7 @@ impl Default for ProxyConfig {
             inherit_env: false,
             env_passthrough: Vec::new(),
             refresh_concurrency: 8,
+            search_synonyms: Vec::new(),
         }
     }
 }

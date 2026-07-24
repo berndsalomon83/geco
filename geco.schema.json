@@ -66,6 +66,17 @@
             "type": "string"
           },
           "default": []
+        },
+        "search_synonyms": {
+          "description": "Extra synonym groups for tool and skill search — the escape hatch for\nthe case geco's lexical ranking cannot reach on its own: when your\nusers describe a goal in words the tool's name and description never\nuse. Each inner list is a set of interchangeable words, e.g.\n`[[\"k8s\", \"kubernetes\"], [\"repo\", \"repository\"]]`. Words are matched\nafter the same stemming queries and tools get, so write them plainly.\nApplied on top of the built-in table; picked up on config hot-reload.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": []
         }
       }
     },

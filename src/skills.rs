@@ -208,6 +208,12 @@ impl SkillIndex {
     /// Ranked by the same scorer as tool search, so the two surfaces behave
     /// alike. Skills have no server field.
     pub fn search(&self, query: &str, limit: usize) -> Vec<&SkillMeta> {
+        self.search_with(query, limit, &[])
+    }
+
+    /// `search` with user-provided `extra` synonym groups, so a configured
+    /// `proxy.search_synonyms` reaches skill discovery too.
+    pub fn search_with(&self, query: &str, limit: usize, extra: &[Vec<String>]) -> Vec<&SkillMeta> {
         let docs: Vec<crate::search::Doc> = self
             .skills
             .iter()
@@ -217,7 +223,7 @@ impl SkillIndex {
                 server: None,
             })
             .collect();
-        crate::search::rank(&docs, query, limit)
+        crate::search::rank_with(&docs, query, limit, extra)
             .into_iter()
             .map(|r| &self.skills[r.index])
             .collect()
