@@ -24,7 +24,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,7 +37,7 @@ jobs:
       # green having exercised almost nothing — so we install one explicitly
       # AND set GECO_REQUIRE_E2E below to turn a missing interpreter into a
       # failure rather than a silent no-op.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -62,7 +62,7 @@ jobs:
     # of a permanently-red advisory job. Make this blocking (drop the `if !`)
     # after a deliberate `cargo fmt` pass, if that's the direction you want.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
