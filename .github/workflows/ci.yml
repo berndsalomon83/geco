@@ -50,17 +50,13 @@ jobs:
           GECO_REQUIRE_E2E: 1
 
   fmt:
-    name: rustfmt (advisory)
+    name: rustfmt
     runs-on: ubuntu-latest
-    # Advisory on purpose: the codebase uses deliberate compact formatting in
-    # places (single-line guard clauses, hand-aligned tables) that rustfmt
-    # would rewrite wholesale — ~177 diff hunks. Blocking on it would mean
-    # either a large reformat commit or a pile of #[rustfmt::skip].
-    #
-    # The step reports drift as a warning annotation and exits 0, so the run
-    # stays green and a genuine failure elsewhere is never lost in the noise
-    # of a permanently-red advisory job. Make this blocking (drop the `if !`)
-    # after a deliberate `cargo fmt` pass, if that's the direction you want.
+    # Blocking since the tree was formatted in 58e8ce2. It was advisory while
+    # 214 hunks of drift existed — and that drift only grew, because a warning
+    # nobody has to act on is a warning nobody acts on. Run `cargo fmt` before
+    # pushing; that commit is in .git-blame-ignore-revs so blame still points
+    # at whoever wrote the line.
     steps:
       - uses: actions/checkout@v7
 
@@ -68,11 +64,7 @@ jobs:
         with:
           components: rustfmt
 
-      - name: cargo fmt --check (advisory)
-        run: |
-          if ! cargo fmt --check; then
-            echo "::warning::rustfmt drift present — advisory only, see log above"
-          fi
+      - run: cargo fmt --check
 
   # Warnings are per-job annotations, which means they are effectively
   # invisible: you have to open each job to find them. That is how a Node 20

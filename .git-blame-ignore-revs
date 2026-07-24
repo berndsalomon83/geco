@@ -1,0 +1,11 @@
+# Revisions to skip when running `git blame`, so a bulk reformat doesn't
+# claim authorship of every line it touched.
+#
+# GitHub honours this file automatically in its blame view. For local git:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only add commits that are PURELY mechanical — formatting, renames — and
+# never ones that also change behaviour, or real authorship gets hidden.
+
+# style: cargo fmt across the tree (formatting only, no behaviour change)
+58e8ce2250a82790f0c7480543807812692c42a1
