@@ -275,6 +275,27 @@ The released binaries are unsigned. `xattr -d com.apple.quarantine "$(command -v
 
 Servers you use *sometimes*. A server whose tools you want the model to reach for proactively on every task (e.g. a memory store like [icm-slim](https://github.com/rtk-ai/icm)) can stay directly connected — visibility is the point there. Everything else is a candidate.
 
+## Working on geco
+
+`main` is protected: force-pushes and deletion are blocked, and the CI checks
+must pass before a merge. Repository admins keep a bypass — deliberately, so
+that a broken pipeline can still be repaired.
+
+```bash
+git config core.hooksPath .githooks   # once per clone: fmt/clippy/tests before push
+
+git switch -c fix/thing
+# ...
+git push -u origin HEAD
+gh pr create --fill
+gh pr merge --auto --squash           # merges itself once CI is green
+```
+
+The pre-push hook is a convenience, not the gate. CI is the gate: it runs on
+Linux, macOS and Windows and enforces things a local run can't — the e2e suite
+against a guaranteed Python, the macOS keychain round-trip, the MSRV floor,
+supply-chain and secret scanning. `git push --no-verify` skips the hook.
+
 ## License
 
 MIT. Design derived from lazy-mcp (© 2025 tbxark, MIT); this implementation © 2026 Bernd Salomon.
