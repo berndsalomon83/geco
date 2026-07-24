@@ -43,6 +43,9 @@ enum Cmd {
     Schema,
     /// Print runtime metrics from the last health.json write
     Stats,
+    /// Report what is currently broken: failing backends, config and skill
+    /// problems, and why. Exits non-zero when anything is wrong.
+    Health,
     /// Validate the config for common mistakes (missing keychain items, missing dirs, etc.)
     Validate,
 }
@@ -97,6 +100,53 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     if matches!(cli.command, Some(Cmd::Schema)) {
         println!("{}", Config::schema_json());
+        return Ok(());
+    }
+
+    // Health needs only health.json — it has to work when the config is the
+    // very thing that's broken, so it must not require parsing one.
+    //
+    // This is the command that replaced the `health` meta-tool. That tool sat
+    // in every session's context to answer a question that only comes up once
+    // something has already failed; the agent gets the same facts in-band
+    // from `execute`'s error code and `list_mcp_servers`, and a human gets
+    // the full picture here.
+    if matches!(cli.command, Some(Cmd::Health)) {
+        let health_path = geco::health::health_path();
+        let Some(report) = geco::health::read(&health_path) else {
+            // Not an error: no file means no proxy has run, which is a
+            // different situation from a proxy reporting trouble.
+            eprintln!(
+                "no health file at {} — the proxy has not run yet",
+                health_path.display()
+            );
+            return Ok(());
+        };
+        let client = report.client.as_deref().unwrap_or("unknown client");
+        if report.issues.is_empty() {
+            eprintln!("healthy — no issues as of {} ({client})", report.updated_at);
+            return Ok(());
+        }
+        let errors = report
+            .issues
+            .iter()
+            .filter(|i| i.severity == "error")
+            .count();
+        eprintln!(
+            "{} issue(s), {errors} error(s) as of {} ({client})\n",
+            report.issues.len(),
+            report.updated_at
+        );
+        for i in &report.issues {
+            eprintln!("{:<8} {:<8} {}", i.severity, i.kind, i.subject);
+            eprintln!("         {}", i.detail);
+        }
+        eprintln!("\nnext: `geco validate` for config mistakes, `geco inspect` for the snapshot");
+        // Non-zero on errors only, so a warning doesn't fail someone's script
+        // while a genuinely dead backend still does.
+        if errors > 0 {
+            std::process::exit(1);
+        }
         return Ok(());
     }
 
@@ -255,7 +305,9 @@ async fn main() -> Result<()> {
             // kept for match exhaustiveness.
             unreachable!()
         }
-        Cmd::Inspect | Cmd::Stats => unreachable!(),
+        // Handled above, before the config is loaded, because each must work
+        // when the config itself is what's broken.
+        Cmd::Inspect | Cmd::Stats | Cmd::Health => unreachable!(),
         Cmd::Serve {
             refresh,
             no_refresh,
@@ -292,7 +344,7 @@ async fn main() -> Result<()> {
                 })
             };
             tracing::info!(
-                "geco up: {} servers, {} tools behind 8 meta-tools",
+                "geco up: {} servers, {} tools behind 7 meta-tools",
                 snapshot.servers.len(),
                 snapshot.tool_count()
             );

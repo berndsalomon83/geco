@@ -261,8 +261,8 @@ async fn refresh_tools_does_not_deadlock() {
 
 #[tokio::test]
 async fn health_reports_backend_failures() {
-    // Verify the health meta-tool reports backend failures and that
-    // publish_health + all_issues agree (the three surfaces: health tool,
+    // Verify a backend failure reaches the agent and that publish_health +
+    // all_issues agree (the surfaces: list_mcp_servers' `issues`,
     // health.json, and the internal issue list).
     let Some(py) = python_bin() else { return };
 
@@ -298,17 +298,17 @@ async fn health_reports_backend_failures() {
     // publish_health writes to health.json — verify it doesn't deadlock.
     proxy.publish_health().await;
 
-    // The health meta-tool should report the broken server as an issue.
-    let result = proxy.health().await.unwrap();
+    // list_mcp_servers should report the broken server as an issue. This is
+    // the agent's only in-band view of gateway health now that `health` is a
+    // CLI command, so it is the one that must not silently stop working.
+    let result = proxy.list_mcp_servers().await.unwrap();
     let json = extract_json(&result);
-    assert_eq!(
-        json["healthy"], false,
-        "health tool should report unhealthy: {json}"
-    );
-    let issues = json["issues"].as_array().unwrap();
+    let issues = json["issues"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected an `issues` array when a backend is down: {json}"));
     assert!(
         issues.iter().any(|i| i["subject"] == "broken"),
-        "health tool should mention broken server: {json}"
+        "issues should mention the broken server: {json}"
     );
 
     registry.shutdown_all().await;
@@ -322,7 +322,7 @@ async fn list_mcp_servers_through_proxy() {
     let result = proxy.list_mcp_servers().await.unwrap();
     assert!(!is_error(&result));
     let json = extract_json(&result);
-    let servers = json.as_array().unwrap();
+    let servers = json["servers"].as_array().unwrap();
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0]["server"], "stub");
     assert_eq!(servers[0]["tools"], 2);
@@ -895,21 +895,23 @@ async fn rescan_skills_drops_removed_skill() {
 }
 
 #[tokio::test]
-async fn config_reload_failure_surfaces_in_health() {
+async fn config_reload_failure_surfaces_to_the_agent() {
     let Some(cfg) = stub_config() else { return };
     let (proxy, registry, _snap) = make_proxy(&cfg).await;
 
-    // Initially healthy (no config issues).
-    let result = proxy.health().await.unwrap();
-    let json = extract_json(&result);
-    assert!(
+    // `issues` is absent, not empty, when there is nothing wrong — that is
+    // the whole point of folding it into this response instead of paying for
+    // a `health` tool in every session's context.
+    let config_issues = |json: &serde_json::Value| -> usize {
         json["issues"]
             .as_array()
-            .unwrap()
-            .iter()
-            .all(|i| i["kind"] != "config"),
-        "expected no config issues initially: {json}"
-    );
+            .map(|a| a.iter().filter(|i| i["kind"] == "config").count())
+            .unwrap_or(0)
+    };
+
+    let result = proxy.list_mcp_servers().await.unwrap();
+    let json = extract_json(&result);
+    assert_eq!(config_issues(&json), 0, "expected none initially: {json}");
 
     // Simulate a config-reload failure (what the hot-reload watcher does on
     // a broken config file).
@@ -922,36 +924,25 @@ async fn config_reload_failure_surfaces_in_health() {
         }))
         .await;
 
-    // Health should now surface the config issue.
-    let result = proxy.health().await.unwrap();
+    // It should now reach the agent without a dedicated health tool.
+    let result = proxy.list_mcp_servers().await.unwrap();
     let json = extract_json(&result);
-    let config_issues: Vec<_> = json["issues"]
+    assert_eq!(config_issues(&json), 1, "expected 1 config issue: {json}");
+    let detail = json["issues"]
         .as_array()
-        .unwrap()
-        .iter()
-        .filter(|i| i["kind"] == "config")
-        .collect();
-    assert_eq!(config_issues.len(), 1, "expected 1 config issue: {json}");
+        .and_then(|a| a.iter().find(|i| i["kind"] == "config"))
+        .and_then(|i| i["detail"].as_str())
+        .unwrap_or_default();
     assert!(
-        config_issues[0]["detail"]
-            .as_str()
-            .unwrap()
-            .contains("parse failed"),
-        "expected parse failed in detail: {config_issues:?}"
+        detail.contains("parse failed"),
+        "expected the reason, not just the fact: {detail:?}"
     );
 
     // Clear the issue (what a successful reload does).
     proxy.set_config_issue(None).await;
-    let result = proxy.health().await.unwrap();
+    let result = proxy.list_mcp_servers().await.unwrap();
     let json = extract_json(&result);
-    assert!(
-        json["issues"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|i| i["kind"] != "config"),
-        "expected no config issues after clear: {json}"
-    );
+    assert_eq!(config_issues(&json), 0, "expected none after clear: {json}");
 
     registry.shutdown_all().await;
 }
@@ -1043,7 +1034,7 @@ async fn hot_reload_updates_snapshot() {
     // Verify initial state: 1 server.
     let result = proxy.list_mcp_servers().await.unwrap();
     let json = extract_json(&result);
-    let servers = json.as_array().unwrap();
+    let servers = json["servers"].as_array().unwrap();
     assert_eq!(servers.len(), 1, "expected 1 server initially: {json}");
     assert_eq!(servers[0]["server"], "stub");
 
@@ -1060,7 +1051,7 @@ async fn hot_reload_updates_snapshot() {
     // After reload: still 1 server, but description changed.
     let result = proxy.list_mcp_servers().await.unwrap();
     let json = extract_json(&result);
-    let servers = json.as_array().unwrap();
+    let servers = json["servers"].as_array().unwrap();
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0]["description"], "updated desc");
 
