@@ -5,6 +5,9 @@
 # Git already stored these as LF; this makes the checkout match.
 *.sh    text eol=lf
 *.py    text eol=lf
+# Git hooks are executed by bash and have no extension, so they need the same
+# treatment — a CRLF hook fails the moment it runs on a Windows clone.
+.githooks/* text eol=lf
 
 # PowerShell is happy either way, but CRLF is the platform norm.
 *.ps1   text eol=crlf
