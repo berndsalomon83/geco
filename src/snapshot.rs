@@ -109,7 +109,7 @@ pub fn short_desc(desc: &str, max: usize) -> String {
         .map(|(i, _)| i)
         .unwrap_or(flat.len());
     if cut < flat.len() {
-        format!("{}…", &flat[..cut].trim_end())
+        format!("{}…", flat[..cut].trim_end())
     } else {
         flat
     }
@@ -152,5 +152,21 @@ mod tests {
         assert_eq!(short_desc("hello world", 50), "hello world");
         let long = "x".repeat(300);
         assert!(short_desc(&long, 50).chars().count() <= 51);
+    }
+
+    #[test]
+    fn short_desc_cuts_on_char_boundaries() {
+        // `max` counts characters, not bytes. Slicing a multibyte string at a
+        // byte offset would panic — tool descriptions are arbitrary text from
+        // third-party servers, so this is a real input, not a hypothetical.
+        let s = "Größenänderung für Meßgeräte ".repeat(10);
+        let out = short_desc(&s, 12);
+        assert!(out.chars().count() <= 13, "got {out:?}");
+        assert!(out.ends_with('…'), "long input should be elided: {out:?}");
+
+        // Cutting exactly at the end must not append an ellipsis.
+        assert_eq!(short_desc("äöü", 3), "äöü");
+        // Whitespace runs collapse before measuring.
+        assert_eq!(short_desc("  a \n\t b  ", 50), "a b");
     }
 }

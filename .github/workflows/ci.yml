@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel the other platforms when one fails — geco has real
+      # platform-specific code (keychain backends, HOME vs USERPROFILE, the
+      # .exe probing in binary_exists) and "which platforms broke" is the
+      # single most useful thing a red run can tell us.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The e2e suite drives a real child MCP server written in Python. With
+      # no interpreter every one of those tests skips itself and the run goes
+      # green having exercised almost nothing — so we install one explicitly
+      # AND set GECO_REQUIRE_E2E below to turn a missing interpreter into a
+      # failure rather than a silent no-op.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: test
+        run: cargo test --locked
+        env:
+          GECO_REQUIRE_E2E: 1
+
+  fmt:
+    name: rustfmt (advisory)
+    runs-on: ubuntu-latest
+    # Advisory on purpose: the codebase uses deliberate compact formatting in
+    # places (single-line guard clauses, hand-aligned tables) that rustfmt
+    # would rewrite wholesale. Running it as a blocking check would mean
+    # either a large reformat commit or a pile of #[rustfmt::skip]. Left
+    # visible so the drift is known; flip continue-on-error off after a
+    # deliberate `cargo fmt` pass, if that's the direction you want.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - run: cargo fmt --check

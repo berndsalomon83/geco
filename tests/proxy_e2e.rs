@@ -1,6 +1,7 @@
 //! End-to-end: real child process (python stub), snapshot refresh, lazy
 //! execution, allow/deny enforcement, skills through Proxy. Skips gracefully
-//! when python3 is unavailable.
+//! when no Python interpreter is available — unless GECO_REQUIRE_E2E is set,
+//! in which case a missing interpreter is a hard failure (see `python_bin`).
 
 use std::sync::Arc;
 
@@ -14,23 +15,63 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ContentBlock;
 use geco::snapshot::Snapshot;
 
-fn stub_config() -> Option<Config> {
-    if std::process::Command::new("python3")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("python3 not available — skipping e2e");
-        return None;
+/// The interpreter to run the stub MCP server with, or None if there isn't
+/// one. Probes `python3` then `python`: Windows ships `python.exe` but
+/// usually not `python3`, so probing only the former made the ENTIRE e2e
+/// suite silently skip itself there — a green run that tested nothing.
+///
+/// Set `GECO_REQUIRE_E2E=1` (CI does) to turn "no interpreter" into a hard
+/// failure instead of a skip. A run that quietly covered nothing is worse
+/// than a red one, because it looks like coverage.
+fn python_bin() -> Option<String> {
+    for bin in ["python3", "python"] {
+        // Check the exit status, not just that spawning worked: Windows'
+        // App Execution Alias stub for `python` runs fine and exits 9009.
+        let runs = std::process::Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if runs {
+            return Some(bin.to_string());
+        }
     }
-    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
-    let raw = format!(
-        r#"{{"mcpServers":{{"stub":{{
-            "command":"python3","args":["{stub}"],
-            "description":"stub","deny":["secret_*"]
-        }}}}}}"#
+    assert!(
+        std::env::var_os("GECO_REQUIRE_E2E").is_none(),
+        "GECO_REQUIRE_E2E is set but neither `python3` nor `python` runs — \
+         the e2e suite would have skipped itself and reported success"
     );
-    Some(serde_json::from_str(&raw).unwrap())
+    eprintln!("no python3/python available — skipping e2e");
+    None
+}
+
+fn stub_path() -> &'static str {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py")
+}
+
+/// Build a Config from an `mcpServers` map.
+///
+/// Deliberately `json!` + `from_value` rather than `format!` into a JSON
+/// string literal: on Windows CARGO_MANIFEST_DIR is `C:\Users\...`, and
+/// backslashes are escape characters inside a JSON string — `\U` and `\g`
+/// are not valid escapes, so every format!-built config in this file failed
+/// to parse there. It never surfaced only because the python3 probe above
+/// bailed out first.
+fn config_from(servers: serde_json::Value) -> Config {
+    serde_json::from_value(serde_json::json!({ "mcpServers": servers }))
+        .expect("test config must deserialize")
+}
+
+fn stub_config() -> Option<Config> {
+    let py = python_bin()?;
+    Some(config_from(serde_json::json!({
+        "stub": {
+            "command": py,
+            "args": [stub_path()],
+            "description": "stub",
+            "deny": ["secret_*"],
+        }
+    })))
 }
 
 /// Build a Proxy from a config, returning the proxy, registry, and snapshot.
@@ -198,19 +239,16 @@ async fn health_reports_backend_failures() {
     // Verify the health meta-tool reports backend failures and that
     // publish_health + all_issues agree (the three surfaces: health tool,
     // health.json, and the internal issue list).
-    if std::process::Command::new("python3").arg("--version").output().is_err() {
-        return;
-    }
+    let Some(py) = python_bin() else { return };
 
     // Add a deliberately broken server to the config.
-    let raw = format!(
-        r#"{{"mcpServers":{{
-            "stub":{{"command":"python3","args":["{stub}"],"description":"stub","deny":["secret_*"]}},
-            "broken":{{"command":"/nonexistent/binary","description":"broken"}}
-        }}}}"#,
-        stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py")
-    );
-    let cfg: Config = serde_json::from_str(&raw).unwrap();
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "description": "stub", "deny": ["secret_*"],
+        },
+        "broken": { "command": "/nonexistent/binary", "description": "broken" },
+    }));
 
     let registry = Arc::new(Registry::from_config(&cfg));
     let snapshot = registry.build_snapshot(cfg.snapshot_hash(), None).await;
@@ -727,18 +765,18 @@ async fn hot_reload_updates_snapshot() {
     // 2. Removed servers disappear
     // 3. list_mcp_servers reflects the new state
     // 4. execute works on the new server
-    if std::process::Command::new("python3").arg("--version").output().is_err() {
-        return;
-    }
-    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
+    let Some(py) = python_bin() else { return };
     let dir = tempfile::tempdir().unwrap();
     let snap_path = dir.path().join("snapshot.json");
     let cfg_path = dir.path().join("config.yaml");
 
     // Initial config: one server ("stub").
-    let cfg1: Config = serde_json::from_str(&format!(
-        r#"{{"mcpServers":{{"stub":{{"command":"python3","args":["{stub}"],"description":"stub","deny":["secret_*"]}}}}}}"#
-    )).unwrap();
+    let cfg1 = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "description": "stub", "deny": ["secret_*"],
+        }
+    }));
     let registry = Arc::new(Registry::from_config(&cfg1));
     let snapshot = registry.build_snapshot(cfg1.snapshot_hash(), None).await;
     let proxy = Proxy::new(
@@ -760,9 +798,12 @@ async fn hot_reload_updates_snapshot() {
 
     // Reload with a config that has a different description for "stub"
     // (proving the snapshot hash changes and tools are re-fetched).
-    let cfg2: Config = serde_json::from_str(&format!(
-        r#"{{"mcpServers":{{"stub":{{"command":"python3","args":["{stub}"],"description":"updated desc","deny":["secret_*"]}}}}}}"#
-    )).unwrap();
+    let cfg2 = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "description": "updated desc", "deny": ["secret_*"],
+        }
+    }));
     proxy.reload_from_config(cfg2).await.unwrap();
 
     // After reload: still 1 server, but description changed.
@@ -1010,10 +1051,7 @@ async fn refresh_tools_returns_diff() {
 async fn refresh_tools_diff_shows_added_server() {
     // Regression: compute_diff missed newly added servers in a full refresh
     // because the iterator only covered servers in both old and new.
-    if std::process::Command::new("python3").arg("--version").output().is_err() {
-        return;
-    }
-    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
+    let Some(py) = python_bin() else { return };
     let dir = tempfile::tempdir().unwrap();
     let snap_path = dir.path().join("snapshot.json");
     let cfg_path = dir.path().join("config.yaml");
@@ -1022,12 +1060,16 @@ async fn refresh_tools_diff_shows_added_server() {
     // Config with two servers, but initial snapshot only has one.
     // (Simulates: user added a server to config, then calls refresh_tools
     // manually without hot-reload having fired yet.)
-    let cfg: Config = serde_json::from_str(&format!(
-        r#"{{"mcpServers":{{
-            "stub":{{"command":"python3","args":["{stub}"],"description":"stub","deny":["secret_*"]}},
-            "stub2":{{"command":"python3","args":["{stub}"],"description":"second stub"}}
-        }}}}"#
-    )).unwrap();
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "description": "stub", "deny": ["secret_*"],
+        },
+        "stub2": {
+            "command": py, "args": [stub_path()],
+            "description": "second stub",
+        },
+    }));
     let registry = Arc::new(Registry::from_config(&cfg));
 
     // Build a snapshot with only "stub" (not stub2).
@@ -1065,21 +1107,22 @@ async fn partial_refresh_leaves_other_backends_running() {
     // every OTHER server out of the fresh build, so whenever the snapshot was
     // partial (empty cache with refresh_on_start=false, or a filtered build),
     // refreshing one backend killed all the others.
-    if std::process::Command::new("python3").arg("--version").output().is_err() {
-        return;
-    }
-    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stub_server.py");
+    let Some(py) = python_bin() else { return };
     let dir = tempfile::tempdir().unwrap();
     let snap_path = dir.path().join("snapshot.json");
     let cfg_path = dir.path().join("config.yaml");
     std::mem::forget(dir);
 
-    let cfg: Config = serde_json::from_str(&format!(
-        r#"{{"mcpServers":{{
-            "stub":{{"command":"python3","args":["{stub}"],"description":"stub"}},
-            "stub2":{{"command":"python3","args":["{stub}"],"description":"second stub"}}
-        }}}}"#
-    )).unwrap();
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "description": "stub",
+        },
+        "stub2": {
+            "command": py, "args": [stub_path()],
+            "description": "second stub",
+        },
+    }));
     let registry = Arc::new(Registry::from_config(&cfg));
 
     // Snapshot deliberately covers only "stub" — "stub2" is configured and

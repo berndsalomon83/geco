@@ -289,6 +289,59 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_parses_name_description_version() {
+        // NB: `version: 1.0` would be a YAML float and fail to deserialize
+        // into Option<String>, taking the whole frontmatter with it. Real
+        // skills use semver-ish strings, which YAML reads as strings.
+        let fm = parse_frontmatter(
+            "---\nname: a-skill\ndescription: does a thing\nversion: 1.2.0\n---\n\n# Body\n",
+        )
+        .expect("frontmatter should parse");
+        assert_eq!(fm.name.as_deref(), Some("a-skill"));
+        assert_eq!(fm.description, "does a thing");
+        assert_eq!(fm.version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn frontmatter_without_a_name_still_parses() {
+        // `scan` falls back to the directory name, so a nameless frontmatter
+        // must yield Some(..) with name: None — not None.
+        let fm = parse_frontmatter("---\ndescription: only a description\n---\n\nbody")
+            .expect("frontmatter should parse");
+        assert!(fm.name.is_none());
+        assert_eq!(fm.description, "only a description");
+    }
+
+    #[test]
+    fn frontmatter_absent_or_unterminated_yields_none() {
+        assert!(parse_frontmatter("# No frontmatter at all\n").is_none());
+        assert!(parse_frontmatter("").is_none());
+        assert!(
+            parse_frontmatter("---\nname: a\ndescription: d\n").is_none(),
+            "an unclosed frontmatter block must not parse"
+        );
+    }
+
+    #[test]
+    fn frontmatter_closing_delimiter_tolerates_trailing_whitespace() {
+        let fm = parse_frontmatter("---\nname: a\ndescription: d\n--- \n\nbody")
+            .expect("trailing space after --- is still a delimiter");
+        assert_eq!(fm.name.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn frontmatter_stops_at_the_first_real_delimiter() {
+        // A body containing its own --- (horizontal rules are common in
+        // markdown) must not confuse the scan or truncate the description.
+        let fm = parse_frontmatter(
+            "---\nname: a\ndescription: d\n---\n\n# Body\n\n---\n\nmore body\n",
+        )
+        .expect("frontmatter should parse");
+        assert_eq!(fm.name.as_deref(), Some("a"));
+        assert_eq!(fm.description, "d");
+    }
+
+    #[test]
     fn missing_dir_is_reported_not_fatal() {
         let idx = SkillIndex::scan(&["/nonexistent/skills".into()]);
         assert!(idx.skills.is_empty());

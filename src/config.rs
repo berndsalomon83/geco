@@ -658,6 +658,29 @@ mod tests {
     }
 
     #[test]
+    fn expand_value_rejects_unterminated_placeholder() {
+        // A typo'd `${VAR` must be a loud error, not a silent truncation that
+        // hands the backend a half-expanded command line. (No env guard: this
+        // bails before resolving anything.)
+        let err = expand_value("prefix ${UNCLOSED").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unterminated"), "got: {msg}");
+    }
+
+    #[test]
+    fn expand_value_handles_repeats_and_adjacency() {
+        let _env = env_guard();
+        std::env::set_var("GECO_REPEAT_TEST", "x");
+        // Multiple placeholders, back to back, and one at each end.
+        assert_eq!(
+            expand_value("${GECO_REPEAT_TEST}/${GECO_REPEAT_TEST}${GECO_REPEAT_TEST}").unwrap(),
+            "x/xx"
+        );
+        assert_eq!(expand_value("a${GECO_REPEAT_TEST}b").unwrap(), "axb");
+        std::env::remove_var("GECO_REPEAT_TEST");
+    }
+
+    #[test]
     fn yaml_config_parses() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("c.yaml");
