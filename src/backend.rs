@@ -388,10 +388,16 @@ impl Registry {
         // Cap how many backends start at once. Every one of these spawns a
         // child process, so an uncapped refresh of a large config is a
         // process storm at exactly the wrong moment — agent startup.
+        // 0 means "unlimited" (documented). It must NOT be usize::MAX:
+        // tokio's semaphore panics above MAX_PERMITS (usize::MAX >> 3), so
+        // the documented way to disable the cap used to crash the refresh
+        // task outright. MAX_PERMITS is unlimited for any real config.
         let limit = if self.proxy.refresh_concurrency == 0 {
-            usize::MAX
+            tokio::sync::Semaphore::MAX_PERMITS
         } else {
-            self.proxy.refresh_concurrency
+            self.proxy
+                .refresh_concurrency
+                .min(tokio::sync::Semaphore::MAX_PERMITS)
         };
         let permits = Arc::new(tokio::sync::Semaphore::new(limit));
 
@@ -457,5 +463,216 @@ impl Registry {
         for backend in self.backends.values() {
             backend.set_tool_change_notifier(tx.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config from a JSON literal, so tests read like the file a user
+    /// writes rather than like struct construction.
+    fn config(v: serde_json::Value) -> Config {
+        serde_json::from_value(v).expect("test config must deserialize")
+    }
+
+    fn registry(v: serde_json::Value) -> Registry {
+        Registry::from_config(&config(v))
+    }
+
+    /// `enabled: false` has to be honoured at *construction*, not filtered
+    /// later. A disabled server that still exists in the registry is one
+    /// stray `get()` away from being spawned.
+    #[test]
+    fn disabled_servers_never_enter_the_registry() {
+        let r = registry(serde_json::json!({
+            "mcpServers": {
+                "on":  { "command": ["true"] },
+                "off": { "command": ["true"], "enabled": false },
+            }
+        }));
+        assert!(r.backends.contains_key("on"));
+        assert!(
+            !r.backends.contains_key("off"),
+            "a disabled server must not be constructed at all, got {:?}",
+            r.backends.keys().collect::<Vec<_>>()
+        );
+        assert!(r.get("off").is_err(), "and must not be reachable by name");
+    }
+
+    /// The error a user sees when the agent invents a server name. It should
+    /// say what to do next, not just fail.
+    #[test]
+    fn unknown_server_error_points_somewhere_useful() {
+        let r = registry(serde_json::json!({ "mcpServers": { "a": { "command": ["true"] } } }));
+        // `Backend` is not Debug, so unwrap_err() is unavailable on the Ok
+        // side of this Result — match instead.
+        let err = match r.get("nope") {
+            Ok(_) => panic!("an unknown server must not resolve"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("nope"), "should name the server: {err}");
+        assert!(
+            err.contains("list_mcp_servers"),
+            "should say how to find the real name: {err}"
+        );
+    }
+
+    /// Backends are lazy: constructing a registry must not start anything.
+    /// If this ever regresses, every `geco inspect` and every proxy startup
+    /// becomes a process storm.
+    #[tokio::test]
+    async fn backends_start_cold() {
+        let r = registry(serde_json::json!({
+            "mcpServers": { "a": { "command": ["/nonexistent/binary"] } }
+        }));
+        assert!(
+            matches!(r.get("a").unwrap().status().await, Status::Cold),
+            "a freshly built backend must be Cold, not started"
+        );
+    }
+
+    /// deny is enforced at EXECUTION, not merely by hiding tools from
+    /// listings. This is the security-relevant half: hiding a tool is
+    /// cosmetic if calling it by name still works.
+    ///
+    /// It also must be decided BEFORE connecting — the command here does not
+    /// exist, so if the check happened after `connection()` this would fail
+    /// with a spawn error instead of DENY.
+    #[tokio::test]
+    async fn denied_tools_are_refused_without_ever_spawning() {
+        let cfg = config(serde_json::json!({
+            "mcpServers": {
+                "a": { "command": ["/nonexistent/binary"], "deny": ["secret_*"] }
+            }
+        }));
+        let r = Registry::from_config(&cfg);
+        let backend = r.get("a").unwrap();
+
+        let err = format!(
+            "{:#}",
+            backend
+                .call("secret_thing", None, &cfg.proxy)
+                .await
+                .expect_err("a denied tool must not be callable")
+        );
+        assert!(
+            err.starts_with("DENY:"),
+            "denial must be reported as DENY (execute maps this to \
+             not_allowed), got: {err}"
+        );
+        assert!(
+            matches!(backend.status().await, Status::Cold),
+            "a denied call must not have started the backend"
+        );
+    }
+
+    /// A backend that cannot spawn is recorded as a per-server failure, and
+    /// the snapshot still comes back. One broken server must never take the
+    /// gateway down with it.
+    #[tokio::test]
+    async fn a_backend_that_cannot_spawn_fails_only_itself() {
+        let r = registry(serde_json::json!({
+            "mcpServers": {
+                "broken": { "command": ["/nonexistent/binary"], "description": "d" }
+            }
+        }));
+        let snap = r.build_snapshot("hash".into(), None).await;
+
+        let entry = snap.servers.get("broken").expect(
+            "a failing server must still appear in the snapshot, \
+                    or it vanishes from list_mcp_servers with no explanation",
+        );
+        assert!(
+            entry.refresh_status.starts_with("error:"),
+            "status should carry the reason: {:?}",
+            entry.refresh_status
+        );
+        assert!(entry.tools.is_empty());
+        assert_eq!(snap.config_hash, "hash");
+    }
+
+    /// `only` restricts the refresh to one server. The bug this guards is
+    /// subtle and was hit for real: a single-server refresh must not produce
+    /// a snapshot that *omits* everything else, because callers merge on the
+    /// assumption that absence means "unchanged", not "gone".
+    #[tokio::test]
+    async fn a_filtered_refresh_touches_only_that_server() {
+        let r = registry(serde_json::json!({
+            "mcpServers": {
+                "a": { "command": ["/nonexistent/binary"] },
+                "b": { "command": ["/nonexistent/binary"] },
+            }
+        }));
+        let snap = r.build_snapshot("h".into(), Some("a")).await;
+        assert_eq!(
+            snap.servers.keys().collect::<Vec<_>>(),
+            vec!["a"],
+            "a filtered refresh must contain exactly the filtered server"
+        );
+
+        // A filter naming nothing must yield an empty snapshot rather than
+        // silently falling back to refreshing everything.
+        let none = r.build_snapshot("h".into(), Some("does-not-exist")).await;
+        assert!(
+            none.servers.is_empty(),
+            "an unmatched filter must not refresh everything: {:?}",
+            none.servers.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// refresh_concurrency = 0 means "uncapped", not "no permits" — a
+    /// semaphore built with 0 would deadlock every backend forever.
+    #[tokio::test]
+    async fn zero_refresh_concurrency_means_uncapped_not_stalled() {
+        let r = registry(serde_json::json!({
+            "mcpServers": {
+                "a": { "command": ["/nonexistent/binary"] },
+                "b": { "command": ["/nonexistent/binary"] },
+            },
+            "proxy": { "refresh_concurrency": 0 }
+        }));
+        let snap = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            r.build_snapshot("h".into(), None),
+        )
+        .await
+        .expect("refresh_concurrency=0 must not hang");
+        assert_eq!(snap.servers.len(), 2);
+    }
+
+    /// Shutting down backends that were never started must be a no-op, not a
+    /// hang or a panic. This runs on every clean exit.
+    #[tokio::test]
+    async fn shutting_down_cold_backends_is_harmless() {
+        let r = registry(serde_json::json!({
+            "mcpServers": { "a": { "command": ["true"] }, "b": { "command": ["true"] } }
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(10), r.shutdown_all())
+            .await
+            .expect("shutdown_all must not hang on cold backends");
+    }
+
+    /// `check_health` answers "is this connection known-dead?", NOT "is this
+    /// backend running?". A cold backend has no connection, so nothing is
+    /// wrong and it passes — the periodic checker must not tear down or mark
+    /// Failed every backend that simply hasn't been used yet.
+    ///
+    /// Worth stating because the name invites the opposite reading, and the
+    /// opposite reading is what this test originally asserted.
+    #[tokio::test]
+    async fn health_check_passes_a_cold_backend_because_nothing_is_wrong() {
+        let r = registry(serde_json::json!({
+            "mcpServers": { "a": { "command": ["/nonexistent/binary"] } }
+        }));
+        let backend = r.get("a").unwrap();
+        assert!(
+            backend.check_health().await,
+            "a cold backend has no dead connection, so the check must pass"
+        );
+        assert!(
+            matches!(backend.status().await, Status::Cold),
+            "and the check must not have changed its status"
+        );
     }
 }
