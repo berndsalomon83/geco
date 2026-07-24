@@ -1021,7 +1021,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "List the MCP servers behind this proxy: name, what it's for, tool count, running state, and a preview of up to 5 tool names. Start here."
+        description = "List the MCP servers behind this proxy: name, what it's for, tool count, running state, and a preview of up to 5 tool names. Reports gateway problems in `issues` when there are any. Start here."
     )]
     pub async fn list_mcp_servers(&self) -> Result<CallToolResult, McpError> {
         let servers: Vec<_> = {
@@ -1054,7 +1054,31 @@ impl Proxy {
                 "last_refresh": last_refresh,
             }));
         }
-        Ok(text_result(json!(out)))
+
+        // Gateway-level problems (a config that failed to reload, a skill
+        // directory that wouldn't scan) ride along here rather than in a
+        // meta-tool of their own. A dedicated `health` tool cost 218 bytes of
+        // every session's context to answer a question that is only ever
+        // asked when something is already broken — and the per-server half of
+        // its answer was already in this response. Carrying it in the payload
+        // costs nothing when things work, which is nearly always.
+        //
+        // The `issues` key is omitted when empty — a healthy gateway should
+        // not spend tokens saying so on every call — but the envelope itself
+        // is unconditional. A response that changes shape between healthy and
+        // broken is a trap for anything parsing it, and "broken" is exactly
+        // when you least want a surprise.
+        let issues = self.all_issues().await;
+        let mut body = json!({ "servers": out });
+        if !issues.is_empty() {
+            let issue_view: Vec<_> = issues
+                .iter()
+                .map(|i| json!({"kind": i.kind, "subject": i.subject, "detail": i.detail, "severity": i.severity}))
+                .collect();
+            body["issues"] = json!(issue_view);
+            body["hint"] = json!("run `geco health` for the full gateway report");
+        }
+        Ok(text_result(body))
     }
 
     #[tool(
@@ -1474,27 +1498,6 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Report the gateway's own health: which backends failed their last refresh and why. Use if tools seem missing or a server is misbehaving."
-    )]
-    pub async fn health(&self) -> Result<CallToolResult, McpError> {
-        let snap = self.snapshot.read().await;
-        let server_count = snap.servers.len();
-        let tool_count = snap.tool_count();
-        drop(snap);
-        let issues = self.all_issues().await;
-        let issue_view: Vec<_> = issues
-            .iter()
-            .map(|i| json!({"kind": i.kind, "subject": i.subject, "detail": i.detail, "severity": i.severity}))
-            .collect();
-        Ok(text_result(json!({
-            "healthy": issues.is_empty(),
-            "servers": server_count,
-            "tools": tool_count,
-            "issues": issue_view,
-        })))
-    }
-
-    #[tool(
         description = "Re-scan backend servers for their current tools (all, or one via `server`). Returns a diff (added/removed/changed/unchanged) so you can see what's new without comparing against a previous call. Use after installing or reconfiguring a backend."
     )]
     pub async fn refresh_tools(
@@ -1681,7 +1684,7 @@ mod param_tests {
         )
     }
 
-    /// Two of the eight meta-tools exist only to serve a skill library. If
+    /// Two of the seven meta-tools exist only to serve a skill library. If
     /// none is configured they are permanent context describing a capability
     /// the user doesn't have — and an invitation to call something that can
     /// only answer "nothing here".
@@ -1699,11 +1702,11 @@ mod param_tests {
         };
         let (a, b) = (names(&with), names(&without));
 
-        assert_eq!(a.len(), 8, "a configured library advertises all 8: {a:?}");
+        assert_eq!(a.len(), 7, "a configured library advertises all 7: {a:?}");
         assert!(a.contains(&"list_skills".to_string()));
         assert!(a.contains(&"read_skill".to_string()));
 
-        assert_eq!(b.len(), 6, "no library should advertise 6: {b:?}");
+        assert_eq!(b.len(), 5, "no library should advertise 5: {b:?}");
         assert!(!b.contains(&"list_skills".to_string()), "got {b:?}");
         assert!(!b.contains(&"read_skill".to_string()), "got {b:?}");
         // search survives — it still finds tools, and explains itself when
@@ -1731,7 +1734,7 @@ mod param_tests {
     #[test]
     fn meta_tool_surface_stays_within_its_context_budget() {
         let tools = Proxy::tool_router().list_all();
-        assert_eq!(tools.len(), 8, "expected 8 meta-tools, got {}", tools.len());
+        assert_eq!(tools.len(), 7, "expected 7 meta-tools, got {}", tools.len());
 
         let wire = serde_json::to_string(&tools).expect("tools must serialize");
         // The instructions ride in the initialize result and stay in context
@@ -1750,7 +1753,10 @@ mod param_tests {
             wire.len(),
             instr.len()
         );
-        // Measured at 4305 + 370 bytes; the budget leaves ~28% headroom.
+        // Measured at 4143 + 596 bytes; the budget leaves ~21% headroom.
+        // Schema was 4305 before `health` was retired to a CLI-only command;
+        // that saved 218 B and a longer list_mcp_servers description spent 56
+        // of it back, for a net 162.
         assert!(
             bytes <= 6000,
             "meta-tool surface grew to {bytes} bytes (budget 6000). This is the \
