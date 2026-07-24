@@ -1,6 +1,6 @@
 [package]
 name = "geco"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 # Determined by bisecting, not guessed: darling 0.23 (via rmcp's macros)
 # requires 1.88. CI checks this floor so it can't drift upward by accident.
