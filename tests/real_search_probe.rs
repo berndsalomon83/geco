@@ -99,6 +99,202 @@ fn load() -> Option<Snapshot> {
     Some(snap)
 }
 
+/// Emit a diverse sample of real tools as JSON, for a swarm to build labeled
+/// queries from. Spread across servers (a few per server) so the corpus
+/// covers many domains, and skip trivial/empty descriptions since a query
+/// can't be grounded in a tool that doesn't describe itself.
+///
+///   GECO_HARVEST=~/geco-harvest/main149-result.json \
+///   GECO_SAMPLE_OUT=/mnt/c/.../sample_tools.json \
+///     cargo test --test real_search_probe emit_tool_sample -- --nocapture
+#[test]
+fn emit_tool_sample() {
+    let Some(out) = std::env::var("GECO_SAMPLE_OUT").ok() else {
+        eprintln!("GECO_SAMPLE_OUT not set — skipping sampler");
+        return;
+    };
+    let path = std::env::var("GECO_HARVEST").expect("GECO_HARVEST required to sample");
+    let raw = std::fs::read_to_string(&path).expect("read harvest");
+    let parsed = HarvestResult::from_str(&raw);
+
+    let per_server = std::env::var("GECO_SAMPLE_PER_SERVER")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3usize);
+
+    let mut sample: Vec<serde_json::Value> = Vec::new();
+    for m in &parsed.manifests {
+        let server = m.repo.trim_start_matches("github.com/").to_string();
+        let n = m.tools.len();
+        if n == 0 {
+            continue;
+        }
+        // All sibling names, so the query-generator can be told to target one
+        // tool distinguishably from the rest of its server.
+        let siblings: Vec<&str> = m.tools.iter().map(|t| t.name.as_str()).collect();
+        let mut taken = 0;
+        // Deterministic spread: stride through the tool list rather than
+        // taking the first few, so we don't only sample a server's A-tools.
+        let stride = (n / per_server).max(1);
+        let mut i = 0;
+        while i < n && taken < per_server {
+            let t = &m.tools[i];
+            let d = t.description.trim();
+            // Printable-ASCII descriptions only: geco's tokenizer is English,
+            // and non-ASCII/control chars break the workflow approval dialog.
+            let clean = d.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+                && t.name.chars().all(|c| c.is_ascii_graphic());
+            if d.len() >= 25 && clean {
+                let sibs: Vec<&&str> = siblings
+                    .iter()
+                    .filter(|s| **s != t.name.as_str())
+                    .take(12)
+                    .collect();
+                sample.push(serde_json::json!({
+                    "server": server,
+                    "name": t.name,
+                    "description": d.chars().take(200).collect::<String>(),
+                    "siblings": sibs,
+                }));
+                taken += 1;
+            }
+            i += stride;
+        }
+    }
+    std::fs::write(&out, serde_json::to_string(&sample).unwrap()).expect("write sample");
+    eprintln!("wrote {} sampled tools to {out}", sample.len());
+}
+
+// ---- Labeled real-corpus eval ---------------------------------------------
+// The scoreboard the whole harvest was for: real semantic queries (generated
+// by a multi-model swarm, vocab-banned, cross-model verified) against the full
+// 5000+ real-tool corpus. Measures where geco ranks the ONE tool each query
+// was written to find. Split by generator model to see if geco favours one
+// phrasing style. Set GECO_LABELED to the eval JSON to run.
+
+#[derive(serde::Deserialize)]
+struct LabeledWrapper {
+    #[serde(default)]
+    result: Option<LabeledInner>,
+    #[serde(default)]
+    queries: Option<Vec<LQ>>,
+}
+#[derive(serde::Deserialize)]
+struct LabeledInner {
+    queries: Vec<LQ>,
+}
+#[derive(serde::Deserialize, Clone)]
+struct LQ {
+    query: String,
+    server: String,
+    tool: String,
+    #[serde(default)]
+    gen_model: String,
+}
+
+#[derive(Default)]
+struct EvalStat {
+    n: usize,
+    hit1: usize,
+    hit3: usize,
+    hit5: usize,
+    rr: f64,
+}
+impl EvalStat {
+    fn record(&mut self, rank: Option<usize>) {
+        self.n += 1;
+        if let Some(r) = rank {
+            if r == 0 {
+                self.hit1 += 1;
+            }
+            if r < 3 {
+                self.hit3 += 1;
+            }
+            if r < 5 {
+                self.hit5 += 1;
+            }
+            self.rr += 1.0 / (r as f64 + 1.0);
+        }
+    }
+    fn line(&self, label: &str) -> String {
+        let p = |k: usize| {
+            if self.n == 0 {
+                0.0
+            } else {
+                k as f64 * 100.0 / self.n as f64
+            }
+        };
+        format!(
+            "{label:10} n={:<4} recall@1={:5.1}%  recall@3={:5.1}%  recall@5={:5.1}%  MRR={:.3}",
+            self.n,
+            p(self.hit1),
+            p(self.hit3),
+            p(self.hit5),
+            if self.n == 0 {
+                0.0
+            } else {
+                self.rr / self.n as f64
+            }
+        )
+    }
+}
+
+#[test]
+fn labeled_eval() {
+    let Some(snap) = load() else {
+        eprintln!("GECO_HARVEST not set — skipping labeled eval");
+        return;
+    };
+    let Some(lpath) = std::env::var("GECO_LABELED").ok() else {
+        eprintln!("GECO_LABELED not set — skipping labeled eval");
+        return;
+    };
+    let raw = std::fs::read_to_string(&lpath).expect("read labeled");
+    let w: LabeledWrapper = serde_json::from_str(&raw).expect("labeled JSON parses");
+    let queries: Vec<LQ> = w
+        .result
+        .map(|r| r.queries)
+        .or(w.queries)
+        .expect("no queries");
+
+    let mut overall = EvalStat::default();
+    let mut by_model: std::collections::BTreeMap<String, EvalStat> = Default::default();
+    let mut misses: Vec<String> = Vec::new();
+
+    for q in &queries {
+        let hits = geco::search::search(&snap, &q.query, 5);
+        let rank = hits
+            .iter()
+            .position(|h| h.server == q.server && h.tool == q.tool);
+        overall.record(rank);
+        by_model
+            .entry(q.gen_model.clone())
+            .or_default()
+            .record(rank);
+        if rank.is_none() {
+            let got: Vec<String> = hits.iter().take(3).map(|h| h.tool.clone()).collect();
+            misses.push(format!(
+                "  [{}] {:52} want {}::{}  got {:?}",
+                q.gen_model, q.query, q.server, q.tool, got
+            ));
+        }
+    }
+
+    eprintln!(
+        "\n=== LABELED real-corpus eval ({} queries) ===",
+        queries.len()
+    );
+    eprintln!("{}", overall.line("overall"));
+    for (m, s) in &by_model {
+        eprintln!("{}", s.line(m));
+    }
+    eprintln!("\nrank-1 misses ({}):", misses.len());
+    for m in misses.iter().take(40) {
+        eprintln!("{m}");
+    }
+    eprintln!();
+}
+
 /// Show the top-5 hits for a realistic query across the WHOLE corpus (every
 /// harvested server at once — the real condition geco runs in). The comment
 /// on each says what we're watching for.

@@ -198,26 +198,43 @@ fn leading_verb_synonyms(token: &str) -> &'static [&'static str] {
     }
 }
 
-fn synonym_table() -> &'static HashMap<String, Vec<String>> {
-    static TABLE: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut m: HashMap<String, Vec<String>> = HashMap::new();
-        for group in SYNONYM_GROUPS {
-            for word in *group {
-                let key = stem(word);
-                for other in *group {
-                    let val = stem(other);
-                    if val != key {
-                        let e = m.entry(key.clone()).or_default();
-                        if !e.contains(&val) {
-                            e.push(val);
-                        }
-                    }
+/// Cross-link every word in a group to every other, stemmed, into `m`.
+fn add_synonym_group<'a>(
+    m: &mut HashMap<String, Vec<String>>,
+    group: impl Iterator<Item = &'a str> + Clone,
+) {
+    for word in group.clone() {
+        let key = stem(word);
+        for other in group.clone() {
+            let val = stem(other);
+            if val != key {
+                let e = m.entry(key.clone()).or_default();
+                if !e.contains(&val) {
+                    e.push(val);
                 }
             }
         }
-        m
-    })
+    }
+}
+
+/// Build the synonym table from the built-in groups plus any user-provided
+/// `extra` groups (from `proxy.search_synonyms`). Cheap to build — a few
+/// dozen words — so it is rebuilt per query when a config supplies extras;
+/// the common empty case is served from a cached static (`synonym_table`).
+fn build_synonym_table(extra: &[Vec<String>]) -> HashMap<String, Vec<String>> {
+    let mut m: HashMap<String, Vec<String>> = HashMap::new();
+    for group in SYNONYM_GROUPS {
+        add_synonym_group(&mut m, group.iter().copied());
+    }
+    for group in extra {
+        add_synonym_group(&mut m, group.iter().map(String::as_str));
+    }
+    m
+}
+
+fn synonym_table() -> &'static HashMap<String, Vec<String>> {
+    static TABLE: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| build_synonym_table(&[]))
 }
 
 /// A query token plus the words it may also be satisfied by.
@@ -282,6 +299,15 @@ impl Fields {
 /// Rank `docs` against `query`, best first. Returns `(index, score)` for the
 /// documents that matched at all, capped at `limit`.
 pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<Ranked> {
+    rank_with(docs, query, limit, &[])
+}
+
+/// Rank with user-provided `extra` synonym groups appended to the built-in
+/// table. Empty `extra` is the hot path and uses the cached static table; a
+/// non-empty one (from `proxy.search_synonyms`) builds a combined table for
+/// this query. Extra groups are stemmed the same way queries and documents
+/// are, so a user writes plain words and they match.
+pub fn rank_with(docs: &[Doc], query: &str, limit: usize, extra: &[Vec<String>]) -> Vec<Ranked> {
     if docs.is_empty() {
         return Vec::new();
     }
@@ -294,7 +320,13 @@ pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<Ranked> {
         t.dedup();
         t
     };
-    let table = synonym_table();
+    let owned_table;
+    let table: &HashMap<String, Vec<String>> = if extra.is_empty() {
+        synonym_table()
+    } else {
+        owned_table = build_synonym_table(extra);
+        &owned_table
+    };
     let q_terms: Vec<QueryTerm> = q_tokens
         .iter()
         .map(|t| {
@@ -385,6 +417,16 @@ pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<Ranked> {
 }
 
 pub fn search(snapshot: &crate::snapshot::Snapshot, query: &str, limit: usize) -> Vec<Hit> {
+    search_with(snapshot, query, limit, &[])
+}
+
+/// `search` with user-provided `extra` synonym groups (`proxy.search_synonyms`).
+pub fn search_with(
+    snapshot: &crate::snapshot::Snapshot,
+    query: &str,
+    limit: usize,
+    extra: &[Vec<String>],
+) -> Vec<Hit> {
     // Flatten to a doc list, remembering where each came from.
     let mut origin: Vec<(&str, &crate::snapshot::ToolSnapshot)> = Vec::new();
     for (server, snap) in &snapshot.servers {
@@ -401,7 +443,7 @@ pub fn search(snapshot: &crate::snapshot::Snapshot, query: &str, limit: usize) -
         })
         .collect();
 
-    rank(&docs, query, limit)
+    rank_with(&docs, query, limit, extra)
         .into_iter()
         .map(|r| {
             let (server, tool) = origin[r.index];
@@ -456,6 +498,46 @@ mod tests {
     fn exact_name_wins() {
         let hits = search(&snap(), "icm_memory_recall", 5);
         assert_eq!(hits[0].tool, "icm_memory_recall");
+    }
+
+    #[test]
+    fn user_synonym_bridges_a_gap_the_builtin_table_misses() {
+        // "jot down that fact" shares no vocabulary with icm_memory_store —
+        // the built-in table has no "jot"/"note" -> "store" mapping, so the
+        // plain search should NOT rank it first.
+        let baseline = search(&snap(), "jot down that fact", 5);
+        let baseline_top = baseline.first().map(|h| h.tool.as_str());
+        assert_ne!(
+            baseline_top,
+            Some("icm_memory_store"),
+            "precondition: the built-in table should not already bridge this"
+        );
+
+        // A user who knows their people say "jot"/"note" for storing declares
+        // it in proxy.search_synonyms — and now it ranks.
+        let extra = vec![vec![
+            "jot".to_string(),
+            "note".to_string(),
+            "store".to_string(),
+            "remember".to_string(),
+        ]];
+        let hits = search_with(&snap(), "jot down that fact", 5, &extra);
+        assert_eq!(
+            hits.first().map(|h| h.tool.as_str()),
+            Some("icm_memory_store"),
+            "a user synonym should bridge the gap: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn empty_user_synonyms_change_nothing() {
+        // The default (no config) must be byte-identical to plain search, or
+        // the feature is a regression risk for everyone not using it.
+        let a = search(&snap(), "search long-term memory", 5);
+        let b = search_with(&snap(), "search long-term memory", 5, &[]);
+        let names_a: Vec<_> = a.iter().map(|h| &h.tool).collect();
+        let names_b: Vec<_> = b.iter().map(|h| &h.tool).collect();
+        assert_eq!(names_a, names_b);
     }
 
     #[test]

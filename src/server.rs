@@ -1028,9 +1028,13 @@ impl Proxy {
         let include_schema = p.include_schema.unwrap_or(false);
         let mut results = Vec::new();
 
+        // User-provided synonym groups (proxy.search_synonyms). Cloned once so
+        // the registry lock isn't held across the searches below.
+        let user_synonyms = self.registry.read().await.proxy.search_synonyms.clone();
+
         if kind != "skills" {
             let snap = self.snapshot.read().await;
-            let tool_hits = search::search(&snap, &p.query, limit);
+            let tool_hits = search::search_with(&snap, &p.query, limit, &user_synonyms);
             for h in &tool_hits {
                 let mut entry = json!({
                     "kind": "tool",
@@ -1054,7 +1058,7 @@ impl Proxy {
             skills_configured = !idx.skills.is_empty();
             if skills_configured {
                 let skill_limit = if limit > 20 { 20 } else { limit };
-                let skill_hits = idx.search(&p.query, skill_limit);
+                let skill_hits = idx.search_with(&p.query, skill_limit, &user_synonyms);
                 for s in &skill_hits {
                     results.push(json!({
                         "kind": "skill",
