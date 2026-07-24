@@ -8,6 +8,20 @@ minor bump may break.
 
 ### Added
 
+- **Two synonyms mined from real MCP servers**: `validate`↔`verify` and
+  `build`↔`compile`. Harvested the tool manifests of ~150 popular MCP servers
+  (5,216 tools) and A/B-tested candidate synonyms against real-tool search
+  (`tests/real_search_probe.rs`, gated on `GECO_HARVEST`, no-ops without it).
+  These two were the only candidates that moved the *right* tool from
+  off-the-list to rank 1 on a reverse-vocabulary query — "verify a workflow"
+  now finds `n8n_validate_workflow` instead of playwright's UI-assert tools;
+  "compile the project" finds `build_project` instead of dbt's `compile_sql`.
+  Four other confident-looking candidates (mail/email, scrape/crawl,
+  copy/duplicate/clone, execute/run) were measured and **rejected** as
+  neutral-to-noise. The harvest's larger finding: geco's name-weighting
+  already resolves the worst real-world collisions — including tools with
+  byte-identical descriptions (`create_spark_batch` vs `create_pyspark_batch`)
+  that no embedding could tell apart — so synonyms help only a narrow seam.
 - **The config and skill watchers are finally tested.** `spawn_hot_reload`
   and `spawn_skill_reload` were called by exactly one place — `main.rs` — and
   by no test at all; the existing hot-reload test called `reload_from_config`
