@@ -309,9 +309,18 @@ fn search_quality_meets_floors() {
     // Floors sit just under measured performance (BM25F + synonyms +
     // leading-verb expansion, 2026-07):
     //   lexical  recall@1 87.5%  recall@5 100%   MRR 0.938
-    //   semantic recall@1 72.7%  recall@5 90.9%  MRR 0.818
-    //   heldout  recall@1 87.5%  recall@5 100%   MRR 0.938
-    //   overall  recall@1 84.7%  MRR 0.915
+    //   semantic recall@1 72.7%  recall@5 100%   MRR 0.864
+    //   heldout  recall@1 65.0%  recall@5 80.0%  MRR 0.717
+    //   overall  recall@1 78.9%  recall@5 94.4%  MRR 0.864
+    //
+    // READ THIS BEFORE CONCLUDING SEARCH GOT WORSE. The held-out floors were
+    // 87.5%/100% and are now 65%/80%. Nothing regressed: the held-out group
+    // grew from 8 queries to 20, and the new twelve were written to be hard
+    // (three of them use a word the synonym table maps, while wanting a tool
+    // that has nothing to do with it). The old figure was measured on too
+    // small and too kind a sample. The number did not get worse, the
+    // measurement got honest — which is the entire point of keeping a group
+    // the tuning never sees.
     // They catch a scoring change that makes things worse. They do NOT
     // certify that search is good — read the report for that.
 
@@ -326,10 +335,10 @@ fn search_quality_meets_floors() {
         "lexical recall@1 regressed below 80%{summary}"
     );
     // Semantic queries need synonym knowledge. The synonym table lifted
-    // recall@5 from 36.4% to 90.9%; the floor guards that gain.
+    // recall@5 from 36.4% to 100%; the floor guards that gain.
     assert!(
-        r.semantic.pct(r.semantic.hit5) >= 80.0,
-        "semantic recall@5 regressed below 80%{summary}"
+        r.semantic.pct(r.semantic.hit5) >= 90.0,
+        "semantic recall@5 regressed below 90%{summary}"
     );
     // Rank 1 is the one that matters in practice: a model acts on the first
     // result and rarely rephrases. Leading-verb expansion took this from
@@ -347,15 +356,15 @@ fn search_quality_meets_floors() {
     // This is not hypothetical: a symmetric create/open synonym raised the
     // semantic group and lowered THIS one, which is how it was caught.
     assert!(
-        r.heldout.pct(r.heldout.hit5) >= 85.0,
-        "held-out recall@5 regressed below 85% — synonyms may be overfitted{summary}"
+        r.heldout.pct(r.heldout.hit5) >= 75.0,
+        "held-out recall@5 regressed below 75% — synonyms may be overfitted{summary}"
     );
     assert!(
-        r.heldout.pct(r.heldout.hit1) >= 80.0,
-        "held-out recall@1 regressed below 80% — synonyms may be overfitted{summary}"
+        r.heldout.pct(r.heldout.hit1) >= 60.0,
+        "held-out recall@1 regressed below 60% — synonyms may be overfitted{summary}"
     );
     assert!(
-        r.overall.mrr() >= 0.90,
-        "overall MRR regressed below 0.90{summary}"
+        r.overall.mrr() >= 0.85,
+        "overall MRR regressed below 0.85{summary}"
     );
 }

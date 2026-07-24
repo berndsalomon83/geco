@@ -17,7 +17,27 @@
     "             for lexical headroom, and so we can see what embeddings",
     "             would actually buy.",
     "",
-    "`expect` lists every answer a reasonable person would accept."
+    "`expect` lists every answer a reasonable person would accept.",
+    "",
+    "  heldout  - written AFTER the synonym table and never consulted while",
+    "             building it. The generalisation check, and the one to",
+    "             believe: the semantic group scores its own training set.",
+    "",
+    "HELD-OUT ROUND 2 (2026-07-24), written to FALSIFY a candidate change.",
+    "The open miss was 'what do you know about this project' -> memory_recall,",
+    "which returned memory_forget_topic because only the word 'about' matched",
+    "anything at all. Mapping know -> recall would clear it — but that query is",
+    "in the semantic (training) group, and the held-out group contained no query",
+    "using 'know', so a flat held-out score would have proved nothing either way.",
+    "",
+    "So twelve queries were added BEFORE measuring, three of which use 'know'",
+    "while wanting something other than memory ('know which tables exist',",
+    "'let me know what time it is', 'know who is in this channel'). If a",
+    "know -> recall mapping is too broad, those are what say so.",
+    "",
+    "Honest caveat: the author knew the synonym table, so these are not blind.",
+    "Their power comes from being adversarial, not from ignorance — a query",
+    "written to break your idea is worth more than one written to confirm it."
   ],
 
   "servers": {
@@ -179,6 +199,20 @@
 
     { "q": "screenshot", "expect": ["browser_take_screenshot"], "kind": "lexical" },
     { "q": "memory", "expect": ["icm_memory_store", "icm_memory_recall", "icm_memory_forget_topic"], "kind": "lexical" },
-    { "q": "icm_wake_up", "expect": ["icm_wake_up"], "kind": "lexical" }
+    { "q": "icm_wake_up", "expect": ["icm_wake_up"], "kind": "lexical" },
+
+    { "q": "I need to know which tables exist", "expect": ["list_tables"], "kind": "heldout" },
+    { "q": "let me know what time it is in Tokyo", "expect": ["get_current_time"], "kind": "heldout" },
+    { "q": "do you know who is in this channel", "expect": ["slack_get_users"], "kind": "heldout" },
+    { "q": "what have we discussed about auth before", "expect": ["icm_memory_recall"], "kind": "heldout" },
+
+    { "q": "put this file somewhere else", "expect": ["move_file"], "kind": "heldout" },
+    { "q": "start a new feature branch", "expect": ["create_branch"], "kind": "heldout" },
+    { "q": "what columns does this table have", "expect": ["describe_table"], "kind": "heldout" },
+    { "q": "grab the contents of a webpage", "expect": ["web_url_read"], "kind": "heldout" },
+    { "q": "add a thumbs up to that message", "expect": ["slack_add_reaction"], "kind": "heldout" },
+    { "q": "land that pull request", "expect": ["merge_pull_request"], "kind": "heldout" },
+    { "q": "what is 3pm New York in Berlin", "expect": ["convert_time"], "kind": "heldout" },
+    { "q": "pull down a file from the repo", "expect": ["get_file_contents"], "kind": "heldout" }
   ]
 }
