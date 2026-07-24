@@ -11,8 +11,9 @@ use std::time::Duration;
 use anyhow::Result as AnyhowResult;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rmcp::{
-    handler::server::wrapper::Parameters, model::*, service::RequestContext, tool, tool_handler,
-    tool_router, ErrorData as McpError, RoleServer, ServerHandler,
+    handler::server::router::tool::ToolRouter, handler::server::wrapper::Parameters, model::*,
+    service::RequestContext, tool, tool_handler, tool_router, ErrorData as McpError, RoleServer,
+    ServerHandler,
 };
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -177,6 +178,12 @@ pub struct Proxy {
     /// Receiver, parked until `spawn_tool_change_listener` takes it. Proxy is
     /// Clone and a Receiver is not, hence the Option-in-a-Mutex.
     tool_change_rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<String>>>>,
+    /// Per-instance router, so the advertised surface can depend on config.
+    /// `list_skills` and `read_skill` are disabled when no skill library is
+    /// configured: they are 392 bytes of permanent context describing a
+    /// capability that user does not have, and an invitation to call a tool
+    /// that can only answer "nothing here".
+    tool_router: ToolRouter<Proxy>,
 }
 
 /// The instruction text every client injects into the model's context on
@@ -386,6 +393,18 @@ impl Proxy {
         // refresh subsumes any number of them.
         let (tool_change_tx, tool_change_rx) = tokio::sync::mpsc::channel::<String>(16);
         registry.set_tool_change_notifier(tool_change_tx.clone());
+
+        // Advertise the skill meta-tools only when there is a library behind
+        // them. Disabled routes are hidden from tools/list AND rejected by
+        // call, so a client cannot reach a capability that isn't configured.
+        // Note this is decided once, at construction: adding skills.dirs to a
+        // running proxy needs a restart before the two tools appear.
+        let mut tool_router = Self::tool_router();
+        if skill_dirs.is_empty() {
+            tool_router.disable_route("list_skills");
+            tool_router.disable_route("read_skill");
+        }
+
         Self {
             registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -402,6 +421,7 @@ impl Proxy {
             recent_search_hits: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             tool_change_tx,
             tool_change_rx: Arc::new(std::sync::Mutex::new(Some(tool_change_rx))),
+            tool_router,
         }
     }
 
@@ -1504,7 +1524,9 @@ impl Proxy {
     }
 }
 
-#[tool_handler]
+// Per-instance router rather than the static one, so the advertised tool
+// surface can depend on configuration.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for Proxy {
     async fn initialize(
         &self,
@@ -1601,6 +1623,64 @@ mod param_tests {
         let diff = compute_diff(&old, &new, &None);
         assert_eq!(diff["changed"].as_array().unwrap().len(), 1, "{diff}");
         assert_eq!(diff["unchanged"], 0, "{diff}");
+    }
+
+    /// A Proxy with no backends and the given skill dirs, for surface tests.
+    /// `Proxy::new` is sync and touches the filesystem only through
+    /// absorb/scan, which are no-ops for empty or missing dirs.
+    fn surface_probe(skill_dirs: Vec<String>) -> Proxy {
+        let cfg: crate::config::Config =
+            serde_json::from_value(json!({"mcpServers": {"s": {"command": ["true"]}}})).unwrap();
+        Proxy::new(
+            crate::backend::Registry::from_config(&cfg),
+            Snapshot::default(),
+            PathBuf::from("geco-test-snapshot.json"),
+            PathBuf::from("geco-test-config.yaml"),
+            skill_dirs,
+            vec![],
+        )
+    }
+
+    /// Two of the eight meta-tools exist only to serve a skill library. If
+    /// none is configured they are permanent context describing a capability
+    /// the user doesn't have — and an invitation to call something that can
+    /// only answer "nothing here".
+    #[test]
+    fn skill_meta_tools_are_hidden_without_a_library() {
+        let with = surface_probe(vec!["/nonexistent/skills".into()]);
+        let without = surface_probe(vec![]);
+
+        let names = |p: &Proxy| -> Vec<String> {
+            p.tool_router
+                .list_all()
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let (a, b) = (names(&with), names(&without));
+
+        assert_eq!(a.len(), 8, "a configured library advertises all 8: {a:?}");
+        assert!(a.contains(&"list_skills".to_string()));
+        assert!(a.contains(&"read_skill".to_string()));
+
+        assert_eq!(b.len(), 6, "no library should advertise 6: {b:?}");
+        assert!(!b.contains(&"list_skills".to_string()), "got {b:?}");
+        assert!(!b.contains(&"read_skill".to_string()), "got {b:?}");
+        // search survives — it still finds tools, and explains itself when
+        // asked for skills that aren't there.
+        assert!(b.contains(&"search".to_string()), "got {b:?}");
+
+        let cost = |p: &Proxy| {
+            serde_json::to_string(&p.tool_router.list_all())
+                .unwrap()
+                .len()
+        };
+        let (ca, cb) = (cost(&with), cost(&without));
+        eprintln!(
+            "surface: with skills {ca} B, without {cb} B (saves {} B)",
+            ca - cb
+        );
+        assert!(cb < ca, "hiding two tools must cost fewer bytes");
     }
 
     /// The whole product claim: the agent's context carries a small, FIXED
