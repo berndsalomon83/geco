@@ -46,7 +46,13 @@ minor bump may break.
   spec's `ping`, which a live server may not implement and which would then
   cause false resets) and resets non-responders. Found by killing a warm
   backend's child from outside and watching the loop miss it. The reactive
-  path — detect-on-next-call — always worked and is unchanged.
+  path — detect-on-next-call — always worked and is unchanged. A probe
+  *timeout* is deliberately NOT treated as death: a dead child fails the
+  probe promptly with a transport error, whereas a timeout usually means the
+  backend is busy (many MCP servers process requests serially, so a probe
+  waits behind an in-flight tool call). Resetting on timeout would tear down
+  a live backend mid-call and spawn a duplicate child on every sweep that
+  overlaps a slow call — so only a prompt error resets.
 - **The pre-push hook never ran on Windows.** It looked for `cargo` on `PATH`
   only, so a toolchain installed inside WSL — invisible to Git Bash, which is
   what git runs hooks with — made it print "skipping" on every push and check

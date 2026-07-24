@@ -8,7 +8,7 @@ snapshot/count assertions keep meaning what they say:
   crash — exits immediately WITHOUT replying, simulating a backend that dies
           mid-call (the path a graceful shutdown() can't reproduce)
 """
-import json, os, sys
+import json, os, sys, time
 
 TOOLS = [
     {"name": "echo", "description": "Echo the input text back",
@@ -30,6 +30,12 @@ if os.environ.get("STUB_EXTRA_TOOLS"):
                          "required": ["name"]}},
         {"name": "grow_toolset", "description": "Add a tool, then send notifications/tools/list_changed",
          "inputSchema": {"type": "object", "properties": {}}},
+        # Serial-blocking on purpose: while inside this handler the loop is not
+        # reading stdin, so any other request (a health-probe list_tools) waits
+        # behind it — which is how a busy backend is simulated.
+        {"name": "sleep", "description": "Block for `ms` milliseconds, then reply",
+         "inputSchema": {"type": "object", "properties": {"ms": {"type": "number"}},
+                         "required": ["ms"]}},
     ]
 
 def reply(id_, result):
@@ -64,6 +70,10 @@ for line in sys.stdin:
         if name == "crash":
             # No reply, no clean shutdown — the transport just dies.
             os._exit(1)
+        elif name == "sleep":
+            # Blocks the read loop for the duration — see the tool comment.
+            time.sleep(float(args.get("ms", 0)) / 1000.0)
+            reply(id_, {"content": [{"type": "text", "text": "slept"}], "isError": False})
         elif name == "pid":
             reply(id_, {"content": [{"type": "text", "text": str(os.getpid())}], "isError": False})
         elif name == "getenv":
