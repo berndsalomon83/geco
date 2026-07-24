@@ -231,6 +231,8 @@ The guard earns its keep in both directions. It **rejected** a symmetric create/
 
 If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
 
+Measured against 5,216 tools from ~150 real MCP servers, the measured floor on *pure-intent* queries — where a user describes a goal in words the tool never uses — is about **13% rank-1**. That is the lexical-vs-semantic wall, and no tuning or synonym crosses it. The full research log, including every change that was tried and **rejected** so nobody re-walks those roads, is in [docs/search-ranking.md](docs/search-ranking.md).
+
 ### What geco proxies (and what it doesn't)
 
 geco proxies **tools**. Backend *resources* and *prompts* are not exposed
