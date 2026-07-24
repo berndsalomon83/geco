@@ -37,6 +37,35 @@ The agent sees exactly eight meta-tools:
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
 
+A full round trip, cold backend included:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant G as geco
+    participant B as Backend
+
+    A->>G: search("open a bug report")
+    Note right of G: answered from the cached<br/>snapshot — no process starts
+    G-->>A: server + tool + description
+
+    A->>G: execute({calls:[{server, tool, arguments}]})
+    G->>G: allow / deny check
+
+    alt backend is cold
+        G->>B: spawn child process
+        Note right of B: clean environment:<br/>baseline + declared vars only,<br/>keychain resolved now
+        B-->>G: MCP initialize
+    end
+
+    G->>B: tools/call
+    B-->>G: result
+    G-->>A: results, in input order
+    Note over G,B: stays warm for the next call
+```
+
+Calls to *different* backends in one `execute` run in parallel; results always come back in the order you sent them.
+
 ## Install
 
 Prebuilt binaries are published for macOS (arm64, x86_64), Linux (x86_64 static, aarch64) and Windows (x86_64) — **no Rust toolchain required**. The installers download the right one, verify its SHA-256, and fall back to a source build for any other platform.
