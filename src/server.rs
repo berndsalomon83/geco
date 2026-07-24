@@ -184,6 +184,9 @@ pub struct Proxy {
     /// capability that user does not have, and an invitation to call a tool
     /// that can only answer "nothing here".
     tool_router: ToolRouter<Proxy>,
+    /// Always-on instruction text, built once from config. Carries the skill
+    /// nudge only when there is a library to nudge towards.
+    instructions: String,
 }
 
 /// The instruction text every client injects into the model's context on
@@ -193,11 +196,39 @@ pub struct Proxy {
 /// It must stay O(1) — a fixed policy, never a catalogue. Anything that grows
 /// with the number of servers or skills belongs in a tool RESPONSE, which is
 /// paid only when asked for.
-const INSTRUCTIONS: &str = "Gateway to multiple MCP servers whose tools load on demand instead of \
+const INSTRUCTIONS_BASE: &str =
+    "Gateway to multiple MCP servers whose tools load on demand instead of \
      polluting your context. Flow: search (with include_schema=true to get \
      input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute \
      (1–10 calls in one round-trip, cross-backend parallel), or \
      list_mcp_servers → list_tools → execute. Backends start lazily on first execution.";
+
+/// Appended only when a skill library actually exists.
+///
+/// Skills are a "push" resource: nothing in a user's request names one, so the
+/// model must reach for it unprompted — and measured against three local
+/// models, it essentially never did. Baseline was 0-1 out of 12 runs each.
+///
+/// Every clause here earned its place in an A/B against those models:
+///   - the COUNT is O(1); listing names would be O(N) and is what this whole
+///     design refuses to do. It also measured WORSE — two of three models
+///     replied `CALL code-reviewer`, treating a skill name as a tool name,
+///     producing invalid calls 6/12 and 12/12 of the time.
+///   - "NOT callable tools" exists to prevent exactly that failure.
+///   - "ALWAYS ... before doing anything else" beat a hedged "before any
+///     non-trivial task, a playbook may exist" by roughly 2x on every model.
+///
+/// Result: 8-12 out of 12, versus 0-1 for the base wording, and better than
+/// the O(N) name list on all three. The same nudge placed in the `search`
+/// tool DESCRIPTION instead scored 0-3/12 — placement matters enormously,
+/// which is why this lives in the instructions.
+fn skill_instructions(count: usize) -> String {
+    format!(
+        " {count} SKILLS (written playbooks for specialised work) are hidden behind search — \
+         you cannot see them otherwise, and they are NOT callable tools. ALWAYS call search \
+         first with a one-line description of the task, before doing anything else."
+    )
+}
 
 /// How many (server, tool) hits to remember for the search→execute signal.
 const RECENT_HITS_CAP: usize = 64;
@@ -405,6 +436,14 @@ impl Proxy {
             tool_router.disable_route("read_skill");
         }
 
+        // Only claim skills exist when some were actually found. A count of
+        // zero would be a lie, and a nudge towards an empty library wastes a
+        // call on every task.
+        let instructions = match skills.skills.len() {
+            0 => INSTRUCTIONS_BASE.to_string(),
+            n => format!("{INSTRUCTIONS_BASE}{}", skill_instructions(n)),
+        };
+
         Self {
             registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -422,6 +461,7 @@ impl Proxy {
             tool_change_tx,
             tool_change_rx: Arc::new(std::sync::Mutex::new(Some(tool_change_rx))),
             tool_router,
+            instructions,
         }
     }
 
@@ -1545,7 +1585,7 @@ impl ServerHandler for Proxy {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(INSTRUCTIONS.to_string())
+            .with_instructions(self.instructions.clone())
     }
 }
 
@@ -1698,13 +1738,17 @@ mod param_tests {
         // for the whole session, exactly like the schemas do. Omitting them
         // understated the headline number and — worse — left an unguarded
         // channel where always-on cost could grow without any test noticing.
-        let bytes = wire.len() + INSTRUCTIONS.len();
+        // Worst case: base instructions plus the skill nudge. A 3-digit count
+        // is as long as the sentence ever gets, since it carries a number
+        // rather than names.
+        let instr = format!("{INSTRUCTIONS_BASE}{}", skill_instructions(999));
+        let bytes = wire.len() + instr.len();
         // Visible with `cargo test -- --nocapture` when you want the number.
         eprintln!(
             "meta-tool surface: {} tools, {} B schema + {} B instructions = {bytes} B",
             tools.len(),
             wire.len(),
-            INSTRUCTIONS.len()
+            instr.len()
         );
         // Measured at 4305 + 370 bytes; the budget leaves ~28% headroom.
         assert!(
