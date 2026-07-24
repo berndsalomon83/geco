@@ -136,6 +136,30 @@ struct Report {
     lexical: Stats,
     semantic: Stats,
     misses: Vec<String>,
+    /// Coverage of the TOP hit, split by whether that top hit was right.
+    /// The question this answers: can coverage tell a confident-and-correct
+    /// answer apart from a confident-and-wrong one? If the two distributions
+    /// overlap, it is useless as a confidence signal no matter how principled
+    /// it looks.
+    cov_top_right: Vec<f64>,
+    cov_top_wrong: Vec<f64>,
+}
+
+fn describe(label: &str, v: &mut [f64]) -> String {
+    if v.is_empty() {
+        return format!("{label:14} (none)");
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |p: f64| v[((v.len() as f64 - 1.0) * p).round() as usize];
+    format!(
+        "{label:14} n={:<3} min={:.2}  p25={:.2}  median={:.2}  p75={:.2}  max={:.2}",
+        v.len(),
+        v[0],
+        pct(0.25),
+        pct(0.50),
+        pct(0.75),
+        v[v.len() - 1]
+    )
 }
 
 fn evaluate() -> Report {
@@ -146,10 +170,21 @@ fn evaluate() -> Report {
     let mut lexical = Stats::default();
     let mut semantic = Stats::default();
     let mut misses = Vec::new();
+    let mut cov_top_right = Vec::new();
+    let mut cov_top_wrong = Vec::new();
 
     for q in &corpus.queries {
         let hits = geco::search::search(&snap, &q.q, 5);
         let rank = hits.iter().position(|h| q.expect.contains(&h.tool));
+
+        // The signal under test: how much of the query did the TOP hit match?
+        if let Some(top) = hits.first() {
+            if q.expect.contains(&top.tool) {
+                cov_top_right.push(top.coverage);
+            } else {
+                cov_top_wrong.push(top.coverage);
+            }
+        }
 
         overall.record(rank);
         match q.kind.as_str() {
@@ -175,7 +210,33 @@ fn evaluate() -> Report {
         lexical,
         semantic,
         misses,
+        cov_top_right,
+        cov_top_wrong,
     }
+}
+
+/// Standalone experiment, not a gate. Reports whether IDF-weighted coverage
+/// of the top hit separates correct answers from confidently-wrong ones, and
+/// what a threshold would cost in false alarms on answers that were right.
+#[test]
+fn coverage_as_a_confidence_signal() {
+    let mut r = evaluate();
+
+    eprintln!("\n=== IDF-weighted coverage of the TOP hit ===");
+    eprintln!("{}", describe("top hit RIGHT", &mut r.cov_top_right));
+    eprintln!("{}", describe("top hit WRONG", &mut r.cov_top_wrong));
+
+    eprintln!("\nthreshold   flags a wrong top hit   false alarm on a right one");
+    for t in [0.30, 0.40, 0.50, 0.60, 0.70, 0.80] {
+        let caught = r.cov_top_wrong.iter().filter(|c| **c < t).count();
+        let false_alarm = r.cov_top_right.iter().filter(|c| **c < t).count();
+        eprintln!(
+            "  < {t:.2}            {caught:>2} / {:<2}                  {false_alarm:>2} / {:<2}",
+            r.cov_top_wrong.len(),
+            r.cov_top_right.len()
+        );
+    }
+    eprintln!();
 }
 
 /// Regression guard. The floors are set just under measured performance —

@@ -219,7 +219,7 @@ impl SkillIndex {
             .collect();
         crate::search::rank(&docs, query, limit)
             .into_iter()
-            .map(|(i, _)| &self.skills[i])
+            .map(|r| &self.skills[r.index])
             .collect()
     }
 
