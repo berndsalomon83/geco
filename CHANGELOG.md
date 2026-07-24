@@ -4,7 +4,60 @@ Notable changes per release. Format follows [Keep a Changelog](https://keepachan
 versioning is [semver](https://semver.org/), with the pre-1.0 caveat that a
 minor bump may break.
 
-## [Unreleased]
+## [0.8.0] — 2026-07-24
+
+**The always-on surface drops from eight meta-tools to six, ~4.7 KB to
+~4.3 KB.** Both retirements follow the same rule: a capability that only
+matters after a human action, or whose answer has already been delivered
+elsewhere, does not belong in a schema that every request carries.
+
+### Breaking
+
+- **The `health` meta-tool is gone; `geco health` replaces it (new command).**
+  It cost 218 bytes of every session's context — 5% of the schema surface —
+  to answer a question that only arises once something is already broken, and
+  by then the answer had already been delivered: `execute` returns a typed
+  `error.code` with the reason at the moment of failure, and
+  `list_mcp_servers` carries per-server `status` and `last_refresh`.
+  Diagnostics belong in the payload, where they cost nothing until needed.
+
+  **Migration:** run `geco health` (exits non-zero when there are errors,
+  zero for warnings alone, so it is safe to gate a script on). Agents get
+  gateway-level problems from `list_mcp_servers`, which now includes an
+  `issues` array — see below.
+
+- **The `refresh_tools` meta-tool is gone; `geco refresh` covers it.** At 480
+  bytes it was the third-largest thing in the always-on surface, and it exists
+  for a moment that only ever follows a human action: you installed or
+  upgraded a backend. Config edits are already picked up live by the config
+  watcher, and backends that change their own tools already send
+  `tools/list_changed`, so the only case left is a backend upgraded in place —
+  a human act with a human fix.
+
+  `geco refresh` now **bumps the config file's mtime** as well as rewriting
+  the snapshot. Without that it did nothing for a live session: a running
+  proxy holds its snapshot in memory, only ever *writes* that file, and would
+  have overwritten what the CLI just saved. Since the config watcher gates on
+  mtime, the touch makes a running instance rebuild — registry, snapshot and
+  skills. File content is untouched; `File::set_times` moves the timestamp
+  only, so an interrupted call cannot damage a config.
+
+  **Migration:** `geco refresh`, or edit/save the config, or restart the
+  agent. Note this drops the added/removed/changed diff the tool returned —
+  `geco refresh` prints per-server tool counts instead.
+
+- **`list_mcp_servers` returns `{servers: [...]}` instead of a bare array**,
+  and adds `issues` when the gateway has a problem — the config- and
+  skill-level faults that were previously only visible through the retired
+  `health` tool. The key is omitted when there is nothing wrong, but the
+  envelope is unconditional: a response that changes shape between healthy
+  and broken is a trap, and broken is when you least want a surprise.
+
+  **Migration:** read `response.servers` where you previously read the array.
+
+  Together these three take the schema **4305 → 3662 B** and the always-on
+  total **4675 → 4258 B**. The `health` removal nets only 162 B on its own,
+  since describing the new `issues` field spent 56 B back.
 
 ### Added
 
@@ -49,67 +102,21 @@ minor bump may break.
   72.7%, MRR 0.697 → 0.818, held-out and lexical groups unchanged to the
   decimal. Rank 1 is the number that matters: a model acts on the first
   result rather than rephrasing.
-- Search-effectiveness and skill-usage counters in `geco stats`:
-  `skill_surfaces`, `skill_reads`, plus the recent queries that matched
-  nothing — the actionable list for improving descriptions.
-- `proxy.refresh_concurrency` (default 8) caps how many backends spawn at once
-  during a refresh, and per-server `call_timeout_secs` /
-  `startup_timeout_secs` override the proxy defaults for one slow backend.
+- Skill-usage counters in `geco stats`: `skill_surfaces` and `skill_reads`.
+  Surfaces without reads means the skill descriptions don't match how work
+  gets described; near-zero surfaces means nobody is looking.
 
 ### Changed
-
-- **The `refresh_tools` meta-tool is gone; `geco refresh` covers it.** At 480
-  bytes it was the third-largest thing in the always-on surface, and it exists
-  for a moment that only ever follows a human action: you installed or
-  upgraded a backend. Config edits are already picked up live by the config
-  watcher, and backends that change their own tools already send
-  `tools/list_changed`, so the only case left is a backend upgraded in place —
-  a human act with a human fix.
-
-  `geco refresh` now **bumps the config file's mtime** as well as rewriting
-  the snapshot. Without that it did nothing for a live session: a running
-  proxy holds its snapshot in memory, only ever *writes* that file, and would
-  have overwritten what the CLI just saved. Since the config watcher gates on
-  mtime, the touch makes a running instance rebuild — registry, snapshot and
-  skills. File content is untouched; `File::set_times` moves the timestamp
-  only, so an interrupted call cannot damage a config.
-
-  **Migration:** `geco refresh`, or edit/save the config, or restart the
-  agent. Note this drops the added/removed/changed diff the tool returned —
-  `geco refresh` prints per-server tool counts instead.
-
-- **The `health` meta-tool is gone; `geco health` replaces it (new command).**
-  It cost 218 bytes of every session's context — 5% of the schema surface —
-  to answer a question that only arises once something is already broken, and
-  by then the answer had already been delivered: `execute` returns a typed
-  `error.code` with the reason at the moment of failure, and
-  `list_mcp_servers` carries per-server `status` and `last_refresh`.
-  Diagnostics belong in the payload, where they cost nothing until needed.
-
-  Net saving is 162 B (schema 4305 → 4143), since describing the new `issues`
-  field spent 56 B back — a redundancy removed rather than a meaningful
-  reduction. Together with `refresh_tools` the schema goes **4305 → 3662 B**
-  and the always-on total **4675 → 4258 B**, so the advertised figure moves
-  from ~4.7 KB to ~4.3 KB.
-
-  **Migration:** run `geco health` (new; exits non-zero when there are
-  errors, zero for warnings alone). Agents get gateway-level problems from
-  `list_mcp_servers`, which now includes an `issues` array — see below.
-
-- **`list_mcp_servers` returns `{servers: [...]}` instead of a bare array**,
-  and adds `issues` when the gateway has a problem — the config- and
-  skill-level faults that were previously only visible through the retired
-  meta-tool. The key is omitted when there is nothing wrong, but the envelope
-  is unconditional: a response that changes shape between healthy and broken
-  is a trap, and broken is when you least want a surprise.
 
 - **`list_skills` and `read_skill` are no longer advertised when no skill
   library is configured** — 640 bytes, 14% of geco's whole always-on surface,
   returned to anyone using it purely as a tool gateway.
 - The context-budget test now counts the MCP `instructions` string, which is
-  always-on exactly like the tool schemas and was previously unmeasured. The
-  advertised figure moves from ~4.3 KB to ~4.7 KB; the number was always the
-  larger one, only the measurement was wrong.
+  always-on exactly like the tool schemas and was previously unmeasured. This
+  *raised* the honest figure to ~4.7 KB — the cost was always that, only the
+  measurement was wrong — before the two tool retirements above brought it
+  down to ~4.3 KB. The headline number is unchanged from 0.7.0 by
+  coincidence, not by standing still.
 
 ### Fixed
 
