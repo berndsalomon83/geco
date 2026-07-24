@@ -11,9 +11,9 @@
 The more MCP tools you expose to your LLM, the more the context gets prefilled with ballast that most likely is not even used, reducing the space you have to work with.
 The same is true for skills. Skills are great recipes to have but they also land as descriptive text in the context of your LLM — and again, more skills means less remaining context for the actual task.
 
-So here comes this rusty reptile geco to tackle it. It sits between your IDE and the skills and MCP tools that you have, and gives your LLM the same 8 tools always, no matter how much you have in your tool shed.
+So here comes this rusty reptile geco to tackle it. It sits between your IDE and the skills and MCP tools that you have, and gives your LLM the same 7 tools always, no matter how much you have in your tool shed.
 
-**geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees eight small meta-tools instead of every schema on every request.
+**geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees seven small meta-tools instead of every schema on every request.
 
 The cost is fixed: **~4.7 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
 
@@ -21,18 +21,19 @@ Built with Rust as single static binary, no runtime dependencies. macOS, Linux, 
 
 ## How it works
 
-The agent sees exactly eight meta-tools:
+The agent sees exactly seven meta-tools:
 
 | Meta-tool | Purpose |
 |---|---|
-| `list_mcp_servers` | Name, description, tool count, running state of each backend |
+| `list_mcp_servers` | Name, description, tool count, running state of each backend — plus `issues` when the gateway has a problem |
 | `list_tools` | A server's tools (name + description); with `tool`: the full input schema |
 | `refresh_tools` | Re-scan backends after installing/reconfiguring one |
 | `list_skills` | Every skill in the library (name + one-line description) |
 | `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
 | `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
 | `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
-| `health` | Report which backends failed their last refresh and why |
+
+Seven, and that is the whole always-on surface — 4.1 KB of schema plus a short instruction, whatever hides behind it. Gateway health is deliberately **not** among them: see [reporting problems](#reporting-problems).
 
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
@@ -108,7 +109,7 @@ Move the MCP servers you want behind the proxy into `~/.config/geco/config.yaml`
 }
 ```
 
-Remove the individual server entries you moved behind geco — restart the agent and it sees only the 8 meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
+Remove the individual server entries you moved behind geco — restart the agent and it sees only the 7 meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
 
 ## Quick start
 
@@ -152,7 +153,20 @@ mkdir -p ~/.config/opencode/skills-library
 mv ~/.config/opencode/skills/* ~/.config/opencode/skills-library/
 ```
 
-Add one line to your global AGENTS.md so models reach for it: *Before specialized work, search (kind="skills") → read_skill and follow the playbook.*
+### Why your agent now searches before acting
+
+A hidden library only pays off if the model reaches for it — and left to itself it doesn't. Measured against three local models on a task where a playbook clearly applied, the model consulted geco in **0–1 runs out of 12**. Not "sometimes missed": effectively never.
+
+So when a skill library is configured, geco tells the model so in its MCP instructions — the count, that skills are invisible otherwise, that they are not callable tools, and to search first. That lifts it to **8–12 out of 12**.
+
+Two things that did *not* work, in case you're tempted:
+
+- **Listing skill names.** It costs context proportional to your library, which is the one thing geco exists to avoid — and it measured *worse*: two of three models replied `CALL code-reviewer`, treating a skill name as a tool name and producing invalid calls. The instruction says "NOT callable tools" specifically to block that.
+- **Putting the hint in the `search` tool description** instead of the instructions. Same words, 0–3 out of 12. The decision to consult at all comes from the system framing, not from individual tool descriptions.
+
+The cost is one sentence, fixed size regardless of library size, added only when you actually have skills. The trade-off: your agent will sometimes search on trivial turns too. A search is a cached-snapshot lookup with no process spawn, so over-triggering is much the cheaper error.
+
+You can reinforce it in your global AGENTS.md: *Before specialized work, search (kind="skills") → read_skill and follow the playbook.*
 
 ### Which tools' skills work
 
@@ -194,7 +208,24 @@ covered by tests that run on Linux, macOS and Windows.
 
 Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `pass_env` (hand this server a variable from geco's own environment), `description` (shown in `list_mcp_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`, and `call_timeout_secs` / `startup_timeout_secs` to override the proxy defaults for one slow backend.
 
-`geco stats` reports search effectiveness alongside call counts: how many searches ran, how many found nothing, how often a search hit was actually executed, and the recent queries that matched nothing — each of those is either a tool you don't have or a description that doesn't say what the tool is for.
+`geco stats` reports search effectiveness alongside call counts: how many searches ran, how many found nothing, how often a search hit was actually executed, how often a skill was surfaced and then read, and the recent queries that matched nothing — each of those is either a tool you don't have or a description that doesn't say what the tool is for.
+
+### How search ranks
+
+BM25F over tokenised names, server names and descriptions: identifiers split on separators and camelCase (`browser_takeScreenshot` → `browser`, `take`, `screenshot`), conservative plural stemming, a hit in the name weighted above one in the description, and IDF so a word appearing all over your corpus counts for little. A small synonym table covers the gap where a request and a tool use different words for the same thing — "bug"/"ticket" for issue, "save" for write, "folder" for directory.
+
+One rule depends on word order: a verb leading a request is expanded where the same word later in the sentence is not. "open a bug report" means *create* one; "any open defects?" does not. That single distinction is worth 18 points of rank-1 accuracy on the synonym row below, and rank 1 is what counts — a model acts on the first result and rarely rephrases.
+
+It is lexical, deliberately: no model, no index, no state. Ranking a few hundred tools costs microseconds and there is nothing to invalidate when the snapshot changes.
+
+The limits are measured rather than assumed, against a 59-query corpus in the test suite:
+
+| | recall@1 | recall@5 |
+|---|---|---|
+| queries sharing vocabulary with the tool | 87.5% | 100% |
+| queries needing a synonym | 72.7% | 90.9% |
+
+Eight of those queries are held out — written after the synonym table and never consulted while building it — so every change is checked against queries the table was not fitted to. That guard has already rejected one change that looked obviously right: a symmetric create/open synonym that raised the group it was derived from while lowering the group it wasn't. If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
 
 ### What geco proxies (and what it doesn't)
 
@@ -268,16 +299,19 @@ The gateway watches its config file and auto-refreshes when it changes — add a
 
 Warm backends that crash silently (child process exits) are detected by a background health check every 30 seconds (configurable via `health_check_secs`, 0 to disable). The dead connection is reset so the next `execute` reconnects fresh instead of erroring — the agent never sees a stale failure.
 
-## Health — failures are loud, not logged
+## Reporting problems
 
-The gateway is headless, so a dead backend or a partial refresh would otherwise live only in a stderr log. Instead it writes its current problem set to `<data-dir>/health.json` (level-triggered: empty = healthy, tagged with the MCP client name). Two ways to see it:
+The gateway is headless, so a dead backend or a partial refresh would otherwise live only in a stderr log. Instead it writes its current problem set to `<data-dir>/health.json` (level-triggered: empty = healthy, tagged with the MCP client name). Three ways to see it:
 
-- **The `health` meta-tool** — ask the agent "is the gateway healthy?" and it returns the failing backends and reasons.
+- **`geco health`** — the full report, for you.
 - **The opencode toast plugin** (`opencode-plugin/geco-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick.
+- **`list_mcp_servers`**, for the agent — per-server `status` and `last_refresh`, plus an `issues` array when something is wrong.
+
+There is deliberately no `health` meta-tool. It would cost every session's context to answer a question that only arises once something is already broken, and by then the answer has already been delivered twice: `execute` returns a typed `error.code` (`backend_error`, `timeout`, `not_allowed`) with the reason at the moment of failure, and `list_mcp_servers` carries the rest. Diagnostics belong in the payload, where they cost nothing until needed — not in the schema, where they cost something always.
 
 ## Troubleshooting
 
-Start with `geco validate` (config mistakes), then `geco inspect` (what the snapshot actually holds) and `geco stats` (what the agent has been doing). The `health` meta-tool answers the same question from inside the agent.
+Start with `geco health` (what's broken right now), then `geco validate` (config mistakes), `geco inspect` (what the snapshot actually holds) and `geco stats` (what the agent has been doing).
 
 **A server worked before 0.7 and now fails with an auth or config error.**
 The most likely cause, and the nastiest to spot, because it fails *late*: since 0.7 backends no longer inherit geco's environment, so a server that quietly relied on a variable exported in your shell now starts without it. There is no startup error — it fails on first `execute`, with whatever opaque message the backend produces. Name the variable: `pass_env: ["THE_VAR"]`. To confirm that's the cause, set `proxy.inherit_env: true` temporarily; if it works again, that was it.
@@ -289,7 +323,7 @@ The command isn't on geco's `PATH`. Note that geco's PATH is not necessarily you
 The item doesn't exist under that exact service name, or the OS keychain is locked. Check with `security find-generic-password -s x -w` (macOS), `secret-tool lookup service x` (Linux), `cmdkey /list:x` (Windows). A missing item is deliberately fatal — secrets fail loudly rather than expanding to an empty string.
 
 **The agent can't find a tool you know is there.**
-Check `geco inspect` first — if the tool isn't in the snapshot, it's a refresh or an `allow`/`deny` problem, not a search problem. If it *is* there, the search wording is the issue: `geco stats` lists recent queries that matched nothing. Search is lexical, so a query sharing no vocabulary with the tool's name or description won't find it — improve the server's `description`, which is what the model actually reads.
+Check `geco inspect` first — if the tool isn't in the snapshot, it's a refresh or an `allow`/`deny` problem, not a search problem. If it *is* there, the search wording is the issue: `geco stats` lists recent queries that matched nothing. Search is lexical with a small synonym table ([how search ranks](#how-search-ranks)) — a query sharing no vocabulary and no synonym with the tool's name or description won't find it. Improve the server's `description`, which is what the model actually reads.
 
 **Tools changed on a backend but geco still shows the old set.**
 geco follows `notifications/tools/list_changed`, but not every server sends it. Force it with the `refresh_tools` meta-tool or `geco refresh`.
