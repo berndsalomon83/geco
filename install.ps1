@@ -135,7 +135,7 @@ if (Test-Path (Split-Path $OpencodePluginDir -Parent)) {
 # Build snapshot + verify.
 Say "Building initial snapshot..."
 # NOT `2>&1`: PowerShell 5.1 wraps each stderr line from a native command in an
-# ErrorRecord, and with $ErrorActionPreference = "Stop" that is terminating —
+# ErrorRecord, and with $ErrorActionPreference = "Stop" that is terminating -
 # so the installer aborted here the moment any backend logged a warning. geco
 # logs everything to stderr by design (stdout belongs to the MCP protocol), and
 # a first refresh with a missing `npx` or keychain item is the common case, not

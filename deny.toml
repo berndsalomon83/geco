@@ -1,0 +1,53 @@
+# cargo-deny: supply-chain policy for geco's ~160 transitive dependencies.
+#   cargo deny check
+#
+# Four separate concerns, hence four sections: known vulnerabilities, license
+# compatibility, crates we don't want pulled in, and where crates may come
+# from.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# Known-vulnerable or unmaintained crates fail the check. Add an entry here
+# WITH a comment saying why, never silently.
+ignore = []
+
+[licenses]
+version = 2
+# geco ships under MIT. These are the permissive licenses compatible with
+# distributing a statically-linked binary. Anything else — notably any GPL
+# variant — fails, which is the point: a copyleft transitive dependency would
+# change the terms of the binaries we publish, and that should be a decision,
+# not an accident.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+# Several entries above are pre-approved rather than currently present. Don't
+# warn about the unused ones: the list is a reviewed policy, not an inventory,
+# and a warning per unused entry is noise that trains you to skim the output.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions are a warning, not an error: they're usually someone
+# else's transitive problem and blocking on them means blocking on upstream.
+multiple-versions = "warn"
+# A wildcard version requirement means an unreviewed upgrade can land silently.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

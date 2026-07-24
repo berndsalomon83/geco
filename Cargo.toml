@@ -2,6 +2,9 @@
 name = "geco"
 version = "0.7.0"
 edition = "2021"
+# Determined by bisecting, not guessed: darling 0.23 (via rmcp's macros)
+# requires 1.88. CI checks this floor so it can't drift upward by accident.
+rust-version = "1.88"
 description = "geco — the generic connector: MCP gateway that keeps tools, skills, and more out of your context until the moment you summon them"
 license = "MIT"
 

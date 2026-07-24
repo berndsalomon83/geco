@@ -7,7 +7,7 @@
       "$ref": "#/$defs/ProxyConfig"
     },
     "skills": {
-      "description": "Skill libraries served on demand (dirs containing <skill>/SKILL.md).\nSkills here cost ZERO session context until read_skill fetches them.",
+      "description": "Skill libraries served on demand (dirs containing `<skill>/SKILL.md`).\nSkills here cost ZERO session context until read_skill fetches them.",
       "$ref": "#/$defs/SkillsConfig"
     },
     "mcpServers": {

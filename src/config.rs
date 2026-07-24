@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 pub struct Config {
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Skill libraries served on demand (dirs containing <skill>/SKILL.md).
+    /// Skill libraries served on demand (dirs containing `<skill>/SKILL.md`).
     /// Skills here cost ZERO session context until read_skill fetches them.
     #[serde(default)]
     pub skills: SkillsConfig,
@@ -242,7 +242,7 @@ pub struct SkillsConfig {
 
 /// "command": "npx" + "args": [...]  (Claude style)  — or —
 /// "command": ["npx", "-y", "server"] (OpenCode style)
-/// Both forms deserialize to Vec<String>: a bare string becomes ["string"].
+/// Both forms deserialize to `Vec<String>`: a bare string becomes `["string"]`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
 pub struct CommandField(Vec<String>);

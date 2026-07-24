@@ -6,6 +6,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege by default. Only the release workflow needs write, and it
+# asks for it per-job.
+permissions:
+  contents: read
+
+# A push that supersedes an in-flight run cancels it. Actions minutes are
+# metered on a private repo and the older result is worthless anyway.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -14,6 +25,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       # Don't cancel the other platforms when one fails — geco has real
       # platform-specific code (keychain backends, HOME vs USERPROFILE, the
@@ -62,6 +74,7 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Blocking since the tree was formatted in 58e8ce2. It was advisory while
     # 214 hunks of drift existed — and that drift only grew, because a warning
     # nobody has to act on is a warning nobody acts on. Run `cargo fmt` before
@@ -69,12 +82,108 @@ jobs:
     # at whoever wrote the line.
     steps:
       - uses: actions/checkout@v7
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-
       - run: cargo fmt --check
+
+  deny:
+    name: supply chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Known vulnerabilities, license policy, banned crates and crate sources,
+    # across ~160 transitive dependencies. Policy lives in deny.toml.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Without this, "builds on stable" has no floor and the minimum silently
+    # rises the first time anyone uses a newly stabilised API.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --locked --all-targets
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Catches broken intra-doc links and malformed doc comments — e.g. a bare
+    # `Vec<String>` in prose, which rustdoc reads as an unclosed HTML tag.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      - run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  lint:
+    name: lint (shell, powershell, actions, spelling, secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Grouped into one job on purpose: all of these are seconds-fast and need
+    # no Rust toolchain, so five separate runners would cost more in startup
+    # than the checks themselves. Each step names itself clearly on failure.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # gitleaks scans history, which needs all of it.
+          fetch-depth: 0
+
+      # The installers are the entry point and have had three bugs between
+      # them (CRLF endings, `2>&1`, `2>$null`); neither was linted until now.
+      - name: shellcheck
+        run: shellcheck install.sh uninstall.sh
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $found = @()
+          foreach ($f in @('install.ps1', 'uninstall.ps1')) {
+            $found += Invoke-ScriptAnalyzer -Path $f -Settings ./PSScriptAnalyzerSettings.psd1
+          }
+          if ($found.Count -gt 0) {
+            $found | Format-List
+            throw "PSScriptAnalyzer: $($found.Count) finding(s)"
+          }
+          Write-Output 'PSScriptAnalyzer: clean'
+
+      # The pipeline itself is now two workflows with matrix logic and shell
+      # blocks. Typo an `if:` expression and it silently evaluates false —
+      # which is how a check quietly stops running without anyone noticing.
+      - name: actionlint
+        run: |
+          curl -sSLo actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          tar xzf actionlint.tar.gz actionlint
+          ./actionlint
+
+      # Tool and skill descriptions are read by MODELS, so a typo there is a
+      # search-quality bug rather than a cosmetic one.
+      - uses: crate-ci/typos@master
+
+      # geco exists to handle secrets. A credential committed to history is
+      # the worst-case failure for this project specifically.
+      - name: gitleaks
+        run: |
+          curl -sSLo gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.24.0/gitleaks_8.24.0_linux_x64.tar.gz
+          tar xzf gitleaks.tar.gz gitleaks
+          ./gitleaks detect --no-banner --redact --exit-code 1
 
   # Warnings are per-job annotations, which means they are effectively
   # invisible: you have to open each job to find them. That is how a Node 20
@@ -84,7 +193,8 @@ jobs:
   warnings:
     name: surface warnings
     runs-on: ubuntu-latest
-    needs: [test, fmt]
+    timeout-minutes: 10
+    needs: [test, fmt, deny, msrv, docs, lint]
     if: always()
     permissions:
       contents: read

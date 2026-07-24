@@ -103,9 +103,38 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+  # A CycloneDX bill of materials for the exact dependency set the binaries
+  # were built from. Generated per release rather than per CI run: an SBOM is
+  # only meaningful attached to an artifact somebody actually received.
+  sbom:
+    name: sbom
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sbom
+      - run: cargo install --locked cargo-cyclonedx
+      - name: Generate SBOM
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          cargo cyclonedx --format json --locked
+          # cargo-cyclonedx writes <crate>.cdx.json next to the manifest.
+          mkdir -p dist
+          cp geco.cdx.json "dist/geco-${version}-sbom.cdx.json"
+          echo "components: $(grep -o '"type"' "dist/geco-${version}-sbom.cdx.json" | wc -l)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: geco-sbom
+          path: dist/*.cdx.json
+          if-no-files-found: error
+
   publish:
     name: publish release
-    needs: build
+    needs: [build, sbom]
     # Only a tag publishes. workflow_dispatch stops after `build`, so the
     # matrix can be verified without minting a release.
     if: startsWith(github.ref, 'refs/tags/v')

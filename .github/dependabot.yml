@@ -1,0 +1,28 @@
+version: 2
+
+# Zero-maintenance dependency updates. Worth noting what this buys beyond
+# convenience: the Node 20 deprecation on actions/checkout@v4 sat unnoticed
+# across four runs and was only found by reading annotations by hand. The
+# github-actions ecosystem below is exactly the thing that catches that class
+# of problem automatically.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine patch/minor churn across ~160 crates, instead
+      # of a dozen. Majors still come through individually, because those are
+      # the ones that deserve to be read.
+      minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"

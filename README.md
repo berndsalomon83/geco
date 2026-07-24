@@ -6,7 +6,7 @@
 
 ## Why it exists
 The more mcp tools you expose to your llm, the more the context gets prefilled with ballast that most likely is not even used and reduces the available space you have to work with.
-The same is true for skills. Skills are great recipies to have but they also land as descriptive text in the context of your llm and yet again, more skills means lesser remaining context for the actual task to be done.
+The same is true for skills. Skills are great recipes to have but they also land as descriptive text in the context of your llm and yet again, more skills means lesser remaining context for the actual task to be done.
 
 So here comes this rusty reptile geco that helps you to tackle this. It sits between your IDE and the skills and mcp tools that you have and gives your llm the same 8 tools always, no matter how much you have in your tool shed!
 

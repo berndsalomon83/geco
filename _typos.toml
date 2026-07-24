@@ -1,0 +1,8 @@
+# Deliberate non-words, so the spell check stays useful rather than ignored.
+# Tool and skill descriptions are read by MODELS, so a typo there is a search
+# quality bug, not a cosmetic one — which is why this runs at all.
+
+[default.extend-words]
+# Quoted stemmer output in a comment in src/search.rs: the stemmer maps
+# "status" to "statu", and the comment shows that literally.
+statu = "statu"

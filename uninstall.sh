@@ -16,7 +16,7 @@ for p in [os.path.join(home, ".config/opencode/opencode.json"),
     try:
         cfg = json.load(open(p))
     except Exception:
-        print(f"    skip (unparseable): {p}"); continue
+        print(f"    skip (cannot parse): {p}"); continue
     changed = False
     for key in ("mcp", "mcpServers"):
         if isinstance(cfg.get(key), dict):

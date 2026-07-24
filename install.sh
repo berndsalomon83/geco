@@ -67,7 +67,11 @@ fetch_prebuilt() {
         curl -fsSL -o "$tmp/SHA256SUMS" "${url%/*}/SHA256SUMS" >/dev/null 2>&1 || true
     fi
 
-    archive="$(ls "$tmp"/*.tar.gz 2>/dev/null | head -1)" || return 1
+    # Glob rather than parsing `ls`, which mangles unusual filenames.
+    archive=""
+    for f in "$tmp"/*.tar.gz; do
+        if [ -f "$f" ]; then archive="$f"; break; fi
+    done
     [ -n "$archive" ] || return 1
 
     # Verify if we got sums; a missing SHA256SUMS is not fatal, a mismatch is.
@@ -111,7 +115,8 @@ else
     mkdir -p "$HOME/.local/bin"
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
-        *) warn "~/.local/bin is not on PATH — add to ~/.zshrc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+        # $HOME rather than a literal ~, so the message shows the real path.
+        *) warn "$HOME/.local/bin is not on PATH — add to your shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
     esac
 fi
 
@@ -150,8 +155,13 @@ TOOLS=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protoco
 for l in sys.stdin:
     m=json.loads(l)
     if m.get("id")==2: print(len(m["result"]["tools"]))' || echo 0)
-# 8 meta-tools: 6 gateway + 2 skills
-[ "$TOOLS" = "8" ] && say "Proxy OK: 8 meta-tools (6 gateway + 2 skills)" || warn "expected 8 meta-tools, got: $TOOLS"
+# 8 meta-tools: 6 gateway + 2 skills. if/else rather than `A && B || C`,
+# which runs C when B fails, not only when A does.
+if [ "$TOOLS" = "8" ]; then
+    say "Proxy OK: 8 meta-tools (6 gateway + 2 skills)"
+else
+    warn "expected 8 meta-tools, got: $TOOLS"
+fi
 
 # Companion opencode TUI plugin: toasts gateway health problems in-app.
 OC_PLUGIN_DIR="$HOME/.config/opencode/plugins"
