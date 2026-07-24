@@ -4,6 +4,36 @@ Notable changes per release. Format follows [Keep a Changelog](https://keepachan
 versioning is [semver](https://semver.org/), with the pre-1.0 caveat that a
 minor bump may break.
 
+## [Unreleased]
+
+### Added
+
+- **`scripts/lint.sh`** — runs CI's `lint` job locally (shellcheck,
+  actionlint, typos, gitleaks, PSScriptAnalyzer). Missing tools are skipped
+  rather than fatal, but it always prints which ones it did **not** run: a
+  linter that silently checks nothing is worse than none, because you believe
+  it. Written after a prose typo reached CI, since the local loop was
+  `fmt && clippy && test` and none of those read spelling.
+- **A coverage table in every CI run's summary** (`cargo-llvm-cov`,
+  informational, gates nothing). A percentage target drives tests toward
+  whatever is cheapest to cover rather than whatever is riskiest, so there
+  isn't one; the per-file table sorted worst-first is the useful part. It
+  exists because `backend.rs` sat at 461 lines with no direct tests until a
+  human noticed, and its first test found a panic.
+
+### Fixed
+
+- **The pre-push hook never ran on Windows.** It looked for `cargo` on `PATH`
+  only, so a toolchain installed inside WSL — invisible to Git Bash, which is
+  what git runs hooks with — made it print "skipping" on every push and check
+  nothing. It now falls back to `~/.cargo/bin`, then through WSL, and runs
+  `typos` too when installed.
+- `gitleaks` in `scripts/lint.sh` scans the working tree rather than history,
+  because git refuses to trust a checkout on a Windows drive from WSL
+  ("dubious ownership") — at which point gitleaks scans ~0 bytes and reports
+  *"no leaks found"*. A clean result from a scan that read nothing is the
+  worst possible output. Narrower than CI, which still scans all history.
+
 ## [0.8.0] — 2026-07-24
 
 **The always-on surface drops from eight meta-tools to six, ~4.7 KB to
