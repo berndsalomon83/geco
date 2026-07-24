@@ -196,17 +196,22 @@ impl SkillIndex {
         idx
     }
 
+    /// Ranked by the same scorer as tool search, so the two surfaces behave
+    /// alike. Skills have no server field.
     pub fn search(&self, query: &str, limit: usize) -> Vec<&SkillMeta> {
-        let q = query.to_lowercase();
-        let mut hits: Vec<(i64, &SkillMeta)> = Vec::new();
-        for s in &self.skills {
-            let score = crate::search::score_match(&q, &s.name, &s.description, None);
-            if score > 0 {
-                hits.push((score, s));
-            }
-        }
-        hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name)));
-        hits.into_iter().take(limit).map(|(_, s)| s).collect()
+        let docs: Vec<crate::search::Doc> = self
+            .skills
+            .iter()
+            .map(|s| crate::search::Doc {
+                name: &s.name,
+                description: &s.description,
+                server: None,
+            })
+            .collect();
+        crate::search::rank(&docs, query, limit)
+            .into_iter()
+            .map(|(i, _)| &self.skills[i])
+            .collect()
     }
 
     pub fn get(&self, name: &str) -> Option<&SkillMeta> {

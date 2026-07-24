@@ -1,0 +1,175 @@
+{
+  "_comment": [
+    "Evaluation corpus for tool search. Tools mirror the shape of real MCP",
+    "servers (names and one-line descriptions of the kind those servers ship).",
+    "",
+    "METHODOLOGY, and the thing that makes this worth anything: queries are",
+    "written in the vocabulary a USER or AGENT would use, NOT by copying words",
+    "out of the tool they are supposed to find. A query built from the target's",
+    "own description measures nothing except that substring matching works.",
+    "",
+    "Each query is tagged:",
+    "  lexical  - shares real vocabulary with the target; a good lexical",
+    "             scorer should find it, and failure here is a genuine bug.",
+    "  semantic - needs synonym or world knowledge ('bug report' -> issue,",
+    "             'save this' -> memory_store). Largely out of reach for any",
+    "             lexical scorer; tracked separately so it is never mistaken",
+    "             for lexical headroom, and so we can see what embeddings",
+    "             would actually buy.",
+    "",
+    "`expect` lists every answer a reasonable person would accept."
+  ],
+
+  "servers": {
+    "github": {
+      "description": "GitHub: repositories, issues, pull requests, code search.",
+      "tools": [
+        { "name": "create_issue", "description": "Create a new issue in a repository with a title and body." },
+        { "name": "list_issues", "description": "List issues in a repository, filtered by state and labels." },
+        { "name": "get_issue", "description": "Retrieve a single issue by its number." },
+        { "name": "add_issue_comment", "description": "Add a comment to an existing issue." },
+        { "name": "create_pull_request", "description": "Open a pull request from a head branch into a base branch." },
+        { "name": "merge_pull_request", "description": "Merge an open pull request into its base branch." },
+        { "name": "list_commits", "description": "List commits on a branch with author and message." },
+        { "name": "search_code", "description": "Search source code across repositories by expression." },
+        { "name": "create_branch", "description": "Create a new branch from an existing ref." },
+        { "name": "get_file_contents", "description": "Read the contents of a file or directory in a repository." },
+        { "name": "create_or_update_file", "description": "Write a file to a repository and commit the change." },
+        { "name": "fork_repository", "description": "Fork a repository into your own account." }
+      ]
+    },
+    "playwright": {
+      "description": "Browser automation: navigate, interact, capture.",
+      "tools": [
+        { "name": "browser_navigate", "description": "Go to a URL in the current page." },
+        { "name": "browser_click", "description": "Click an element on the page." },
+        { "name": "browser_type", "description": "Type text into an editable element." },
+        { "name": "browser_snapshot", "description": "Capture an accessibility tree of the current page." },
+        { "name": "browser_take_screenshot", "description": "Take a screenshot of the current page or an element." },
+        { "name": "browser_select_option", "description": "Choose an option in a dropdown element." },
+        { "name": "browser_file_upload", "description": "Upload one or more files through a file chooser." },
+        { "name": "browser_close", "description": "Close the current page." }
+      ]
+    },
+    "filesystem": {
+      "description": "Local filesystem access within allowed directories.",
+      "tools": [
+        { "name": "read_file", "description": "Read the complete contents of a file from disk." },
+        { "name": "write_file", "description": "Create a new file or overwrite an existing one." },
+        { "name": "edit_file", "description": "Make line-based edits to a text file." },
+        { "name": "list_directory", "description": "List the files and folders in a given path." },
+        { "name": "create_directory", "description": "Create a new folder, including parents." },
+        { "name": "move_file", "description": "Move or rename a file or folder." },
+        { "name": "search_files", "description": "Recursively find files and folders matching a pattern." },
+        { "name": "get_file_info", "description": "Return size, timestamps and permissions for a path." }
+      ]
+    },
+    "postgres": {
+      "description": "Read-only SQL access to a PostgreSQL database.",
+      "tools": [
+        { "name": "query", "description": "Run a read-only SQL statement and return the rows." },
+        { "name": "list_schemas", "description": "List the schemas available in the database." },
+        { "name": "list_tables", "description": "List tables within a schema." },
+        { "name": "describe_table", "description": "Return the columns, types and indexes of a table." }
+      ]
+    },
+    "slack": {
+      "description": "Slack workspace: channels, messages, threads.",
+      "tools": [
+        { "name": "slack_post_message", "description": "Send a message to a channel." },
+        { "name": "slack_list_channels", "description": "List public channels in the workspace." },
+        { "name": "slack_get_channel_history", "description": "Fetch recent messages from a channel." },
+        { "name": "slack_reply_to_thread", "description": "Reply inside an existing message thread." },
+        { "name": "slack_add_reaction", "description": "Add an emoji reaction to a message." },
+        { "name": "slack_get_users", "description": "List members of the workspace with their profiles." }
+      ]
+    },
+    "icm": {
+      "description": "Long-term memory and conversation continuity.",
+      "tools": [
+        { "name": "icm_memory_store", "description": "Store important information in long-term memory." },
+        { "name": "icm_memory_recall", "description": "Search long-term memory for previously stored facts." },
+        { "name": "icm_memory_forget_topic", "description": "Remove everything remembered about a topic." },
+        { "name": "icm_wake_up", "description": "Return a compact pack of critical facts to start a session." },
+        { "name": "icm_transcript_show", "description": "Show the transcript of an earlier conversation." }
+      ]
+    },
+    "websearch": {
+      "description": "Private web search and page reading via SearXNG.",
+      "tools": [
+        { "name": "searxng_web_search", "description": "Search the web and return ranked results with snippets." },
+        { "name": "web_url_read", "description": "Fetch a URL and return its content as readable text." }
+      ]
+    },
+    "time": {
+      "description": "Current time and timezone conversion.",
+      "tools": [
+        { "name": "get_current_time", "description": "Return the current time in a given timezone." },
+        { "name": "convert_time", "description": "Convert a time between two timezones." }
+      ]
+    }
+  },
+
+  "queries": [
+    { "q": "create an issue", "expect": ["create_issue"], "kind": "lexical" },
+    { "q": "list issues", "expect": ["list_issues"], "kind": "lexical" },
+    { "q": "comment on an issue", "expect": ["add_issue_comment"], "kind": "lexical" },
+    { "q": "open a pull request", "expect": ["create_pull_request"], "kind": "lexical" },
+    { "q": "merge a pr", "expect": ["merge_pull_request"], "kind": "semantic" },
+    { "q": "search code", "expect": ["search_code"], "kind": "lexical" },
+    { "q": "make a new branch", "expect": ["create_branch"], "kind": "lexical" },
+    { "q": "read a file from the repo", "expect": ["get_file_contents"], "kind": "lexical" },
+    { "q": "commit a file to github", "expect": ["create_or_update_file"], "kind": "lexical" },
+    { "q": "who wrote these commits", "expect": ["list_commits"], "kind": "lexical" },
+
+    { "q": "open a bug report", "expect": ["create_issue"], "kind": "semantic" },
+    { "q": "file a ticket", "expect": ["create_issue"], "kind": "semantic" },
+
+    { "q": "go to a url", "expect": ["browser_navigate"], "kind": "lexical" },
+    { "q": "click a button", "expect": ["browser_click"], "kind": "lexical" },
+    { "q": "type into a field", "expect": ["browser_type"], "kind": "lexical" },
+    { "q": "take a screenshot", "expect": ["browser_take_screenshot"], "kind": "lexical" },
+    { "q": "take a picture of the page", "expect": ["browser_take_screenshot"], "kind": "semantic" },
+    { "q": "pick from a dropdown", "expect": ["browser_select_option"], "kind": "lexical" },
+    { "q": "attach a file in the browser", "expect": ["browser_file_upload"], "kind": "lexical" },
+
+    { "q": "read a file", "expect": ["read_file"], "kind": "lexical" },
+    { "q": "save text to disk", "expect": ["write_file"], "kind": "semantic" },
+    { "q": "rename a file", "expect": ["move_file"], "kind": "semantic" },
+    { "q": "what is in this folder", "expect": ["list_directory"], "kind": "lexical" },
+    { "q": "make a folder", "expect": ["create_directory"], "kind": "lexical" },
+    { "q": "find files matching a pattern", "expect": ["search_files"], "kind": "lexical" },
+    { "q": "how big is this file", "expect": ["get_file_info"], "kind": "semantic" },
+    { "q": "change a few lines in a file", "expect": ["edit_file"], "kind": "lexical" },
+
+    { "q": "run some sql", "expect": ["query"], "kind": "lexical" },
+    { "q": "what tables exist", "expect": ["list_tables"], "kind": "lexical" },
+    { "q": "columns of a table", "expect": ["describe_table"], "kind": "lexical" },
+    { "q": "what is in the database", "expect": ["list_tables", "list_schemas", "query"], "kind": "lexical" },
+
+    { "q": "send a message to the team", "expect": ["slack_post_message"], "kind": "semantic" },
+    { "q": "post to a channel", "expect": ["slack_post_message"], "kind": "lexical" },
+    { "q": "what channels are there", "expect": ["slack_list_channels"], "kind": "lexical" },
+    { "q": "read recent chat messages", "expect": ["slack_get_channel_history"], "kind": "lexical" },
+    { "q": "reply in a thread", "expect": ["slack_reply_to_thread"], "kind": "lexical" },
+    { "q": "react with an emoji", "expect": ["slack_add_reaction"], "kind": "lexical" },
+
+    { "q": "remember this", "expect": ["icm_memory_store"], "kind": "semantic" },
+    { "q": "store something in memory", "expect": ["icm_memory_store"], "kind": "lexical" },
+    { "q": "what do you know about this project", "expect": ["icm_memory_recall"], "kind": "semantic" },
+    { "q": "search my long term memory", "expect": ["icm_memory_recall"], "kind": "lexical" },
+    { "q": "forget about a topic", "expect": ["icm_memory_forget_topic"], "kind": "lexical" },
+    { "q": "show me an old conversation", "expect": ["icm_transcript_show"], "kind": "lexical" },
+
+    { "q": "search the web", "expect": ["searxng_web_search"], "kind": "lexical" },
+    { "q": "look something up online", "expect": ["searxng_web_search"], "kind": "semantic" },
+    { "q": "read this webpage", "expect": ["web_url_read"], "kind": "lexical" },
+
+    { "q": "what time is it", "expect": ["get_current_time"], "kind": "lexical" },
+    { "q": "convert a timezone", "expect": ["convert_time"], "kind": "lexical" },
+
+    { "q": "screenshot", "expect": ["browser_take_screenshot"], "kind": "lexical" },
+    { "q": "memory", "expect": ["icm_memory_store", "icm_memory_recall", "icm_memory_forget_topic"], "kind": "lexical" },
+    { "q": "icm_wake_up", "expect": ["icm_wake_up"], "kind": "lexical" }
+  ]
+}
