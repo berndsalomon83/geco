@@ -1508,6 +1508,75 @@ async fn env_passthrough_globs_and_inherit_escape_hatch() {
 }
 
 #[tokio::test]
+async fn tools_list_changed_refreshes_the_snapshot_unprompted() {
+    // The drift this closes: a backend that gains or loses tools at runtime
+    // stayed wrong in the snapshot until someone happened to run
+    // refresh_tools, with nothing reporting that anything had changed.
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "description": "stub",
+            "env": { "STUB_EXTRA_TOOLS": "1" },
+        }
+    }));
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+    proxy.clone().spawn_tool_change_listener();
+
+    let tool_names = |p: Proxy| async move {
+        let r = p
+            .list_tools(Parameters(ListToolsParams { server: "stub".into(), tool: None }))
+            .await
+            .unwrap();
+        let json = extract_json(&r);
+        json["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["tool"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let before = tool_names(proxy.clone()).await;
+    assert!(
+        !before.contains(&"brand_new_tool".to_string()),
+        "precondition: the tool should not exist yet, got {before:?}"
+    );
+
+    // Ask the backend to grow its toolset. It replies, then sends
+    // notifications/tools/list_changed — nothing here calls refresh_tools.
+    let result = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "grow_toolset".into(),
+                arguments: None,
+            }],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "grow_toolset should succeed");
+
+    // The listener debounces ~200ms, then re-scans. Poll rather than sleep a
+    // fixed amount, so this isn't slower or flakier than it needs to be.
+    let mut after = Vec::new();
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        after = tool_names(proxy.clone()).await;
+        if after.contains(&"brand_new_tool".to_string()) {
+            break;
+        }
+    }
+    assert!(
+        after.contains(&"brand_new_tool".to_string()),
+        "snapshot should have picked up the new tool unprompted, got {after:?}"
+    );
+
+    proxy.shutdown_backends().await;
+    registry.shutdown_all().await;
+}
+
+#[tokio::test]
 async fn skill_watch_roots_resolves_inside_a_task() {
     // Regression: the skill watcher resolved its watch roots with
     // RwLock::blocking_read from inside a tokio task. That panics on the spot

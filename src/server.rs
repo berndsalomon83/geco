@@ -167,6 +167,12 @@ pub struct Proxy {
     client: Arc<RwLock<Option<String>>>,
     metrics: Arc<RwLock<crate::health::Metrics>>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Backends report `tools/list_changed` here. Kept so reload_from_config
+    /// can wire up the registry it builds.
+    tool_change_tx: tokio::sync::mpsc::Sender<String>,
+    /// Receiver, parked until `spawn_tool_change_listener` takes it. Proxy is
+    /// Clone and a Receiver is not, hence the Option-in-a-Mutex.
+    tool_change_rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<String>>>>,
 }
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
@@ -327,6 +333,11 @@ impl Proxy {
             started_at: crate::backend::now(),
             ..Default::default()
         };
+        // Wire tool-change notifications before the registry disappears behind
+        // a lock. Small queue on purpose: notifications coalesce, because one
+        // refresh subsumes any number of them.
+        let (tool_change_tx, tool_change_rx) = tokio::sync::mpsc::channel::<String>(16);
+        registry.set_tool_change_notifier(tool_change_tx.clone());
         Self {
             registry: Arc::new(RwLock::new(registry)),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -340,7 +351,77 @@ impl Proxy {
             client: Arc::new(RwLock::new(None)),
             metrics: Arc::new(RwLock::new(metrics)),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tool_change_tx,
+            tool_change_rx: Arc::new(std::sync::Mutex::new(Some(tool_change_rx))),
         }
+    }
+
+    /// Watch for backends reporting `tools/list_changed` and re-scan just that
+    /// server. Without this the snapshot silently drifts: a backend that adds
+    /// or removes a tool at runtime stays wrong until someone runs
+    /// `refresh_tools`, and nothing anywhere reports that it happened.
+    pub fn spawn_tool_change_listener(self) {
+        let Some(mut rx) = self
+            .tool_change_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
+            tracing::warn!("tool-change listener already started; ignoring");
+            return;
+        };
+        tokio::spawn(async move {
+            while let Some(first) = rx.recv().await {
+                if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                // Coalesce a burst: a server that rebuilds its tool list may
+                // notify several times, and re-scanning once per notification
+                // would spawn a connection each time.
+                let mut pending: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                pending.insert(first);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                while let Ok(more) = rx.try_recv() {
+                    pending.insert(more);
+                }
+                for server in pending {
+                    self.refresh_server(&server).await;
+                }
+            }
+        });
+    }
+
+    /// Re-scan one backend's tools and merge the result into the snapshot.
+    /// Used by the tool-change listener; `refresh_tools` has its own path
+    /// because it also reports a diff.
+    async fn refresh_server(&self, name: &str) {
+        let hash = { self.snapshot.read().await.config_hash.clone() };
+        let fresh = {
+            let registry = self.registry.read().await.clone();
+            registry.build_snapshot(hash, Some(name)).await
+        };
+        let Some(entry) = fresh.servers.get(name).cloned() else {
+            // Server vanished from the registry between notification and
+            // refresh (a hot-reload removed it) — nothing to update.
+            return;
+        };
+        let (before, after) = {
+            let mut snap = self.snapshot.write().await;
+            let before = snap.servers.get(name).map(|s| s.tools.len()).unwrap_or(0);
+            let after = entry.tools.len();
+            snap.generated_at = fresh.generated_at.clone();
+            snap.servers.insert(name.to_string(), entry);
+            (before, after)
+        };
+        tracing::info!(
+            "tools/list_changed: re-scanned '{name}', {before} -> {after} tools"
+        );
+        let to_save = self.snapshot.read().await.clone();
+        if let Err(e) = to_save.save(&self.snapshot_path) {
+            tracing::warn!("cannot persist snapshot after tool change: {e:#}");
+        }
+        self.publish_health().await;
     }
 
     /// Spawn a background task that watches the config file for changes and
@@ -602,6 +683,9 @@ impl Proxy {
     pub async fn reload_from_config(&self, cfg: crate::config::Config) -> AnyhowResult<()> {
         let new_hash = cfg.snapshot_hash();
         let new_registry = crate::backend::Registry::from_config(&cfg);
+        // Fresh Backends start with no notifier — rewire them, or tool-change
+        // notifications stop working silently after the first hot-reload.
+        new_registry.set_tool_change_notifier(self.tool_change_tx.clone());
 
         // Collect removed backends' Arcs before swapping the registry.
         // We shut them down after the swap to avoid a TOCTOU window where

@@ -123,6 +123,20 @@ Add one line to your global AGENTS.md so models reach for it: *Before specialize
 
 Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `pass_env` (hand this server a variable from geco's own environment), `description` (shown in `list_mcp_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`.
 
+### What geco proxies (and what it doesn't)
+
+geco proxies **tools**. Backend *resources* and *prompts* are not exposed
+through the gateway, and because geco terminates the client side of each
+backend session, a backend cannot use sampling or elicitation through it. If
+a server's value is mostly resources or prompts, wire it up directly rather
+than behind geco.
+
+Tool lists stay current on their own: geco listens for
+`notifications/tools/list_changed` and re-scans that one backend when it
+fires, so a server that adds or removes tools at runtime is picked up without
+a `refresh_tools` call. Servers that don't send the notification are still
+snapshot-based — refresh them manually or let a config change do it.
+
 ### Backend environment isolation
 
 Since 0.7, a backend does **not** inherit geco's environment. Each child starts clean and receives only an OS/runtime baseline — `PATH`, `HOME`/`USERPROFILE`, temp dirs, locale, TLS trust (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, …) and proxy settings (`HTTP_PROXY` and friends) — plus whatever its own `env` and `pass_env` declare.

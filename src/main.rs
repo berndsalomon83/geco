@@ -240,6 +240,7 @@ async fn main() -> Result<()> {
             proxy.clone().spawn_hot_reload();
             proxy.clone().spawn_health_check();
             proxy.clone().spawn_skill_reload();
+            proxy.clone().spawn_tool_change_listener();
             let service = proxy
                 .clone()
                 .serve(rmcp::transport::stdio())

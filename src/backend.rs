@@ -17,7 +17,42 @@ use tokio::sync::Mutex;
 use crate::config::{Config, EnvPolicy, ProxyConfig, ServerConfig};
 use crate::snapshot::{ServerSnapshot, Snapshot, ToolSnapshot};
 
-type Conn = Arc<RunningService<RoleClient, ()>>;
+type Conn = Arc<RunningService<RoleClient, BackendClient>>;
+
+/// The client half of a backend connection.
+///
+/// Exists so geco can react to `notifications/tools/list_changed`. The unit
+/// type `()` also implements `ClientHandler`, which is what this used to
+/// connect with — and its default hooks accept the notification and drop it
+/// on the floor. A backend that gains or loses tools at runtime therefore
+/// stayed wrong in the snapshot until someone happened to run `refresh_tools`,
+/// with nothing anywhere reporting the drift.
+#[derive(Clone)]
+pub struct BackendClient {
+    name: String,
+    /// Where to report a tool-list change. `None` for short-lived connections
+    /// (snapshot builds, the `refresh` CLI) that nobody is listening for.
+    notify: Option<tokio::sync::mpsc::Sender<String>>,
+}
+
+impl rmcp::handler::client::ClientHandler for BackendClient {
+    async fn on_tool_list_changed(
+        &self,
+        _context: rmcp::service::NotificationContext<RoleClient>,
+    ) {
+        let Some(tx) = &self.notify else { return };
+        tracing::info!("backend '{}' reported tools/list_changed", self.name);
+        // try_send, not send: a full queue means a refresh is already pending,
+        // and one refresh subsumes any number of notifications. Awaiting here
+        // would also block the connection's read loop.
+        if let Err(e) = tx.try_send(self.name.clone()) {
+            tracing::debug!(
+                "backend '{}': tool-change signal not queued ({e}) — a refresh is already pending",
+                self.name
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "lowercase", tag = "state")]
@@ -36,6 +71,9 @@ pub struct Backend {
     /// fixed for the lifetime of the Backend (a config change rebuilds the
     /// whole Registry).
     env_policy: EnvPolicy,
+    /// Set once by the Proxy so long-lived connections can report
+    /// `tools/list_changed`. Absent for CLI and snapshot-only use.
+    notify: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>>,
     conn: Mutex<Option<Conn>>,
     status: Mutex<Status>,
 }
@@ -50,9 +88,17 @@ impl Backend {
             name,
             cfg,
             env_policy,
+            notify: std::sync::OnceLock::new(),
             conn: Mutex::new(None),
             status: Mutex::new(Status::Cold),
         }
+    }
+
+    /// Route this backend's `tools/list_changed` notifications to `tx`.
+    /// Takes effect on the next connect; already-warm connections keep the
+    /// handler they were built with.
+    pub fn set_tool_change_notifier(&self, tx: tokio::sync::mpsc::Sender<String>) {
+        let _ = self.notify.set(tx);
     }
 
     pub async fn status(&self) -> Status {
@@ -94,7 +140,11 @@ impl Backend {
 
     async fn connect_raw(&self, startup: Duration) -> Result<Conn> {
         let transport = self.resolve_and_spawn().await?;
-        let svc = tokio::time::timeout(startup, ().serve(transport))
+        let client = BackendClient {
+            name: self.name.clone(),
+            notify: self.notify.get().cloned(),
+        };
+        let svc = tokio::time::timeout(startup, client.serve(transport))
             .await
             .map_err(|_| anyhow!("backend '{}' did not initialize within {startup:?}", self.name))?
             .with_context(|| format!("backend '{}' failed MCP initialize", self.name))?;
@@ -376,6 +426,15 @@ impl Registry {
     pub async fn shutdown_all(&self) {
         for backend in self.backends.values() {
             backend.shutdown().await;
+        }
+    }
+
+    /// Route every backend's `tools/list_changed` notifications to `tx`.
+    /// Called by the Proxy; the CLI paths (`refresh`, `inspect`) leave it
+    /// unset, so their short-lived connections stay silent.
+    pub fn set_tool_change_notifier(&self, tx: tokio::sync::mpsc::Sender<String>) {
+        for backend in self.backends.values() {
+            backend.set_tool_change_notifier(tx.clone());
         }
     }
 }
