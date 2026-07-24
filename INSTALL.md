@@ -74,7 +74,7 @@ The entries are the same shape — copy, paste, add a `description` (that's what
 geco refresh     # snapshot the moved servers once
 ```
 
-Restart the agent. Context cost for those servers drops to ~4.3 KB flat.
+Restart the agent. Context cost for those servers drops to ~4.7 KB flat.
 
 > **Moving a server that reads a token from your shell? Read this.**
 > Since 0.7 a backend does **not** inherit geco's environment. A server that
