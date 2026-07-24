@@ -128,6 +128,20 @@ therefore explicit, not incremental:
    but now there is a scoreboard (`labeled_eval`) to prove whether it earns its
    cost *before* committing.
 
+   **Measured, 2026-07 (branch `feat/embeddings-done-right`, well-packaged:
+   opt-in, rustls, model downloaded not committed):** BM25F → embedding rerank
+   with all-MiniLM-L6-v2 (quantized) does **not** cross the wall. On the
+   210-query real corpus, BM25+embeddings scored recall@1 **12.9%** vs
+   BM25-only's **13.3%** — *worse* — and recall@5 was **identical at 22.4%**.
+   That last number is the point: a reranker only reorders the top-K BM25F
+   already retrieved, so it cannot lift recall@5, and the wall is precisely the
+   tools BM25F never surfaces. This does not close the embeddings fork forever —
+   it rules out *rerank* with a *small general model*. Actually crossing the
+   wall would need embedding-based **retrieval** over all tools (not rerank) and
+   probably a stronger model — a much larger bet, now taken against evidence
+   that the cheap version buys nothing (and costs an onnxruntime dependency in
+   every build).
+
 The cheap middle paths were investigated and ruled out (above). This is a
 genuine architecture decision, and it now rests on measured evidence rather than
 hope.
