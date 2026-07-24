@@ -190,6 +190,65 @@ jobs:
   # deprecation notice sat unnoticed across four runs. This job collects every
   # non-failure annotation in the run into the run summary, so warnings are
   # readable from the run page without drilling in.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Informational, NOT a required check and NOT gated on a threshold.
+    #
+    # The reason it exists: src/backend.rs sat at 461 lines with zero direct
+    # unit tests, and that was discovered by a human reading a file listing.
+    # The first tests written against it found a panic in a documented config
+    # option. Nothing in the pipeline could have pointed at that file.
+    #
+    # A percentage gate would be the wrong fix — it drives tests toward
+    # whatever is cheapest to cover rather than whatever is riskiest. The
+    # per-file table in the run summary is the useful part: it makes "nothing
+    # tests this at all" visible without pretending a number is a target.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Measure
+        run: cargo llvm-cov --locked --summary-only --json --output-path cov.json
+
+      - name: Report
+        run: |
+          set -uo pipefail
+          {
+            echo "## Coverage"
+            echo
+            echo "| file | lines | covered | % |"
+            echo "|---|---:|---:|---:|"
+            jq -r '
+              .data[0].files[]
+              | select(.filename | test("/src/"))
+              | [ (.filename | sub(".*/src/"; "src/")),
+                  .summary.lines.count,
+                  .summary.lines.covered,
+                  (.summary.lines.percent | floor)
+                ] | @tsv
+            ' cov.json \
+              | sort -t$'\t' -k4 -n \
+              | awk -F'\t' '{ printf "| `%s` | %s | %s | %s%% |\n", $1, $2, $3, $4 }'
+            echo
+            jq -r '.data[0].totals.lines
+                   | "**Total: \(.covered)/\(.count) lines (\(.percent | floor)%)**"' cov.json
+            echo
+            echo "_Informational. Sorted worst-first — the top rows are where a bug"
+            echo "has nowhere to be caught._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-json
+          path: cov.json
+          retention-days: 14
+
   warnings:
     name: surface warnings
     runs-on: ubuntu-latest

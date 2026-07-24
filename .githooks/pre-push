@@ -14,17 +14,60 @@ set -uo pipefail
 
 cyan=$'\033[1;36m'; red=$'\033[1;31m'; green=$'\033[1;32m'; yellow=$'\033[1;33m'; off=$'\033[0m'
 
-if ! command -v cargo >/dev/null 2>&1; then
-    printf '%spre-push:%s cargo not on PATH — skipping local checks, CI will decide\n' \
+# Finding cargo is not as simple as `command -v`. On Windows the toolchain
+# is commonly installed inside WSL while git (and therefore this hook) runs
+# under Git Bash, which cannot see it — so the hook printed "skipping" on
+# every single push and quietly checked nothing for weeks. Falling back
+# through the usual places, then through WSL, is the difference between a
+# hook that runs and a hook that only looks like it does.
+CARGO=""
+CARGO_VIA_WSL=0
+
+if command -v cargo >/dev/null 2>&1; then
+    CARGO="cargo"
+elif [ -x "${HOME:-}/.cargo/bin/cargo" ]; then
+    CARGO="$HOME/.cargo/bin/cargo"
+elif [ -x "${USERPROFILE:-}/.cargo/bin/cargo.exe" ]; then
+    CARGO="$USERPROFILE/.cargo/bin/cargo.exe"
+elif command -v wsl.exe >/dev/null 2>&1 \
+     && wsl.exe -e bash -lc 'command -v cargo || [ -x "$HOME/.cargo/bin/cargo" ]' >/dev/null 2>&1; then
+    CARGO_VIA_WSL=1
+fi
+
+if [ -z "$CARGO" ] && [ "$CARGO_VIA_WSL" -eq 0 ]; then
+    printf '%spre-push:%s cargo not found (PATH, ~/.cargo/bin, or WSL) — skipping\n' \
+        "$yellow" "$off" >&2
+    printf '%spre-push:%s CI will decide. This is the ONLY thing checking you.\n' \
         "$yellow" "$off" >&2
     exit 0
 fi
+
+if [ "$CARGO_VIA_WSL" -eq 1 ]; then
+    # Translate the checkout to a path WSL understands, once.
+    wsl_dir="$(wsl.exe -e wslpath -a "$(pwd -W 2>/dev/null || pwd)" 2>/dev/null | tr -d '\r')"
+    if [ -z "$wsl_dir" ]; then
+        printf '%spre-push:%s cannot map this checkout into WSL — skipping\n' \
+            "$yellow" "$off" >&2
+        exit 0
+    fi
+    printf '%spre-push:%s using the WSL toolchain (%s)\n' "$cyan" "$off" "$wsl_dir" >&2
+fi
+
+run_cargo() {
+    if [ "$CARGO_VIA_WSL" -eq 1 ]; then
+        wsl.exe -e bash -lc \
+            "export PATH=\"\$HOME/.cargo/bin:\$PATH\"; cd '$wsl_dir' && cargo $*" 2>&1
+    else
+        # shellcheck disable=SC2086 # word splitting is intended here
+        "$CARGO" $* 2>&1
+    fi
+}
 
 fail=0
 check() {
     label="$1"; shift
     printf '%spre-push:%s %s' "$cyan" "$off" "$label" >&2
-    if out="$("$@" 2>&1)"; then
+    if out="$(run_cargo "$@")"; then
         printf ' ok\n' >&2
     else
         printf ' FAILED\n' >&2
@@ -33,9 +76,22 @@ check() {
     fi
 }
 
-check "rustfmt" cargo fmt --check
-check "clippy " cargo clippy --all-targets --locked -- -D warnings
-check "tests  " cargo test --locked
+check "rustfmt" fmt --check
+check "clippy " clippy --all-targets --locked -- -D warnings
+check "tests  " test --locked
+
+# Not Rust, but it is what most recently reached CI as a failure: a typo in
+# prose. Only runs if typos is installed; silence here means "not checked".
+if command -v typos >/dev/null 2>&1; then
+    check_typos_out="$(typos 2>&1)" && typos_ok=1 || typos_ok=0
+    if [ "$typos_ok" -eq 1 ]; then
+        printf '%spre-push:%s typos  ok\n' "$cyan" "$off" >&2
+    else
+        printf '%spre-push:%s typos  FAILED\n' "$cyan" "$off" >&2
+        printf '%s\n' "$check_typos_out" | tail -20 >&2
+        fail=1
+    fi
+fi
 
 if [ "$fail" -ne 0 ]; then
     printf '\n%spush aborted%s — fix the above, or override with: git push --no-verify\n' \

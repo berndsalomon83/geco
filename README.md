@@ -356,6 +356,8 @@ that a broken pipeline can still be repaired.
 ```bash
 git config core.hooksPath .githooks   # once per clone: fmt/clippy/tests before push
 
+bash scripts/lint.sh                  # the checks cargo doesn't do
+
 git switch -c fix/thing
 # ...
 git push -u origin HEAD
@@ -367,6 +369,21 @@ The pre-push hook is a convenience, not the gate. CI is the gate: it runs on
 Linux, macOS and Windows and enforces things a local run can't — the e2e suite
 against a guaranteed Python, the macOS keychain round-trip, the MSRV floor,
 supply-chain and secret scanning. `git push --no-verify` skips the hook.
+
+On Windows the hook looks for cargo on `PATH`, then in `~/.cargo/bin`, then
+**through WSL** — a toolchain installed inside WSL is invisible to Git Bash,
+so the hook used to print "skipping" on every push and check nothing at all.
+
+`scripts/lint.sh` mirrors CI's `lint` job: shellcheck, actionlint, typos,
+gitleaks, PSScriptAnalyzer. Missing tools are skipped rather than fatal — but
+it always prints which ones it **didn't** run, because a linter that silently
+checks nothing is worse than none at all. CI runs the full set regardless.
+
+CI also publishes a per-file **coverage** table to each run's summary, sorted
+worst-first. It gates nothing: a percentage target drives tests toward
+whatever is cheapest to cover, not whatever is riskiest. It exists so that
+"nothing tests this file at all" is visible — which is how `backend.rs` sat
+at 461 lines with no direct tests until its first one found a panic.
 
 ## License
 
