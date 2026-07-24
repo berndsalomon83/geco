@@ -2204,3 +2204,76 @@ async fn health_check_loop_notices_a_backend_killed_while_idle() {
     proxy.set_shutdown();
     registry.shutdown_all().await;
 }
+
+/// The health probe must not kill a backend that is merely BUSY.
+///
+/// check_health probes with list_tools; a serial MCP server processing a long
+/// tool call cannot answer the probe until the call finishes, so the probe
+/// times out. An earlier version of the fix treated that timeout as death and
+/// reset the connection — which would tear down a live backend mid-call and
+/// spawn a duplicate child on every sweep that overlaps a slow call. A dead
+/// child fails the probe promptly with a transport error instead, so only
+/// that resets. This proves a busy backend survives a sweep and its call
+/// still returns.
+#[tokio::test]
+async fn health_check_leaves_a_busy_backend_alone() {
+    let Some(py) = python_bin() else { return };
+    isolate_health();
+
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "mcpServers": {
+            "stub": { "command": py, "args": [stub_path()],
+                      "env": { "STUB_EXTRA_TOOLS": "1" } }
+        },
+        // Sweep once a second, with the default 5s probe timeout: several
+        // sweeps land during the 7s call, each probe queuing behind it.
+        "proxy": { "health_check_secs": 1 }
+    }))
+    .expect("test config must deserialize");
+
+    let (proxy, registry, _snap) = make_proxy(&cfg).await;
+    let backend = registry.get("stub").unwrap();
+
+    // Warm it.
+    backend
+        .call("pid", None, &registry.proxy)
+        .await
+        .expect("warm-up call");
+
+    proxy.clone().spawn_health_check();
+
+    // Start a 7s call and, while it runs, let the health loop sweep across it.
+    let call_backend = registry.get("stub").unwrap();
+    let proxy_cfg = registry.proxy.clone();
+    let slow = tokio::spawn(async move {
+        let args = serde_json::json!({ "ms": 7000 })
+            .as_object()
+            .unwrap()
+            .clone();
+        call_backend.call("sleep", Some(args), &proxy_cfg).await
+    });
+
+    // Halfway through, the backend must still be Up — not reset by a probe
+    // that timed out behind the in-flight call.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert!(
+        matches!(backend.status().await, geco::backend::Status::Up { .. }),
+        "a busy backend must not be marked Failed by the health probe: {:?}",
+        backend.status().await
+    );
+
+    // And the call itself must complete successfully.
+    let result = slow
+        .await
+        .expect("call task panicked")
+        .expect("the slow call must succeed, not be killed by a spurious reset");
+    let text = format!("{:?}", result.content);
+    assert!(text.contains("slept"), "expected the sleep reply: {text}");
+    assert!(
+        matches!(backend.status().await, geco::backend::Status::Up { .. }),
+        "still Up after the call returns"
+    );
+
+    proxy.set_shutdown();
+    registry.shutdown_all().await;
+}

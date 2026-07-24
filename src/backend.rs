@@ -19,10 +19,10 @@ use crate::snapshot::{ServerSnapshot, Snapshot, ToolSnapshot};
 
 type Conn = Arc<RunningService<RoleClient, BackendClient>>;
 
-/// How long a health probe may take before the backend is presumed dead.
-/// Short, because the probe is a local `list_tools` round-trip over a pipe —
-/// a live child answers in milliseconds — but not so short that a briefly
-/// busy backend is killed for one slow response.
+/// How long a health probe waits before giving up on a reply. A timeout is
+/// treated as "alive but busy", not dead (see check_health), so this bounds
+/// how long a sweep can take, not how patient it is with a dying backend —
+/// a dead child fails the probe promptly with a transport error regardless.
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The client half of a backend connection.
@@ -367,8 +367,21 @@ impl Backend {
         } else {
             match tokio::time::timeout(HEALTH_PROBE_TIMEOUT, conn.list_all_tools()).await {
                 Ok(Ok(_)) => false, // answered — alive
-                Ok(Err(_)) => true, // transport/protocol error — dead
-                Err(_) => true,     // no answer in time — treat as dead
+                Ok(Err(_)) => true, // transport/protocol error — the pipe is gone: dead
+                // A TIMEOUT is not death. A dead child fails the probe
+                // *promptly* with a transport error (the pipe is closed), so
+                // it lands in the arm above. A timeout means the child is
+                // there but did not answer in time — and the most common
+                // reason is that it is BUSY: many MCP servers process
+                // requests serially, so a probe sent while a long tool call
+                // is running waits behind it. Resetting on timeout would tear
+                // down a live, working backend mid-call and spawn a duplicate
+                // child every health sweep that overlaps a slow call — a
+                // self-inflicted outage on exactly the backends people run
+                // (browsers, databases). A genuinely wedged-but-alive backend
+                // is left for the reactive path, where the call's own timeout
+                // handles it. So: do not treat a timeout as dead.
+                Err(_) => false,
             }
         };
 
