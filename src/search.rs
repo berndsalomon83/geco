@@ -48,6 +48,23 @@ pub struct Hit {
     pub description: String,
     #[serde(skip)]
     pub score: f64,
+    #[serde(skip)]
+    pub coverage: f64,
+}
+
+/// One ranked document.
+pub struct Ranked {
+    pub index: usize,
+    pub score: f64,
+    /// How much of the query's *information* this document actually matched,
+    /// IDF-weighted, in 0..=1. Raw BM25 scores can't be compared across
+    /// queries; this can, which is what makes it usable as a confidence
+    /// signal rather than just an ordering.
+    ///
+    /// IDF-weighting is what keeps it honest: matching "an" and "this" should
+    /// not look like understanding the question, while matching "screenshot"
+    /// should.
+    pub coverage: f64,
 }
 
 /// Split an identifier or phrase into comparable tokens: lowercased, broken
@@ -101,6 +118,65 @@ fn stem(t: &str) -> String {
 // little signal they did carry. Left out deliberately; re-measure before
 // reintroducing it.
 
+/// Words that mean the same thing for the purpose of finding a tool. Every
+/// entry here comes from a MEASURED failure in the eval corpus, not from
+/// imagination: the misses were "open a bug report" -> create_issue, "save
+/// text to disk" -> write_file, "how big is this file" -> get_file_info.
+/// Those are synonym gaps, not deep semantic ones, which is why a table is
+/// the right size of tool for them.
+///
+/// Groups are symmetric: any member matches any other. Entries must be given
+/// in stemmed form, since queries and documents are stemmed before lookup.
+const SYNONYM_GROUPS: &[&[&str]] = &[
+    &["issue", "bug", "ticket", "defect"],
+    &["write", "save"],
+    &["size", "big", "large"],
+    &["store", "remember", "memorize"],
+    &["recall", "retrieve", "remember"],
+    &["search", "find", "lookup", "query"],
+    &["web", "online", "internet"],
+    &["delete", "remove", "drop"],
+    &["directory", "folder", "dir"],
+    &["message", "post"],
+    &["screenshot", "capture", "picture", "image"],
+    &["rename", "move"],
+    &["edit", "modify", "change", "update"],
+    &["timezone", "time"],
+];
+
+/// A synonym match counts for less than the word the user actually typed.
+/// Without the discount, "bug" hitting a tool that says "issue" would rank
+/// level with one that says "bug", and literal matches should win.
+const SYNONYM_WEIGHT: f64 = 0.6;
+
+fn synonym_table() -> &'static HashMap<String, Vec<String>> {
+    static TABLE: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for group in SYNONYM_GROUPS {
+            for word in *group {
+                let key = stem(word);
+                for other in *group {
+                    let val = stem(other);
+                    if val != key {
+                        let e = m.entry(key.clone()).or_default();
+                        if !e.contains(&val) {
+                            e.push(val);
+                        }
+                    }
+                }
+            }
+        }
+        m
+    })
+}
+
+/// A query token plus the words it may also be satisfied by.
+struct QueryTerm {
+    token: String,
+    synonyms: Vec<String>,
+}
+
 /// How many times `q` occurs in `field`, counting exact token matches and
 /// prefix matches for long-enough query tokens.
 fn count_in(field: &[String], q: &str) -> f64 {
@@ -134,16 +210,29 @@ impl Fields {
     }
 
     /// Field-weighted frequency of one query token in this document.
-    fn weighted_tf(&self, q: &str) -> f64 {
+    fn tf_of(&self, q: &str) -> f64 {
         W_NAME * count_in(&self.name, q)
             + W_SERVER * count_in(&self.server, q)
             + W_DESC * count_in(&self.desc, q)
+    }
+
+    /// Frequency of a query term, satisfied literally or by a synonym at a
+    /// discount. Folding synonyms into tf (rather than adding extra query
+    /// terms) keeps the query length — and therefore IDF and coverage —
+    /// measured against what the user actually asked.
+    fn weighted_tf(&self, t: &QueryTerm) -> f64 {
+        let direct = self.tf_of(&t.token);
+        if t.synonyms.is_empty() {
+            return direct;
+        }
+        let via_synonym: f64 = t.synonyms.iter().map(|s| self.tf_of(s)).sum();
+        direct + SYNONYM_WEIGHT * via_synonym
     }
 }
 
 /// Rank `docs` against `query`, best first. Returns `(index, score)` for the
 /// documents that matched at all, capped at `limit`.
-pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<(usize, f64)> {
+pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<Ranked> {
     if docs.is_empty() {
         return Vec::new();
     }
@@ -153,42 +242,57 @@ pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<(usize, f64)> {
         t.dedup();
         t
     };
+    let table = synonym_table();
+    let q_terms: Vec<QueryTerm> = q_tokens
+        .iter()
+        .map(|t| QueryTerm {
+            token: t.clone(),
+            synonyms: table.get(t).cloned().unwrap_or_default(),
+        })
+        .collect();
     let fields: Vec<Fields> = docs.iter().map(Fields::of).collect();
     let n = docs.len() as f64;
     let avg_len = fields.iter().map(|f| f.len).sum::<f64>() / n;
 
-    // Document frequency per query token, for IDF.
-    let mut df: HashMap<&str, f64> = HashMap::new();
-    for q in &q_tokens {
-        let count = fields.iter().filter(|f| f.weighted_tf(q) > 0.0).count() as f64;
-        df.insert(q.as_str(), count);
+    // Inverse document frequency per query term. Probabilistic form, +1
+    // inside the log so it never goes negative for a term in most documents.
+    let mut idf: HashMap<&str, f64> = HashMap::new();
+    for t in &q_terms {
+        let d = fields.iter().filter(|f| f.weighted_tf(t) > 0.0).count() as f64;
+        idf.insert(t.token.as_str(), ((n - d + 0.5) / (d + 0.5) + 1.0).ln());
     }
+    // Total information in the query, for the coverage denominator.
+    let total_idf: f64 = q_terms.iter().map(|t| idf[t.token.as_str()]).sum();
 
     let q_lower = query.trim().to_lowercase();
-    let mut scored: Vec<(usize, f64)> = Vec::new();
+    let mut scored: Vec<Ranked> = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let mut score = 0.0;
         let mut matched = 0usize;
-        for q in &q_tokens {
-            let tf = f.weighted_tf(q);
+        let mut matched_idf = 0.0;
+        for t in &q_terms {
+            let tf = f.weighted_tf(t);
             if tf <= 0.0 {
                 continue;
             }
             matched += 1;
-            let d = df[q.as_str()];
-            // Probabilistic IDF, +1 inside the log so it never goes negative
-            // for a term present in most documents.
-            let idf = ((n - d + 0.5) / (d + 0.5) + 1.0).ln();
+            let qi = idf[t.token.as_str()];
+            matched_idf += qi;
             let norm = tf * (K1 + 1.0) / (tf + K1 * (1.0 - B + B * f.len / avg_len));
-            score += idf * norm;
+            score += qi * norm;
         }
         if score <= 0.0 {
             continue;
         }
+        let coverage = if total_idf > 0.0 {
+            matched_idf / total_idf
+        } else {
+            0.0
+        };
 
         // Coverage: a document matching every query term beats one that
         // matched a single rare term, even if that term scored highly.
-        score *= 1.0 + 0.5 * (matched as f64 / q_tokens.len().max(1) as f64);
+        score *= 1.0 + 0.5 * (matched as f64 / q_terms.len().max(1) as f64);
 
         // Intent bonuses, kept from the previous scorer: naming the tool
         // outright, or quoting a run of its name, is a strong signal.
@@ -199,14 +303,19 @@ pub fn rank(docs: &[Doc], query: &str, limit: usize) -> Vec<(usize, f64)> {
             score += 5.0;
         }
 
-        scored.push((i, score));
+        scored.push(Ranked {
+            index: i,
+            score,
+            coverage,
+        });
     }
 
     // Deterministic order: score, then name, so equal scores don't shuffle.
     scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
+        b.score
+            .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| docs[a.0].name.cmp(docs[b.0].name))
+            .then_with(|| docs[a.index].name.cmp(docs[b.index].name))
     });
     scored.truncate(limit);
     scored
@@ -231,13 +340,14 @@ pub fn search(snapshot: &crate::snapshot::Snapshot, query: &str, limit: usize) -
 
     rank(&docs, query, limit)
         .into_iter()
-        .map(|(i, score)| {
-            let (server, tool) = origin[i];
+        .map(|r| {
+            let (server, tool) = origin[r.index];
             Hit {
                 server: server.to_string(),
                 tool: tool.name.clone(),
                 description: crate::snapshot::short_desc(&tool.description, 140),
-                score,
+                score: r.score,
+                coverage: r.coverage,
             }
         })
         .collect()

@@ -219,7 +219,7 @@ impl SkillIndex {
             .collect();
         crate::search::rank(&docs, query, limit)
             .into_iter()
-            .map(|(i, _)| &self.skills[i])
+            .map(|r| &self.skills[r.index])
             .collect()
     }
 
@@ -345,6 +345,25 @@ mod tests {
             .expect("frontmatter should parse");
         assert!(fm.name.is_none());
         assert_eq!(fm.description, "only a description");
+    }
+
+    #[test]
+    fn frontmatter_survives_crlf_line_endings() {
+        // A SKILL.md authored on Windows, or checked out with
+        // core.autocrlf=true, has \r\n endings. The delimiter scan looks for
+        // "\n---", which "\r\n---" still contains — the real risk is a stray
+        // carriage return surviving inside the parsed VALUES and travelling
+        // into descriptions the model reads and search indexes.
+        let fm = parse_frontmatter(
+            "---\r\nname: a-skill\r\ndescription: does a thing\r\nversion: 1.2.0\r\n---\r\n\r\n# Body\r\n",
+        )
+        .expect("CRLF frontmatter should parse");
+        assert_eq!(fm.name.as_deref(), Some("a-skill"));
+        assert_eq!(
+            fm.description, "does a thing",
+            "no stray carriage return in the description"
+        );
+        assert_eq!(fm.version.as_deref(), Some("1.2.0"));
     }
 
     #[test]

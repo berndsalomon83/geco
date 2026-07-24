@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Run the fast checks before anything reaches GitHub.
+#
+# Enable once per clone (hooks are not themselves version-controlled):
+#     git config core.hooksPath .githooks
+#
+# Bypass for a genuine emergency:
+#     git push --no-verify
+#
+# This is a convenience, not the gate. CI is the gate — it runs on three
+# platforms and enforces things this cannot (the e2e suite with a guaranteed
+# Python, the macOS keychain round-trip, the MSRV floor).
+set -uo pipefail
+
+cyan=$'\033[1;36m'; red=$'\033[1;31m'; green=$'\033[1;32m'; yellow=$'\033[1;33m'; off=$'\033[0m'
+
+if ! command -v cargo >/dev/null 2>&1; then
+    printf '%spre-push:%s cargo not on PATH — skipping local checks, CI will decide\n' \
+        "$yellow" "$off" >&2
+    exit 0
+fi
+
+fail=0
+check() {
+    label="$1"; shift
+    printf '%spre-push:%s %s' "$cyan" "$off" "$label" >&2
+    if out="$("$@" 2>&1)"; then
+        printf ' ok\n' >&2
+    else
+        printf ' FAILED\n' >&2
+        printf '%s\n' "$out" | tail -25 >&2
+        fail=1
+    fi
+}
+
+check "rustfmt" cargo fmt --check
+check "clippy " cargo clippy --all-targets --locked -- -D warnings
+check "tests  " cargo test --locked
+
+if [ "$fail" -ne 0 ]; then
+    printf '\n%spush aborted%s — fix the above, or override with: git push --no-verify\n' \
+        "$red" "$off" >&2
+    exit 1
+fi
+
+printf '%spre-push:%s local checks passed\n' "$green" "$off" >&2
+exit 0
