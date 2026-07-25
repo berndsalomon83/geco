@@ -113,6 +113,50 @@ itself, not a knob left unturned.
 
 ---
 
+## The third path: let an LLM pick (MEASURED — this one works)
+
+Both forks below assume geco must *rank* by itself. It doesn't. The client
+already has a capable model, and geco can ask it — in a **separate, throwaway
+session** that never touches the agent's context — "here are N candidate tools,
+which one does this request want?"
+
+Measured 2026-07 against the same 210-query corpus (50-query sample, local
+`qwen-coder`, BM25F supplying the candidates):
+
+| candidate net | recall ceiling | rank-1 | picked right *when reachable* | latency |
+|---|---|---|---|---|
+| BM25F alone | — | **13.3%** | — | µs |
+| LLM picker, K=50 | 46% | **40.0%** | **87.0%** | ~2s |
+| LLM picker, K=200 | 60% | **44.0%** | 73.3% | ~7s |
+
+**Three times better than lexical, and the decomposition says why.** The model
+picks correctly **87% of the time when the answer is in the list** — it is
+near-perfect at exactly the semantic judgment that synonyms, tuning, and
+embedding rerank all failed at. Accuracy ≈ `recall@K × precision`, so the only
+remaining lever is how wide the net is.
+
+Widening past K=50 has diminishing returns: the ceiling rises but *precision
+falls* (87% → 73%) as distractors crowd the prompt, and latency triples. K=50
+delivers 91% of the K=200 accuracy at a third of the cost.
+
+Note the real ceiling for a **realistic** deployment: this corpus is 5,216 tools
+from 131 servers, which nobody runs. With ~10 servers and ~200 tools, geco can
+skip BM25F entirely and hand the picker the *whole* catalogue — recall becomes
+100%, and expected rank-1 is the precision figure, **73–87%**. That is the
+no-geco baseline (an LLM choosing from everything it can see) delivered at
+geco's fixed ~4 KB context cost.
+
+Caveats worth keeping: 50-query sample; a small local model (a frontier model
+should do better on precision); several scored "misses" are label ambiguity
+(`search` vs `search_engine`, `create_workbook` vs `file`, and one case of the
+same tool name on a different server), so true quality is above the headline.
+
+Open design questions, none of them blockers: which client contract (MCP
+`sampling/createMessage` is protocol-native but rarely implemented; shelling
+out to an installed agent CLI — `opencode run --agent … --format json` — works
+today), how to stop a nested geco recursing when the sub-session loads it, and
+whether the per-search latency is acceptable as a default or an opt-in.
+
 ## The fork (open decision)
 
 Crossing the wall means giving up something geco is built on. The choice is

@@ -239,6 +239,121 @@ impl EvalStat {
     }
 }
 
+/// How wide must the BM25F net be before the right tool is even IN it?
+///
+/// This is the ceiling for any rerank strategy — an LLM (or embedding) picker
+/// can only choose from the candidates it is handed, so recall@K bounds it
+/// absolutely. recall@5 is 22%, which is why embedding rerank could not move
+/// rank-1. The question this answers: does a wider net (K=50, 100) contain the
+/// answer often enough to make an LLM picker worth the round-trip?
+#[test]
+fn recall_at_k_ceiling() {
+    let Some(snap) = load() else {
+        eprintln!("GECO_HARVEST not set — skipping");
+        return;
+    };
+    let Some(lpath) = std::env::var("GECO_LABELED").ok() else {
+        eprintln!("GECO_LABELED not set — skipping");
+        return;
+    };
+    let raw = std::fs::read_to_string(&lpath).expect("read labeled");
+    let w: LabeledWrapper = serde_json::from_str(&raw).expect("labeled JSON parses");
+    let queries: Vec<LQ> = w
+        .result
+        .map(|r| r.queries)
+        .or(w.queries)
+        .expect("no queries");
+
+    let ks = [1usize, 5, 10, 20, 50, 100, 200];
+    let max_k = *ks.iter().max().unwrap();
+    let mut hits = vec![0usize; ks.len()];
+
+    for q in &queries {
+        let res = geco::search::search(&snap, &q.query, max_k);
+        if let Some(pos) = res
+            .iter()
+            .position(|h| h.server == q.server && h.tool == q.tool)
+        {
+            for (i, k) in ks.iter().enumerate() {
+                if pos < *k {
+                    hits[i] += 1;
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "\n=== BM25F recall@K ceiling ({} queries, {} tools) ===",
+        queries.len(),
+        snap.servers.values().map(|s| s.tools.len()).sum::<usize>()
+    );
+    for (i, k) in ks.iter().enumerate() {
+        eprintln!(
+            "  recall@{:<4} {:5.1}%   ({} of {})",
+            k,
+            hits[i] as f64 * 100.0 / queries.len() as f64,
+            hits[i],
+            queries.len()
+        );
+    }
+    eprintln!("\nA reranker (LLM or embedding) fed top-K can never beat recall@K.\n");
+}
+
+/// Emit `{query, expected, candidates[]}` JSONL so an external LLM picker can
+/// be scored against the same labeled corpus. K and sample size from env.
+#[test]
+fn emit_picker_candidates() {
+    let Some(out) = std::env::var("GECO_PICKER_OUT").ok() else {
+        eprintln!("GECO_PICKER_OUT not set — skipping");
+        return;
+    };
+    let snap = load().expect("GECO_HARVEST required");
+    let lpath = std::env::var("GECO_LABELED").expect("GECO_LABELED required");
+    let raw = std::fs::read_to_string(&lpath).expect("read labeled");
+    let w: LabeledWrapper = serde_json::from_str(&raw).expect("labeled JSON parses");
+    let queries: Vec<LQ> = w
+        .result
+        .map(|r| r.queries)
+        .or(w.queries)
+        .expect("no queries");
+
+    let k: usize = std::env::var("GECO_PICKER_K")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    let take: usize = std::env::var("GECO_PICKER_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+
+    // Stride across the corpus so the sample spans models and domains.
+    let stride = (queries.len() / take).max(1);
+    let mut lines = Vec::new();
+    for q in queries.iter().step_by(stride).take(take) {
+        let cands: Vec<serde_json::Value> = geco::search::search(&snap, &q.query, k)
+            .into_iter()
+            .map(|h| {
+                serde_json::json!({
+                    "server": h.server,
+                    "tool": h.tool,
+                    "description": h.description,
+                })
+            })
+            .collect();
+        lines.push(
+            serde_json::json!({
+                "query": q.query,
+                "expected_server": q.server,
+                "expected_tool": q.tool,
+                "candidates": cands,
+            })
+            .to_string(),
+        );
+    }
+    std::fs::write(&out, lines.join("\n")).expect("write picker candidates");
+    eprintln!("wrote {} picker cases (K={k}) to {out}", lines.len());
+}
+
 #[test]
 fn labeled_eval() {
     let Some(snap) = load() else {
