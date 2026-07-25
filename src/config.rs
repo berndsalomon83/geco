@@ -67,6 +67,52 @@ pub struct ProxyConfig {
     /// after the same stemming queries and tools get, so write them plainly.
     /// Applied on top of the built-in table; picked up on config hot-reload.
     pub search_synonyms: Vec<Vec<String>>,
+    /// Optional LLM-backed tool picker. Lexical ranking finds the right tool
+    /// first only ~13% of the time when the request shares no vocabulary with
+    /// it; handing BM25F's candidates to a real model and asking which one the
+    /// user meant measured 3x better (see docs/search-ranking.md). Off by
+    /// default — it costs a round-trip per search.
+    pub picker: PickerConfig,
+}
+
+/// How (and whether) to ask a language model which candidate tool a request
+/// means. Transports are tried in preference order and any failure falls back
+/// to plain lexical ranking, so enabling this can only add latency, never
+/// break search.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct PickerConfig {
+    /// `off` (default), `auto`, `sampling`, or `command`.
+    ///
+    /// `auto` prefers MCP sampling when the connected client advertises the
+    /// capability (no config, uses the client's own model), then `command`.
+    /// Anything configured but unavailable degrades to lexical ranking rather
+    /// than failing the search.
+    pub mode: String,
+    /// Command to run, e.g.
+    /// `["opencode", "run", "--agent", "minimal", "--format", "json"]`.
+    /// `{prompt}` anywhere in the arguments is replaced by the prompt; with no
+    /// placeholder it is appended as the final argument. Reach an
+    /// OpenAI-compatible endpoint with a small wrapper script — geco ships no
+    /// HTTP client, deliberately.
+    pub command: Vec<String>,
+    /// How many BM25F candidates to hand the model. Measured: 50 is the sweet
+    /// spot — a wider net raises the recall ceiling but crowds the prompt with
+    /// distractors (precision 87% -> 73% at 200) and triples latency.
+    pub candidates: usize,
+    /// Seconds to wait before giving up and returning the lexical order.
+    pub timeout_secs: u64,
+}
+
+impl Default for PickerConfig {
+    fn default() -> Self {
+        Self {
+            mode: "off".into(),
+            command: Vec::new(),
+            candidates: 50,
+            timeout_secs: 20,
+        }
+    }
 }
 
 impl Default for ProxyConfig {
@@ -80,6 +126,7 @@ impl Default for ProxyConfig {
             env_passthrough: Vec::new(),
             refresh_concurrency: 8,
             search_synonyms: Vec::new(),
+            picker: PickerConfig::default(),
         }
     }
 }
