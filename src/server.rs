@@ -158,6 +158,10 @@ pub struct Proxy {
     absorb_issues: Arc<RwLock<Vec<Issue>>>,
     config_issues: Arc<RwLock<Vec<Issue>>>,
     client: Arc<RwLock<Option<String>>>,
+    /// Whether the connected client advertised the MCP `sampling` capability
+    /// at initialize. Decides whether the picker can borrow the client's own
+    /// model instead of needing a configured command.
+    client_supports_sampling: Arc<RwLock<bool>>,
     metrics: Arc<RwLock<crate::health::Metrics>>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// (server, tool) pairs recently surfaced by `search`, so `execute` can
@@ -334,6 +338,7 @@ impl Proxy {
             absorb_issues: Arc::new(RwLock::new(absorb_issues)),
             config_issues: Arc::new(RwLock::new(Vec::new())),
             client: Arc::new(RwLock::new(None)),
+            client_supports_sampling: Arc::new(RwLock::new(false)),
             metrics: Arc::new(RwLock::new(metrics)),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             recent_search_hits: Arc::new(RwLock::new(std::collections::VecDeque::new())),
@@ -1030,11 +1035,48 @@ impl Proxy {
 
         // User-provided synonym groups (proxy.search_synonyms). Cloned once so
         // the registry lock isn't held across the searches below.
-        let user_synonyms = self.registry.read().await.proxy.search_synonyms.clone();
+        let (user_synonyms, picker_cfg) = {
+            let g = self.registry.read().await;
+            (g.proxy.search_synonyms.clone(), g.proxy.picker.clone())
+        };
+        let picker = crate::picker::Picker::from_config(
+            &picker_cfg,
+            *self.client_supports_sampling.read().await,
+        );
 
         if kind != "skills" {
             let snap = self.snapshot.read().await;
-            let tool_hits = search::search_with(&snap, &p.query, limit, &user_synonyms);
+            // With a picker enabled, retrieve a WIDER net than the caller
+            // asked for: the model can only choose from what it is handed, and
+            // recall@50 is 44% against recall@5's 22% (docs/search-ranking.md).
+            let retrieve = if picker.is_enabled() {
+                picker.candidates.max(limit)
+            } else {
+                limit
+            };
+            let mut tool_hits = search::search_with(&snap, &p.query, retrieve, &user_synonyms);
+
+            if picker.is_enabled() && tool_hits.len() > 1 {
+                let cands: Vec<crate::picker::Candidate<'_>> = tool_hits
+                    .iter()
+                    .map(|h| crate::picker::Candidate {
+                        server: &h.server,
+                        tool: &h.tool,
+                        description: &h.description,
+                    })
+                    .collect();
+                // A pick hoists that tool to rank 1 and leaves the lexical
+                // order beneath it. No pick (unsupported, timeout, garbage
+                // reply) simply leaves the lexical order alone.
+                if let Some(idx) = picker.pick(&p.query, &cands).await {
+                    drop(cands);
+                    let chosen = tool_hits.remove(idx);
+                    tracing::debug!("picker chose {}::{}", chosen.server, chosen.tool);
+                    tool_hits.insert(0, chosen);
+                }
+            }
+            tool_hits.truncate(limit);
+            let tool_hits = tool_hits;
             for h in &tool_hits {
                 let mut entry = json!({
                     "kind": "tool",
@@ -1393,6 +1435,16 @@ impl ServerHandler for Proxy {
         // Record who we're serving ("opencode", "claude-ai", …) so the health
         // file is tagged and the companion plugin only toasts for its client.
         *self.client.write().await = Some(params.client_info.name.clone());
+        // Does this client let a server borrow its model? That decides whether
+        // the picker can use MCP sampling (zero config, the user's own model)
+        // or needs a configured command. Most clients do not implement it yet,
+        // hence the other transports.
+        let sampling = params.capabilities.sampling.is_some();
+        *self.client_supports_sampling.write().await = sampling;
+        tracing::debug!(
+            "client '{}' sampling capability: {sampling}",
+            params.client_info.name
+        );
         // Re-publish health now that we know who we serve, so the file is
         // tagged for the companion plugin's client filter.
         self.publish_health().await;

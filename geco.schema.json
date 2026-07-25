@@ -77,6 +77,43 @@
             }
           },
           "default": []
+        },
+        "picker": {
+          "description": "Optional LLM-backed tool picker. Lexical ranking finds the right tool\nfirst only ~13% of the time when the request shares no vocabulary with\nit; handing BM25F's candidates to a real model and asking which one the\nuser meant measured 3x better (see docs/search-ranking.md). Off by\ndefault — it costs a round-trip per search.",
+          "$ref": "#/$defs/PickerConfig"
+        }
+      }
+    },
+    "PickerConfig": {
+      "description": "How (and whether) to ask a language model which candidate tool a request\nmeans. Transports are tried in preference order and any failure falls back\nto plain lexical ranking, so enabling this can only add latency, never\nbreak search.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "`off` (default), `auto`, `sampling`, or `command`.\n\n`auto` prefers MCP sampling when the connected client advertises the\ncapability (no config, uses the client's own model), then `command`.\nAnything configured but unavailable degrades to lexical ranking rather\nthan failing the search.",
+          "type": "string",
+          "default": "off"
+        },
+        "command": {
+          "description": "Command to run, e.g.\n`[\"opencode\", \"run\", \"--agent\", \"minimal\", \"--format\", \"json\"]`.\n`{prompt}` anywhere in the arguments is replaced by the prompt; with no\nplaceholder it is appended as the final argument. Reach an\nOpenAI-compatible endpoint with a small wrapper script — geco ships no\nHTTP client, deliberately.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "candidates": {
+          "description": "How many BM25F candidates to hand the model. Measured: 50 is the sweet\nspot — a wider net raises the recall ceiling but crowds the prompt with\ndistractors (precision 87% -> 73% at 200) and triples latency.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 50
+        },
+        "timeout_secs": {
+          "description": "Seconds to wait before giving up and returning the lexical order.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 20
         }
       }
     },
