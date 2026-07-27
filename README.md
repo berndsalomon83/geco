@@ -33,7 +33,22 @@ Built with Rust as single static binary, no runtime dependencies. macOS, Linux, 
 
 ## How it works
 
-The agent sees exactly six meta-tools:
+```mermaid
+flowchart LR
+    A["your agent<br/>carries a few small tools,<br/>and nothing else"]
+    G{{geco}}
+    S["your tool shed<br/>every server, every skill<br/>costs nothing until asked"]
+    T["github / create_issue<br/>and how to call it"]
+
+    A -->|file a bug about the login page| G
+    G <-->|looks inside| S
+    G -->|hands back the one thing you need| T
+    T -.->|ready to run| A
+```
+
+Your agent asks in plain words and gets back one tool, ready to use. Everything else stays in the shed. Add a hundred servers and the agent still carries the same few small tools — that is the entire idea, and the rest of this page is how it holds up.
+
+The agent sees six meta-tools:
 
 | Meta-tool | Purpose |
 |---|---|
@@ -44,37 +59,12 @@ The agent sees exactly six meta-tools:
 | `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
 | `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
 
-Six, and that is the whole always-on surface — 4,376 bytes of schema plus a short instruction, whatever hides behind it. Two things are deliberately *not* here: gateway health and manual refresh. Both are operator actions, and both live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
+Six, and that is the whole always-on surface — **4,366 bytes**, whatever hides behind it. That number is measured by a test rather than asserted, so it cannot quietly drift. `proxy.surface: lean` trims it to three tools and ~3,100 bytes (see [a leaner surface](#a-leaner-surface)); the skill tools appear only once you have a skill library. Both are decided per request, so neither needs a restart.
+
+Two things are deliberately *not* here: gateway health and manual refresh. Both are operator actions and live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
 
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
-
-A full round trip, cold backend included:
-
-```mermaid
-sequenceDiagram
-    participant A as Agent
-    participant G as geco
-    participant B as Backend
-
-    A->>G: search("open a bug report")
-    Note right of G: answered from the cached<br/>snapshot — no process starts
-    G-->>A: server + tool + description
-
-    A->>G: execute({calls:[{server, tool, arguments}]})
-    G->>G: allow / deny check
-
-    alt backend is cold
-        G->>B: spawn child process
-        Note right of B: clean environment:<br/>baseline + declared vars only,<br/>keychain resolved now
-        B-->>G: MCP initialize
-    end
-
-    G->>B: tools/call
-    B-->>G: result
-    G-->>A: results, in input order
-    Note over G,B: stays warm for the next call
-```
 
 Calls to *different* backends in one `execute` run in parallel; results always come back in the order you sent them.
 
@@ -464,6 +454,50 @@ The released binaries are unsigned. `xattr -d com.apple.quarantine "$(command -v
 ## Which servers belong behind the proxy?
 
 Servers you use *sometimes*. A server whose tools you want the model to reach for proactively on every task (e.g. a memory store like [icm-slim](https://github.com/rtk-ai/icm)) can stay directly connected — visibility is the point there. Everything else is a candidate.
+
+## Known limits, and what isn't done
+
+Written down because the alternative is you finding out. Nothing here is a
+surprise to the project; the research log in
+[docs/search-ranking.md](docs/search-ranking.md) has the full history including
+every idea that was measured and **rejected**.
+
+**Measured for tools, not for skills.** All the picker numbers — 94.8% rank-1,
+90.7% precision — come from 210 labelled queries over 5,216 real tools. Skills
+run through the identical code path and the wiring is tested end to end, but
+there is no labelled skill corpus yet, so "the picker works for skills" is a
+reasonable expectation rather than a measurement. Treat it as such.
+
+**The whole-catalogue threshold is a reasoned guess.** `whole_catalogue_tokens`
+defaults to ~24k (about 500 tools) because a 324-tool catalogue measured 94.8%
+and fitted comfortably. What happens at 805 or 1,589 tools is unmeasured — that
+is the point where a two-stage server-then-tool pick would earn its place, if
+it does.
+
+**`proxy.surface: lean` is off by default on purpose.** The case for it is a
+prediction about how models behave, and in this project roughly 30% of
+confident-looking predictions survive measurement. `geco stats` counts calls
+per meta-tool so you can check yours before changing it.
+
+**A picker prompt contains third-party text.** Tool descriptions come from
+whatever backends you configure and become part of a prompt sent to a model.
+You cannot pick a tool without showing a model what it does, so there is no
+clean fix; the practical mitigation is the ordinary one — run backends you
+trust. Worth knowing before pointing `picker.command` at an agent CLI that has
+shell access.
+
+**`geco health` can report the wrong reason.** When the cached snapshot says a
+backend is fine but a live call fails, health prints "connection lost" while
+the real cause — usually "npx is not on the PATH geco was started with" — was
+computed and then discarded a layer later. The failure is detected correctly;
+only the explanation is wrong.
+
+**~300 bytes of the always-on surface is JSON Schema boilerplate** (`$schema`
+URLs and `"default": null`) that no model reads. Measured, not yet stripped.
+
+**Not released.** Version 0.8.0 is in `Cargo.toml` and deliberately untagged —
+there are no users yet, and shipping binaries nobody downloads is waste. Build
+from source or run the installer against a checkout.
 
 ## Working on geco
 
