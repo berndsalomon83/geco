@@ -1,6 +1,6 @@
 //! The proxy's own MCP surface: eight small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~4.3 KB no matter how many tools hide behind the gate. That number is
+//! ~4 KB no matter how many tools hide behind the gate. That number is
 //! measured, not asserted by hand: see
 //! `param_tests::meta_tool_surface_stays_within_its_context_budget`.
 
@@ -262,6 +262,41 @@ const RECENT_NO_MATCH_CAP: usize = 20;
 /// Three, because one is noise and a misconfigured picker fails every time —
 /// the observed rate on a reasoning-enabled endpoint was 7 in 8.
 const PICKER_MISS_STREAK: usize = 3;
+
+/// Drop the bytes of a generated schema that no model ever reads.
+///
+/// `schemars` emits a `$schema` URL in every tool's `inputSchema` and a
+/// `"default": null` for every `Option` field. Measured on the six meta-tools:
+/// **303 bytes, 8% of the always-on surface** — more than the cheapest tool on
+/// it costs in total, spent on a URL that is identical in every tool and a
+/// default that is not even true (the default is *absent*, not null).
+///
+/// Safe to remove: `$schema` is optional in MCP's `inputSchema`, which is a
+/// plain JSON Schema object, and a field being absent already means what
+/// `"default": null` was trying to say. Done here rather than at generation
+/// because this is the single place the advertised list is built, so nothing
+/// can route around it.
+fn trim_schema_boilerplate(mut t: rmcp::model::Tool) -> rmcp::model::Tool {
+    fn strip(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(map) => {
+                map.remove("$schema");
+                map.retain(|k, val| !(k == "default" && val.is_null()));
+                for val in map.values_mut() {
+                    strip(val);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let mut schema = serde_json::Value::Object((*t.input_schema).clone());
+    strip(&mut schema);
+    if let serde_json::Value::Object(map) = schema {
+        t.input_schema = std::sync::Arc::new(map);
+    }
+    t
+}
 
 /// The query that means "show me what is behind the gate".
 ///
@@ -571,6 +606,7 @@ impl Proxy {
         self.tool_router
             .list_all()
             .into_iter()
+            .map(trim_schema_boilerplate)
             .filter(|t| match t.name.as_ref() {
                 // Needs a library to be worth anything: without one these are
                 // permanent context describing a capability the user does not
@@ -1129,14 +1165,19 @@ impl Proxy {
             }
             if snapshot_ok {
                 if let Ok(backend) = registry.get(name) {
-                    if matches!(
-                        backend.status().await,
-                        crate::backend::Status::Failed { .. }
-                    ) {
+                    // Report the reason the backend actually gave, not a guess
+                    // about it. This used to say "connection lost (child
+                    // process exited)" for every live failure — while
+                    // `Status::Failed.error` was sitting right here holding the
+                    // real cause, which is most often "command 'npx' not found
+                    // — is it on the PATH geco was started with?", the single
+                    // most common way this gateway breaks. The guess sent
+                    // people hunting a crashed process that never existed.
+                    if let crate::backend::Status::Failed { error, .. } = backend.status().await {
                         issues.push(Issue {
                             kind: "backend".into(),
                             subject: name.clone(),
-                            detail: "connection lost (child process exited)".into(),
+                            detail: error,
                             severity: "error".into(),
                         });
                     }
@@ -2235,10 +2276,18 @@ mod param_tests {
     /// Nothing asserted that, so a verbose description could quietly inflate
     /// every session's cost. The ceiling is deliberately loose — this guards
     /// against ballooning, not against ordinary wording edits.
-    #[test]
-    fn meta_tool_surface_stays_within_its_context_budget() {
-        let tools = Proxy::tool_router().list_all();
+    #[tokio::test]
+    async fn meta_tool_surface_stays_within_its_context_budget() {
+        // What the CLIENT receives, not what the router holds — the two
+        // differ now that boilerplate is trimmed on the way out, and the
+        // headline number is a promise about the former.
+        let probe = surface_probe(vec!["/nonexistent/skills".into()]);
+        let tools = probe.visible_tools().await;
         assert_eq!(tools.len(), 6, "expected 6 meta-tools, got {}", tools.len());
+        assert!(
+            !serde_json::to_string(&tools).unwrap().contains("$schema"),
+            "generated-schema boilerplate must not reach the wire"
+        );
 
         let wire = serde_json::to_string(&tools).expect("tools must serialize");
         // The instructions ride in the initialize result and stay in context

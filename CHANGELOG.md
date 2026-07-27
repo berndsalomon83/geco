@@ -13,6 +13,24 @@ one adversarially re-checked before it was believed. Roughly a third of what
 the audit proposed survived that second pass; the rest is not recorded here
 because it was not real.
 
+- **`geco health` reported a guess instead of the reason it had.** When the
+  cached snapshot said a backend was fine but a live call failed, it printed
+  "connection lost (child process exited)" for every cause — while
+  `Status::Failed.error` sat right there holding the real one. In practice that
+  is almost always *command 'npx' not found — is it on the PATH geco was
+  started with?*, the single most common way this gateway breaks, so the guess
+  sent people hunting a crashed process that had never run. It now reports what
+  the backend actually said.
+- **303 bytes of every session was JSON Schema boilerplate.** `schemars` emits
+  a `$schema` URL in every tool's `inputSchema` and a `"default": null` for
+  every `Option` field — **8% of the always-on surface**, more than the
+  cheapest meta-tool costs in total, spent on a URL identical in all six and a
+  default that was not even true (absent, not null). Both are stripped on the
+  way out: `$schema` is optional in MCP's `inputSchema`, and a missing field
+  already means what `"default": null` was trying to say. The headline number
+  drops **4,366 → 4,063 B**, and the budget test now measures what the client
+  receives rather than what the router holds, so this cannot silently come
+  back.
 - **A screenshot came back as `result: ""`.** `execute` serialized every
   non-text content block into the same JSON string it returns as its one text
   block, which is the worst available outcome in three directions at once: a

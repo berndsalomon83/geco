@@ -24,7 +24,7 @@ literal string `| head -14`, left by some shell accident; same treatment.
 ## 2. The one thing to understand first
 
 geco hides backend tool/skill schemas from the model's context until searched
-for. Fixed cost **4,376 B** regardless of how much hides behind it — measured
+for. Fixed cost **4,063 B** regardless of how much hides behind it — measured
 by a test, not asserted.
 
 The hard problem is **search quality**, and the whole story is in

@@ -1714,6 +1714,74 @@ async fn concurrent_calls_on_a_broken_backend_share_one_attempt() {
     );
 }
 
+/// Health must report the reason the backend gave, not a guess about it.
+///
+/// When the cached snapshot says a backend is fine but a live call fails, this
+/// used to report "connection lost (child process exited)" for every cause —
+/// while `Status::Failed.error` held the real one. In practice that is almost
+/// always "command not found — is it on the PATH geco was started with?", the
+/// single most common way this gateway breaks, and the guess sent people
+/// hunting a crashed process that never existed.
+#[tokio::test]
+async fn health_reports_the_reason_the_backend_actually_gave() {
+    isolate_health();
+    let cfg = config_from(serde_json::json!({
+        "ghost": { "command": "geco-definitely-not-installed" }
+    }));
+
+    // A snapshot that believes the backend is healthy — the branch under test
+    // only runs when the cache disagrees with reality, which is exactly the
+    // upgrade-broke-my-PATH case.
+    let mut snap = Snapshot::default();
+    snap.servers.insert(
+        "ghost".into(),
+        geco::snapshot::ServerSnapshot {
+            description: "was fine when the snapshot was taken".into(),
+            refresh_status: "ok".into(),
+            tools: vec![geco::snapshot::ToolSnapshot {
+                name: "do_thing".into(),
+                description: "does a thing".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let proxy = Proxy::new(
+        Registry::from_config(&cfg),
+        snap,
+        dir.path().join("snapshot.json"),
+        dir.path().join("config.yaml"),
+        vec![],
+        vec![],
+    );
+
+    // Drive it into Status::Failed the way a user would: by calling it.
+    let _ = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
+                server: "ghost".into(),
+                tool: "do_thing".into(),
+                arguments: None,
+            }],
+        }))
+        .await;
+
+    let listed = proxy.list_mcp_servers().await.unwrap();
+    let body = extract_json(&listed);
+    let issues = body["issues"].as_array().expect("a failure must surface");
+    let detail = issues[0]["detail"].as_str().unwrap_or_default();
+
+    assert!(
+        detail.contains("not found") && detail.contains("PATH"),
+        "health must carry the real cause, which is what the user has to act \
+         on: {detail}"
+    );
+    assert!(
+        !detail.contains("connection lost"),
+        "and must not substitute a guess about a process that never ran: {detail}"
+    );
+}
+
 /// A screenshot has to arrive as an image, not as a page of base64 pretending
 /// to be prose.
 ///

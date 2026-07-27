@@ -15,7 +15,7 @@ So here comes this rusty reptile geco to tackle it. It sits between your IDE and
 
 **geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees six small meta-tools instead of every schema on every request.
 
-The cost is fixed: **~4.3 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
+The cost is fixed: **~4 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
 
 ### And you stop restarting your agent
 
@@ -59,7 +59,7 @@ The agent sees six meta-tools:
 | `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
 | `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
 
-Six, and that is the whole always-on surface — **4,366 bytes**, whatever hides behind it. That number is measured by a test rather than asserted, so it cannot quietly drift. `proxy.surface: lean` trims it to three tools and ~3,100 bytes (see [a leaner surface](#a-leaner-surface)); the skill tools appear only once you have a skill library. Both are decided per request, so neither needs a restart.
+Six, and that is the whole always-on surface — **4,063 bytes**, whatever hides behind it. That number is measured by a test rather than asserted, so it cannot quietly drift. `proxy.surface: lean` trims it to three tools and ~2,900 bytes (see [a leaner surface](#a-leaner-surface)); the skill tools appear only once you have a skill library. Both are decided per request, so neither needs a restart.
 
 Two things are deliberately *not* here: gateway health and manual refresh. Both are operator actions and live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
 
@@ -485,15 +485,6 @@ You cannot pick a tool without showing a model what it does, so there is no
 clean fix; the practical mitigation is the ordinary one — run backends you
 trust. Worth knowing before pointing `picker.command` at an agent CLI that has
 shell access.
-
-**`geco health` can report the wrong reason.** When the cached snapshot says a
-backend is fine but a live call fails, health prints "connection lost" while
-the real cause — usually "npx is not on the PATH geco was started with" — was
-computed and then discarded a layer later. The failure is detected correctly;
-only the explanation is wrong.
-
-**~300 bytes of the always-on surface is JSON Schema boilerplate** (`$schema`
-URLs and `"default": null`) that no model reads. Measured, not yet stripped.
 
 **Not released.** Version 0.8.0 is in `Cargo.toml` and deliberately untagged —
 there are no users yet, and shipping binaries nobody downloads is waste. Build
