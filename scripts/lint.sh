@@ -85,9 +85,21 @@ else
     skipped+=("gitleaks")
 fi
 
+# `pwsh` is PowerShell 7 and is NOT what a Windows box has by default — the
+# stock shell is Windows PowerShell 5.1, whose executable is `powershell.exe`.
+# Looking only for `pwsh` reported PSScriptAnalyzer as skipped on the one
+# platform the .ps1 files are actually for, and a change that failed this
+# check reached CI while the local run said "everything that ran is clean".
+PS_BIN=""
 if have pwsh; then
+    PS_BIN=pwsh
+elif have powershell.exe; then
+    PS_BIN=powershell.exe
+fi
+
+if [ -n "$PS_BIN" ]; then
     # shellcheck disable=SC2016  # $found is PowerShell's, not the shell's
-    run "PSScriptAnalyzer" pwsh -NoProfile -Command '
+    run "PSScriptAnalyzer" "$PS_BIN" -NoProfile -Command '
         $found = @()
         foreach ($f in @("install.ps1", "uninstall.ps1")) {
           $found += Invoke-ScriptAnalyzer -Path $f -Settings ./PSScriptAnalyzerSettings.psd1

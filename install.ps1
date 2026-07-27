@@ -123,7 +123,7 @@ if (-not (Test-Path $Cfg)) {
 # Generate editor schema.
 Say "Generating config schema..."
 # NOT Set-Content: in PowerShell 5.1 it writes the system ANSI codepage, and
-# the schema carries the config doc comments verbatim — em-dashes and curly
+# the schema carries the config doc comments verbatim: em-dashes and curly
 # quotes included. The result is a file that is not valid UTF-8, so the YAML
 # language server fails to load it and config autocomplete silently does not
 # work, on Windows only. `geco schema` from a shell looks fine, which makes it
@@ -132,7 +132,7 @@ Say "Generating config schema..."
 # The DECODE matters as much as the encode: PowerShell reads a native
 # command's stdout through [Console]::OutputEncoding, which on a stock 5.1
 # console is the OEM codepage. Writing valid UTF-8 afterwards would faithfully
-# preserve characters that were already mangled on the way in — the schema
+# preserve characters that were already mangled on the way in. The schema
 # would load, and every em-dash in the config hover text would be mojibake.
 # `-join` rather than Out-String: no trailing CRLF, and no LF->CRLF rewrite.
 $prevOut = [Console]::OutputEncoding
@@ -182,7 +182,7 @@ $ErrorActionPreference = "Continue"
 $raw = $msgs | & $Dest --config $Cfg serve --no-refresh 2>$null
 $ErrorActionPreference = $prevEap
 $result = $raw | ConvertFrom-Json
-# Checked BY NAME, not by count — see the matching comment in install.sh. The
+# Checked BY NAME, not by count; see the matching comment in install.sh. The
 # old `-eq 8` went stale when the surface dropped to 6 and then warned on
 # every install, which teaches the user to ignore this line entirely. @() so
 # a single result still counts as a collection.

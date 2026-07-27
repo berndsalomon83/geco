@@ -37,10 +37,14 @@ foreach ($p in @(
     try {
         # -Encoding UTF8 on the READ as well as the write. PowerShell 5.1
         # decodes as ANSI by default, so without this the round-trip mangles
-        # every non-ASCII character elsewhere in the user's agent config — an
-        # accented path, a project name, an em-dash — while removing the geco
-        # entry correctly. The file stays valid JSON, so nothing errors and the
+        # every non-ASCII character elsewhere in the user's agent config (an
+        # accented path, a project name) while removing the geco entry
+        # correctly. The file stays valid JSON, so nothing errors and the
         # damage is found much later. (A read hint only; it adds no BOM.)
+        #
+        # These comments stay ASCII on purpose: a .ps1 containing non-ASCII
+        # without a BOM is itself decoded as ANSI by 5.1, which is the very
+        # trap being fixed here. PSScriptAnalyzer enforces it in CI.
         $cfg = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json
         $changed = $false
         foreach ($key in @("mcp", "mcpServers")) {
