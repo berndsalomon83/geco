@@ -25,7 +25,9 @@ Add an MCP server to a normal setup and you restart the harness, because the cli
 
 This is not a feature bolted on; it falls out of the design. Your client's tool list is the same six meta-tools before and after, so there is nothing for it to reload. The servers and skills live *behind* `search`, which reads the current snapshot every time it is called. geco watches the config and the skill directories, and listens for backends that announce their own tool changes (`notifications/tools/list_changed`), so the catalogue behind the gate keeps up on its own.
 
-Verified end to end in a single MCP session, never reconnected: a new skill in the library, a new skill via the inbox, and a brand-new server's tools all appeared in later searches. One caveat, and it is the only one: if you had **no** skill library at all and add your first one, the two skill meta-tools stay hidden until geco itself restarts — the skills are searchable immediately, but `list_skills` and `read_skill` are decided at startup.
+**Including geco's own tool list.** The six meta-tools are decided per request from the config as it currently stands, and geco advertises `tools/list_changed` and sends it when the set moves — so configuring your first skill library, or flipping `proxy.surface`, takes effect on a live session too.
+
+Verified end to end in a single MCP session, never reconnected: a new skill in the library, a new skill via the inbox, a brand-new server's tools, a first skill library appearing, and `surface: lean` switching on and back off — all of it without restarting anything.
 
 Built with Rust as single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
 
@@ -408,9 +410,11 @@ geco schema                           # print the config JSON Schema (YAML + JSO
 
 The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. No restart, no manual step. Removed backends are shut down; new ones are snapshotted and available immediately.
 
-The same goes for skills: the directories in `skills.dirs` and `skills.absorb` are watched too, so a skill written or dropped in while geco is running is swept into the library and searchable without anything being restarted. The one thing decided at startup is *whether the skill meta-tools exist at all* — configure your first skill library on a running geco and the skills are searchable straight away, but `list_skills` and `read_skill` appear at the next start.
+The same goes for skills: the directories in `skills.dirs` and `skills.absorb` are watched too, so a skill written or dropped in while geco is running is swept into the library and searchable without anything being restarted.
 
-**The reason none of this reaches your client is the whole design.** Its tool list is the same six meta-tools throughout, so there is nothing to invalidate and nothing to reconnect. Compare the usual case: a client asks for `tools/list` once at connect, so a new MCP server means restarting the harness.
+**The reason almost none of this reaches your client is the whole design.** Its tool list is the same meta-tools throughout, so there is nothing to invalidate and nothing to reconnect. Compare the usual case: a client asks for `tools/list` once at connect, so a new MCP server means restarting the harness.
+
+For the one case where geco's *own* list does move — your first skill library appearing, or `proxy.surface` changing — the advertised set is computed per request from the current config, and geco advertises `tools/list_changed` and sends it. A client that listens re-fetches; one that doesn't is no worse off than before, since an unadvertised meta-tool stays callable rather than erroring. No restart either way.
 
 The watcher triggers on **mtime**, not content, which is what makes `geco refresh` work against a live proxy: it rewrites the snapshot file *and* touches the config, so a running instance rebuilds instead of quietly serving its in-memory copy. (Content is untouched — only the timestamp moves.)
 

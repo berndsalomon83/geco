@@ -211,24 +211,19 @@ pub struct Proxy {
 /// It must stay O(1) — a fixed policy, never a catalogue. Anything that grows
 /// with the number of servers or skills belongs in a tool RESPONSE, which is
 /// paid only when asked for.
+/// ONE text, correct on either surface. It used to have a `lean` variant, but
+/// instructions are delivered once at `initialize` and cannot be re-sent — so
+/// a surface that changes at runtime would leave whichever text the client
+/// happens to hold describing a flow that no longer exists. Naming the flow
+/// (`search → execute`, `search "*"` to browse) rather than inventorying the
+/// tools is correct in both, and shorter than the old full-surface text, which
+/// listed tools that `tools/list` already describes.
 const INSTRUCTIONS_BASE: &str =
-    "Gateway to multiple MCP servers whose tools load on demand instead of \
-     polluting your context. Flow: search (with include_schema=true to get \
-     input schemas inline; kind=\"tools\" or \"skills\" to filter) → execute \
-     (1–10 calls in one round-trip, cross-backend parallel), or \
-     list_mcp_servers → list_tools → execute. Backends start lazily on first execution.";
-
-/// The `proxy.surface: lean` variant: no browse tools, so the flow that
-/// mentions them would be an instruction to call something that is not served.
-/// Shorter than the full text, which is part of the point — these bytes are
-/// always-on too, so trimming the surface and then keeping its instructions
-/// would give back a chunk of the saving.
-const INSTRUCTIONS_LEAN: &str =
     "Gateway to multiple MCP servers whose tools load on demand instead of \
      polluting your context. Flow: search (include_schema=true for input \
      schemas inline; kind=\"tools\" or \"skills\" to filter) → execute (1–10 \
      calls in one round-trip, cross-backend parallel). Search \"*\" to see \
-     what servers are behind the gateway. Backends start lazily on first execution.";
+     what is behind the gateway. Backends start lazily on first execution.";
 
 /// Appended only when a skill library actually exists.
 ///
@@ -517,41 +512,24 @@ impl Proxy {
         // call, so a client cannot reach a capability that isn't configured.
         // Note this is decided once, at construction: adding skills.dirs to a
         // running proxy needs a restart before the two tools appear.
-        // Read off the registry rather than taking a seventh parameter: the
-        // config is already in hand, and every caller stays untouched. Like the
-        // skills gate above, this is decided once at construction — flipping
-        // `proxy.surface` on a running proxy needs a restart, because the
-        // router is built here and hot-reload does not rebuild it.
-        let lean = registry.proxy.lean_surface();
-        let mut tool_router = Self::tool_router();
-        if skill_dirs.is_empty() {
-            tool_router.disable_route("list_skills");
-            tool_router.disable_route("read_skill");
-        }
-        // The lean surface: `search` / `execute` / `read_skill` only. The three
-        // browse tools are ~1 KB of the ~4.4 KB every session carries, and
-        // nothing they do is unreachable — `search("*")` is the catalogue,
-        // `search(include_schema=true)` is the schema, and gateway `issues`
-        // ride on every search response that needs them. What actually goes is
-        // enumerating ONE server's full tool list; `search("*")` previews five
-        // names each and `geco inspect` has the rest for a human.
-        if lean {
-            tool_router.disable_route("list_mcp_servers");
-            tool_router.disable_route("list_tools");
-            tool_router.disable_route("list_skills");
-        }
+        // Every route is registered; WHICH ones are advertised is decided per
+        // `tools/list` from the config as it stands at that moment (see
+        // `visible_tools`). That is what lets `proxy.surface` and a first
+        // skill library take effect on a running proxy instead of waiting for
+        // a restart — geco should not make anyone bounce their agent to pick
+        // up a setting.
+        //
+        // A tool that is not advertised stays callable, deliberately. A client
+        // holding a stale list gets a real answer rather than an error, which
+        // is the friendlier half of the same trade.
+        let tool_router = Self::tool_router();
 
         // Only claim skills exist when some were actually found. A count of
         // zero would be a lie, and a nudge towards an empty library wastes a
         // call on every task.
-        let base = if lean {
-            INSTRUCTIONS_LEAN
-        } else {
-            INSTRUCTIONS_BASE
-        };
         let instructions = match skills.skills.len() {
-            0 => base.to_string(),
-            n => format!("{base}{}", skill_instructions(n)),
+            0 => INSTRUCTIONS_BASE.to_string(),
+            n => format!("{INSTRUCTIONS_BASE}{}", skill_instructions(n)),
         };
 
         Self {
@@ -576,6 +554,53 @@ impl Proxy {
             tool_change_rx: Arc::new(std::sync::Mutex::new(Some(tool_change_rx))),
             tool_router,
             instructions,
+        }
+    }
+
+    /// The meta-tools to advertise RIGHT NOW, from the config as it currently
+    /// stands rather than as it stood at startup.
+    ///
+    /// Two things gate it, and both can change under a running proxy:
+    /// `proxy.surface: lean` drops the three browse tools, and the two skill
+    /// tools appear only once a library is configured. Deciding this per
+    /// `tools/list` instead of once in the constructor is what lets a config
+    /// edit take effect without anyone restarting their agent.
+    pub async fn visible_tools(&self) -> Vec<rmcp::model::Tool> {
+        let lean = self.registry.read().await.proxy.lean_surface();
+        let has_skills = !self.skill_dirs.read().await.is_empty();
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .filter(|t| match t.name.as_ref() {
+                // Needs a library to be worth anything: without one these are
+                // permanent context describing a capability the user does not
+                // have, and an invitation to call something that can only
+                // answer "nothing here". `list_skills` additionally goes in
+                // lean mode, where `search("*", kind="skills")` replaces it —
+                // `read_skill` stays, because it is how a skill that search
+                // surfaced actually gets read.
+                "read_skill" => has_skills,
+                "list_skills" => has_skills && !lean,
+                "list_mcp_servers" | "list_tools" => !lean,
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// Tell the client its tool list changed, if it is listening.
+    ///
+    /// Without this the dynamic surface would be invisible: a client asks for
+    /// `tools/list` once at connect and caches it, which is the very reason a
+    /// new MCP server normally means restarting the harness. geco advertises
+    /// `tools/list_changed` and sends it, so the one case where its OWN
+    /// surface moves is handled by the protocol rather than by a restart.
+    async fn notify_tool_list_changed(&self) {
+        let peer = self.peer.read().await.clone();
+        let Some(peer) = peer else { return };
+        if let Err(e) = peer.notify_tool_list_changed().await {
+            // Not every client implements it, and that is survivable — the
+            // tools still work, the list is just stale until it reconnects.
+            tracing::debug!("tools/list_changed not delivered: {e}");
         }
     }
 
@@ -940,6 +965,15 @@ impl Proxy {
     /// Called by `spawn_hot_reload` when the config file changes, but also
     /// testable in isolation.
     pub async fn reload_from_config(&self, cfg: crate::config::Config) -> AnyhowResult<()> {
+        // What the client can currently see, so the end of this can tell
+        // whether the edit moved geco's own surface — turning `surface: lean`
+        // on, or configuring a skill library for the first time.
+        let before: Vec<String> = self
+            .visible_tools()
+            .await
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
         let new_hash = cfg.snapshot_hash();
         let new_registry = crate::backend::Registry::from_config(&cfg);
         // Fresh Backends start with no notifier — rewire them, or tool-change
@@ -1002,6 +1036,24 @@ impl Proxy {
         drop(issues);
 
         self.rescan_skills().await;
+
+        // Only when it actually moved. A config edit that touches a backend or
+        // a denylist changes nothing the client holds, and a notification on
+        // every save would train a client to ignore them.
+        let after: Vec<String> = self
+            .visible_tools()
+            .await
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        if before != after {
+            tracing::info!(
+                "meta-tool surface changed on reload: {:?} -> {:?}",
+                before,
+                after
+            );
+            self.notify_tool_list_changed().await;
+        }
         Ok(())
     }
 
@@ -2028,10 +2080,34 @@ impl ServerHandler for Proxy {
         Ok(self.get_info())
     }
 
+    /// Written by hand so the macro does not generate it: the advertised set
+    /// is computed from the CURRENT config, not from what the router was built
+    /// with, which is what makes `proxy.surface` and a newly-configured skill
+    /// library take effect without a restart.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: self.visible_tools().await,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::from_build_env())
-            .with_instructions(self.instructions.clone())
+        // `tool_list_changed` is advertised because geco now means it: the
+        // surface really can change mid-session, and a client that listens
+        // will re-fetch instead of holding a stale list.
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::from_build_env())
+        .with_instructions(self.instructions.clone())
     }
 }
 
@@ -2066,35 +2142,38 @@ mod param_tests {
     /// bytes — so the test measures bytes, not just which names survive. A
     /// version that trimmed the tools and kept the full instruction text would
     /// hand a chunk of the saving straight back, and nothing else would notice.
-    #[test]
-    fn the_lean_surface_serves_three_tools_and_costs_a_quarter_less() {
+    /// The advertised set, which since the surface became dynamic is NOT the
+    /// same thing as the router's routes — every route is always registered,
+    /// and `visible_tools` decides what the client is told about.
+    async fn names(p: &Proxy) -> Vec<String> {
+        let mut n: Vec<String> = p
+            .visible_tools()
+            .await
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        n.sort();
+        n
+    }
+
+    #[tokio::test]
+    async fn the_lean_surface_serves_three_tools_and_costs_a_quarter_less() {
         let full = surface_probe_with(vec!["/nonexistent/skills".into()], "full");
         let lean = surface_probe_with(vec!["/nonexistent/skills".into()], "lean");
-
-        let names = |p: &Proxy| -> Vec<String> {
-            let mut n: Vec<String> = p
-                .tool_router
-                .list_all()
-                .iter()
-                .map(|t| t.name.to_string())
-                .collect();
-            n.sort();
-            n
-        };
         assert_eq!(
-            names(&lean),
+            names(&lean).await,
             vec!["execute", "read_skill", "search"],
             "lean serves search/execute/read_skill and nothing else"
         );
-        assert_eq!(names(&full).len(), 6);
+        assert_eq!(names(&full).await.len(), 6);
 
-        let bytes = |p: &Proxy| -> usize {
-            serde_json::to_string(&p.tool_router.list_all())
+        async fn bytes(p: &Proxy) -> usize {
+            serde_json::to_string(&p.visible_tools().await)
                 .unwrap()
                 .len()
                 + p.instructions.len()
-        };
-        let (fb, lb) = (bytes(&full), bytes(&lean));
+        }
+        let (fb, lb) = (bytes(&full).await, bytes(&lean).await);
         eprintln!(
             "surface: full {fb} B, lean {lb} B (saves {} B, {}%)",
             fb - lb,
@@ -2121,19 +2200,11 @@ mod param_tests {
     /// none is configured they are permanent context describing a capability
     /// the user doesn't have — and an invitation to call something that can
     /// only answer "nothing here".
-    #[test]
-    fn skill_meta_tools_are_hidden_without_a_library() {
+    #[tokio::test]
+    async fn skill_meta_tools_are_hidden_without_a_library() {
         let with = surface_probe(vec!["/nonexistent/skills".into()]);
         let without = surface_probe(vec![]);
-
-        let names = |p: &Proxy| -> Vec<String> {
-            p.tool_router
-                .list_all()
-                .iter()
-                .map(|t| t.name.to_string())
-                .collect()
-        };
-        let (a, b) = (names(&with), names(&without));
+        let (a, b) = (names(&with).await, names(&without).await);
 
         assert_eq!(a.len(), 6, "a configured library advertises all 6: {a:?}");
         assert!(a.contains(&"list_skills".to_string()));
@@ -2146,12 +2217,12 @@ mod param_tests {
         // asked for skills that aren't there.
         assert!(b.contains(&"search".to_string()), "got {b:?}");
 
-        let cost = |p: &Proxy| {
-            serde_json::to_string(&p.tool_router.list_all())
+        async fn cost(p: &Proxy) -> usize {
+            serde_json::to_string(&p.visible_tools().await)
                 .unwrap()
                 .len()
-        };
-        let (ca, cb) = (cost(&with), cost(&without));
+        }
+        let (ca, cb) = (cost(&with).await, cost(&without).await);
         eprintln!(
             "surface: with skills {ca} B, without {cb} B (saves {} B)",
             ca - cb

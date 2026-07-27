@@ -155,6 +155,28 @@ because it was not real.
   and roughly 30% of those survive measurement here. What genuinely goes is
   enumerating one server's whole tool list; `search("*")` previews five names
   each and `geco inspect` has the rest.
+- **geco's own meta-tool surface is now dynamic — no restart, ever.** It used
+  to be decided in the constructor, so configuring a first skill library, or
+  flipping `proxy.surface`, left the client holding a list that would not
+  change until the harness was bounced. That is exactly the hiccup geco exists
+  to remove from everything else, so it should not have introduced one of its
+  own.
+
+  Every route is now always registered and `tools/list` is computed per request
+  from the config as it currently stands; geco advertises
+  `tools/list_changed` and sends it when the set actually moves — not on every
+  config save, or a client would learn to ignore it. Verified in one session,
+  never reconnected: a first skill library appearing, `surface: lean` switching
+  on, and back to full, with three notifications delivered.
+
+  Two consequences worth knowing. A tool that is not advertised stays
+  **callable**, so a client holding a stale list gets a real answer instead of
+  an error — the friendlier half of the same trade. And the instruction text is
+  now ONE string rather than a per-surface variant: instructions are delivered
+  once at `initialize` and cannot be re-sent, so a surface that moves at
+  runtime would otherwise leave whichever text the client holds describing a
+  flow that no longer exists. Naming the flow instead of inventorying the tools
+  is correct on either surface, and shorter than the text it replaced.
 - **`geco stats` counts calls per meta-tool.** The always-on surface is the one
   cost geco publishes a number for, and there was no way to tell which of those
   tools a model ever reaches for — so the question above could only be argued.
