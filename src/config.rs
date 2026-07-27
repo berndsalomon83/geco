@@ -73,27 +73,33 @@ pub struct ProxyConfig {
     /// user meant measured 3x better (see docs/search-ranking.md). Off by
     /// default — it costs a round-trip per search.
     pub picker: PickerConfig,
-    /// How many meta-tools to advertise: `full` (default) or `lean`.
+    /// How many meta-tools to advertise: `lean` (default) or `full`.
     ///
-    /// `lean` serves only `search`, `execute` and `read_skill`, hiding
-    /// `list_mcp_servers`, `list_tools` and `list_skills`. Those three are
-    /// ~1 KB of the always-on surface — about a quarter of it — and everything
-    /// they do is reachable another way:
+    /// `lean` serves `search`, `execute` and `read_skill` — the last only when
+    /// a skill library is configured, so a plain setup is two tools. `full`
+    /// adds `list_mcp_servers`, `list_tools` and `list_skills`, which cost
+    /// ~1 KB of always-on context, about a quarter of the surface.
     ///
-    /// - browsing what exists → `search("*")`, which returns one entry per
-    ///   server (and every skill), and is also volunteered automatically in
-    ///   the hint whenever a search matches nothing
+    /// The default is lean because everything those three do is reachable
+    /// without them, and reachable ON DEMAND rather than in every request —
+    /// which is the argument geco makes about backend schemas, applied to its
+    /// own surface:
+    ///
+    /// - browsing what exists → `search("*")`, one entry per server with a
+    ///   tool count and a five-name preview, and `search("*", kind="skills")`
+    ///   for the library
     /// - a tool's input schema → `search(include_schema=true)`
     /// - gateway problems → the `issues` key, which rides on every `search`
     ///   response that needs it
     ///
-    /// The one thing genuinely lost is enumerating a single server's whole
-    /// tool list; `search("*")` previews five names per server, and
-    /// `geco inspect` has the rest for humans.
+    /// Crucially a miss does not depend on the model knowing any of that: a
+    /// search that matches nothing volunteers the server list in its hint,
+    /// automatically, which is the recovery path browsing used to serve.
     ///
-    /// Left at `full` by default until there is evidence rather than a
-    /// prediction — `geco stats` now counts calls per meta-tool, so a real
-    /// session answers whether the browse path is used at all.
+    /// Set `full` if you want the browse tools back. The one thing lean
+    /// genuinely loses is enumerating a single server's whole tool list —
+    /// `search("*")` previews five names each, and `geco inspect` has the rest
+    /// for a human.
     pub surface: String,
 }
 
@@ -184,18 +190,20 @@ impl Default for ProxyConfig {
             refresh_concurrency: 8,
             search_synonyms: Vec::new(),
             picker: PickerConfig::default(),
-            surface: "full".into(),
+            surface: "lean".into(),
         }
     }
 }
 
 impl ProxyConfig {
     /// True when only `search` / `execute` / `read_skill` should be served.
-    /// Anything that is not "lean" means the full surface, so a typo costs a
-    /// user the tools they expected rather than silently taking away tools
-    /// they never asked to lose.
+    ///
+    /// Only an explicit "full" opts out. A typo therefore leaves the default
+    /// in place rather than silently handing over a surface the user did not
+    /// ask for — and since the browse tools are reachable through `search`
+    /// either way, erring towards lean costs capability nowhere.
     pub fn lean_surface(&self) -> bool {
-        self.surface.eq_ignore_ascii_case("lean")
+        !self.surface.eq_ignore_ascii_case("full")
     }
 
     pub fn env_policy(&self) -> EnvPolicy {

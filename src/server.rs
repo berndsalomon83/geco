@@ -1,6 +1,6 @@
 //! The proxy's own MCP surface: eight small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
-//! ~4 KB no matter how many tools hide behind the gate. That number is
+//! ~2.5 KB no matter how many tools hide behind the gate. That number is
 //! measured, not asserted by hand: see
 //! `param_tests::meta_tool_surface_stays_within_its_context_budget`.
 
@@ -2195,6 +2195,67 @@ mod param_tests {
             .collect();
         n.sort();
         n
+    }
+
+    /// What a user gets with no `proxy.surface` line at all. This is the
+    /// headline promise, so it is pinned rather than left to whatever the
+    /// config default happens to be after the next edit.
+    #[tokio::test]
+    async fn the_default_surface_is_lean() {
+        let cfg: crate::config::Config =
+            serde_json::from_value(json!({"mcpServers": {"s": {"command": ["true"]}}})).unwrap();
+        assert!(
+            cfg.proxy.lean_surface(),
+            "a config that says nothing about surface must be lean"
+        );
+
+        let probe = Proxy::new(
+            crate::backend::Registry::from_config(&cfg),
+            Snapshot::default(),
+            PathBuf::from("geco-test-snapshot.json"),
+            PathBuf::from("geco-test-config.yaml"),
+            vec!["/nonexistent/skills".into()],
+            vec![],
+        );
+        assert_eq!(
+            names(&probe).await,
+            vec!["execute", "read_skill", "search"],
+            "the default surface is three tools with a skill library"
+        );
+
+        // And two without one: `read_skill` has nothing to read.
+        let bare = Proxy::new(
+            crate::backend::Registry::from_config(&cfg),
+            Snapshot::default(),
+            PathBuf::from("geco-test-snapshot.json"),
+            PathBuf::from("geco-test-config.yaml"),
+            vec![],
+            vec![],
+        );
+        assert_eq!(names(&bare).await, vec!["execute", "search"]);
+    }
+
+    /// A typo must not silently hand over a surface nobody asked for. Only an
+    /// explicit "full" opts out, and lean loses no capability, so erring this
+    /// way is free.
+    #[tokio::test]
+    async fn only_an_explicit_full_opts_out_of_lean() {
+        for s in ["lean", "LEAN", "", "leen", "minimal", "full "] {
+            let cfg: crate::config::Config = serde_json::from_value(json!({
+                "proxy": { "surface": s },
+                "mcpServers": {"x": {"command": ["true"]}}
+            }))
+            .unwrap();
+            assert!(cfg.proxy.lean_surface(), "{s:?} should stay lean");
+        }
+        for s in ["full", "FULL", "Full"] {
+            let cfg: crate::config::Config = serde_json::from_value(json!({
+                "proxy": { "surface": s },
+                "mcpServers": {"x": {"command": ["true"]}}
+            }))
+            .unwrap();
+            assert!(!cfg.proxy.lean_surface(), "{s:?} should be full");
+        }
     }
 
     #[tokio::test]

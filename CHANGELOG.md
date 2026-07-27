@@ -136,6 +136,22 @@ because it was not real.
 
 ### Added
 
+- **BREAKING (surface): the default is now three meta-tools, not six.**
+  `proxy.surface` defaults to `lean` — `search`, `execute`, `read_skill` (two
+  without a skill library, since `read_skill` would have nothing to read).
+  Always-on context drops **4,063 → 2,562 B**. `proxy.surface: full` restores
+  `list_mcp_servers`, `list_tools` and `list_skills`.
+
+  Only an explicit `full` opts out, so a typo leaves the default in place
+  rather than silently handing over a surface nobody asked for — and since
+  everything the browse tools do is reachable through `search` either way,
+  erring towards lean costs no capability.
+
+  Honest about what this is: a judgement, not a measurement. The capability is
+  preserved and a search that matches nothing volunteers the catalogue without
+  the model knowing any trick, but whether models take that route in daily use
+  is unverified. `geco stats` counts calls per meta-tool, so a real workload
+  can answer it either way.
 - **`proxy.surface: lean`** — serve only `search`, `execute` and `read_skill`.
   The three browse tools are **~1 KB of the ~4.1 KB always-on surface, a
   quarter of it**, and nothing they do is unreachable:

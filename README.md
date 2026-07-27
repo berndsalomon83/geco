@@ -11,11 +11,11 @@
 The more MCP tools you expose to your LLM, the more the context gets prefilled with ballast that most likely is not even used, reducing the space you have to work with.
 The same is true for skills. Skills are great recipes to have but they also land as descriptive text in the context of your LLM — and again, more skills means less remaining context for the actual task.
 
-So here comes this rusty reptile geco to tackle it. It sits between your IDE and the skills and MCP tools that you have, and gives your LLM the same 6 tools always, no matter how much you have in your tool shed.
+So here comes this rusty reptile geco to tackle it. It sits between your IDE and the skills and MCP tools that you have, and gives your LLM a handful of small tools no matter how much you have in your tool shed.
 
-**geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees six small meta-tools instead of every schema on every request.
+**geco is an MCP and SKILL gateway** that keeps your servers' tool schemas **out of the model's context until the moment they're needed**. Put N servers behind it; the agent sees three small meta-tools instead of every schema on every request.
 
-The cost is fixed: **~4 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
+The cost is fixed: **~2.5 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
 
 ### And you stop restarting your agent
 
@@ -23,9 +23,9 @@ Add an MCP server to a normal setup and you restart the harness, because the cli
 
 **Behind geco, nothing downstream ever has to restart.** Drop a new skill into the library, drop one into the absorb inbox, or add a whole new MCP server to `geco.yaml` — the next `search` finds it, in the same session, with the agent none the wiser.
 
-This is not a feature bolted on; it falls out of the design. Your client's tool list is the same six meta-tools before and after, so there is nothing for it to reload. The servers and skills live *behind* `search`, which reads the current snapshot every time it is called. geco watches the config and the skill directories, and listens for backends that announce their own tool changes (`notifications/tools/list_changed`), so the catalogue behind the gate keeps up on its own.
+This is not a feature bolted on; it falls out of the design. Your client's tool list is the same handful of meta-tools before and after, so there is nothing for it to reload. The servers and skills live *behind* `search`, which reads the current snapshot every time it is called. geco watches the config and the skill directories, and listens for backends that announce their own tool changes (`notifications/tools/list_changed`), so the catalogue behind the gate keeps up on its own.
 
-**Including geco's own tool list.** The six meta-tools are decided per request from the config as it currently stands, and geco advertises `tools/list_changed` and sends it when the set moves — so configuring your first skill library, or flipping `proxy.surface`, takes effect on a live session too.
+**Including geco's own tool list.** The meta-tools are decided per request from the config as it currently stands, and geco advertises `tools/list_changed` and sends it when the set moves — so configuring your first skill library, or changing `proxy.surface`, takes effect on a live session too.
 
 Verified end to end in a single MCP session, never reconnected: a new skill in the library, a new skill via the inbox, a brand-new server's tools, a first skill library appearing, and `surface: lean` switching on and back off — all of it without restarting anything.
 
@@ -48,20 +48,21 @@ flowchart LR
 
 Your agent asks in plain words and gets back one tool, ready to use. Everything else stays in the shed. Add a hundred servers and the agent still carries the same few small tools — that is the entire idea, and the rest of this page is how it holds up.
 
-The agent sees six meta-tools:
+By default the agent sees three meta-tools:
 
 | Meta-tool | Purpose |
 |---|---|
-| `list_mcp_servers` | Name, description, tool count, running state of each backend — plus `issues` when the gateway has a problem |
-| `list_tools` | A server's tools (name + description); with `tool`: the full input schema |
-| `list_skills` | Every skill in the library (name + one-line description) |
-| `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
-| `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
+| `search` | Find tools AND skills by keywords; `"*"` for the whole catalogue; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
 | `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
+| `read_skill` | Load a skill's SKILL.md + file inventory (runs bundled scripts via your shell) |
 
-Six, and that is the whole always-on surface — **4,063 bytes**, whatever hides behind it. That number is measured by a test rather than asserted, so it cannot quietly drift. `proxy.surface: lean` trims it to three tools and ~2,900 bytes (see [a leaner surface](#a-leaner-surface)); the skill tools appear only once you have a skill library. Both are decided per request, so neither needs a restart.
+Three, and that is the whole always-on surface — **2,562 bytes**, whatever hides behind it. Measured by a test rather than asserted, so it cannot quietly drift. Without a skill library it is two, since `read_skill` would have nothing to read.
 
-Two things are deliberately *not* here: gateway health and manual refresh. Both are operator actions and live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
+`proxy.surface: full` adds three more if you want them — `list_mcp_servers`, `list_tools` and `list_skills`, for about 1 KB. You mostly don't: `search("*")` is the catalogue, `search(include_schema=true)` is the schema, and gateway `issues` ride on search responses. See [a leaner surface](#a-leaner-surface) for what that trades.
+
+Which set is served is decided per request, so adding a skill library or changing `surface` needs no restart.
+
+Two things are deliberately *not* meta-tools at all: gateway health and manual refresh. Both are operator actions and live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
 
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
@@ -110,7 +111,7 @@ Move the MCP servers you want behind the proxy into `~/.config/geco/config.yaml`
 }
 ```
 
-Remove the individual server entries you moved behind geco — restart the agent and it sees only the 6 meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
+Remove the individual server entries you moved behind geco — restart the agent and it sees only geco's handful of meta-tools. See [INSTALL.md](INSTALL.md) for the full guide.
 
 ## Quick start
 
@@ -147,7 +148,7 @@ skills:
   dirs: ["~/.config/opencode/skills-library"]
 ```
 
-Three meta-tools appear: `list_skills` (the whole catalogue), `search` (with `kind="skills"` to find a playbook by intent) and `read_skill` (full SKILL.md + bundled file paths — the agent runs scripts via its shell exactly as a native skill would instruct). Migration: move skills out of the auto-loaded dir into the library; keep your few daily drivers native if you like:
+`read_skill` appears — the full SKILL.md plus bundled file paths, which the agent runs via its shell exactly as a native skill would instruct. `search` was already there and now covers skills too: `kind="skills"` finds a playbook by intent, and `search("*", kind="skills")` lists the library. (With `surface: full` you also get `list_skills`, which is the same list under its own name.) Migration: move skills out of the auto-loaded dir into the library; keep your few daily drivers native if you like:
 
 ```bash
 mkdir -p ~/.config/opencode/skills-library
@@ -179,7 +180,7 @@ library and `absorb` at whatever directory your agent auto-loads from:
 ```yaml
 skills:
   dirs: ["~/.config/geco/skills-library"]   # served on demand
-  absorb:                                    # swept into the library at startup
+  absorb:                                    # swept in on every scan, and watched
     - "~/.claude/skills"                     # Claude Code
     - "~/.config/opencode/skills"            # opencode
 ```
@@ -237,14 +238,16 @@ Measured against 5,216 tools from ~150 real MCP servers, the measured floor on *
 
 ### A leaner surface
 
-The six meta-tools cost ~4.1 KB of always-on context. Three of them — `list_mcp_servers`, `list_tools`, `list_skills` — are **~1 KB of that, a quarter**, and everything they do is reachable another way:
+This is the default, so this section is mostly about what you'd be turning back on.
+
+The full six cost ~4.1 KB of always-on context. Three of them — `list_mcp_servers`, `list_tools`, `list_skills` — are **~1 KB of that, a quarter** — and everything they do is reachable another way, which is why they are off:
 
 ```yaml
 proxy:
-  surface: lean     # search, execute, read_skill — and nothing else
+  surface: full     # put the three browse tools back
 ```
 
-| what you lose | what replaces it |
+| what `full` adds back | what already replaces it |
 |---|---|
 | `list_mcp_servers` | `search("*")` — one entry per server, with a tool count and a five-name preview |
 | `list_skills` | `search("*", kind="skills")` |
@@ -257,7 +260,7 @@ A miss volunteers the catalogue by itself — `nothing matched 'deploy a contain
 
 **One thing genuinely goes:** enumerating a single server's whole tool list. `search("*")` previews five names each; `geco inspect` has the rest for a human.
 
-It is **not the default**, deliberately. The case for it is a prediction about how models behave, and in this project roughly 30% of those survive measurement. `geco stats` now counts calls per meta-tool — run your real workload and look before deciding:
+Whether models actually take these routes in daily use is unverified — the capability is preserved, the habit is not measured. `geco stats` counts calls per meta-tool, so your own workload will tell you whether the browse tools would have earned their kilobyte:
 
 ```
 meta-tool calls (the always-on surface earning its bytes):
@@ -363,7 +366,7 @@ Gateway-wide settings, all optional:
 | `refresh_concurrency` | 8 | How many backends may be probed at once during a refresh. `0` = unlimited. Caps the process storm when many servers are configured. |
 | `inherit_env` | false | Give backends geco's whole environment (pre-0.7 behaviour). See above. |
 | `env_passthrough` | `[]` | Extra non-secret variables every backend receives, as globs. |
-| `surface` | `full` | `lean` serves only `search`, `execute` and `read_skill` — see [a leaner surface](#a-leaner-surface). |
+| `surface` | `lean` | Serves `search`, `execute` and `read_skill`. `full` adds `list_mcp_servers`, `list_tools`, `list_skills` for ~1 KB — see [a leaner surface](#a-leaner-surface). |
 | `search_synonyms` | `[]` | Extra interchangeable-word groups for ranking, e.g. `[["k8s","kubernetes"]]`. Applied on top of the built-in table; picked up on hot reload. |
 | `picker` | off | Optional LLM tool picker — see [Crossing the wall](#crossing-the-wall-the-llm-picker). |
 
@@ -422,9 +425,11 @@ The gateway is headless, so a dead backend or a partial refresh would otherwise 
 
 - **`geco health`** — the full report, for you.
 - **The opencode toast plugin** (`opencode-plugin/geco-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick.
-- **`list_mcp_servers`**, for the agent — per-server `status` and `last_refresh`, plus an `issues` array when something is wrong.
+- **Every `search` response**, for the agent — an `issues` array rides along whenever the gateway has a problem, and is omitted entirely when it doesn't. With `surface: full`, `list_mcp_servers` carries the same array plus per-server `status` and `last_refresh`.
 
-There is deliberately no `health` meta-tool. It would cost every session's context to answer a question that only arises once something is already broken, and by then the answer has already been delivered twice: `execute` returns a typed `error.code` (`backend_error`, `timeout`, `not_allowed`) with the reason at the moment of failure, and `list_mcp_servers` carries the rest. Diagnostics belong in the payload, where they cost nothing until needed — not in the schema, where they cost something always.
+There is deliberately no `health` meta-tool. It would cost every session's context to answer a question that only arises once something is already broken, and by then the answer has already been delivered twice: `execute` returns a typed `error.code` (`backend_error`, `timeout`, `not_allowed`) with the reason at the moment of failure, and `search` carries the rest. Diagnostics belong in the payload, where they cost nothing until needed — not in the schema, where they cost something always.
+
+A failing backend reports the reason it actually gave, which is usually the one you can act on — *command 'npx' not found — is it on the PATH geco was started with?* rather than a generic "connection lost".
 
 ## Troubleshooting
 
@@ -474,10 +479,11 @@ and fitted comfortably. What happens at 805 or 1,589 tools is unmeasured — tha
 is the point where a two-stage server-then-tool pick would earn its place, if
 it does.
 
-**`proxy.surface: lean` is off by default on purpose.** The case for it is a
-prediction about how models behave, and in this project roughly 30% of
-confident-looking predictions survive measurement. `geco stats` counts calls
-per meta-tool so you can check yours before changing it.
+**The lean default is a judgement, not a measurement.** Everything the browse
+tools did is reachable through `search`, and a miss volunteers the catalogue
+without the model knowing any trick — but whether models actually take that
+route in daily use is unverified. `geco stats` counts calls per meta-tool, so
+your own workload will say. `proxy.surface: full` puts the three back.
 
 **A picker prompt contains third-party text.** Tool descriptions come from
 whatever backends you configure and become part of a prompt sent to a model.
@@ -486,9 +492,11 @@ clean fix; the practical mitigation is the ordinary one — run backends you
 trust. Worth knowing before pointing `picker.command` at an agent CLI that has
 shell access.
 
-**Not released.** Version 0.8.0 is in `Cargo.toml` and deliberately untagged —
-there are no users yet, and shipping binaries nobody downloads is waste. Build
-from source or run the installer against a checkout.
+**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0
+has been tagged, so the prebuilt binaries the installers fetch are older than
+this page describes — everything on `main`, including the picker and the lean
+surface, needs a source build for now (`--from-source`, or the installers fall
+back to it automatically when no matching binary exists).
 
 ## Working on geco
 
