@@ -122,7 +122,30 @@ if (-not (Test-Path $Cfg)) {
 
 # Generate editor schema.
 Say "Generating config schema..."
-& $Dest schema | Set-Content (Join-Path $CfgDir "geco.schema.json")
+# NOT Set-Content: in PowerShell 5.1 it writes the system ANSI codepage, and
+# the schema carries the config doc comments verbatim — em-dashes and curly
+# quotes included. The result is a file that is not valid UTF-8, so the YAML
+# language server fails to load it and config autocomplete silently does not
+# work, on Windows only. `geco schema` from a shell looks fine, which makes it
+# read as an editor bug. UTF8Encoding($false) is UTF-8 with no BOM, which is
+# what a JSON consumer expects.
+# The DECODE matters as much as the encode: PowerShell reads a native
+# command's stdout through [Console]::OutputEncoding, which on a stock 5.1
+# console is the OEM codepage. Writing valid UTF-8 afterwards would faithfully
+# preserve characters that were already mangled on the way in — the schema
+# would load, and every em-dash in the config hover text would be mojibake.
+# `-join` rather than Out-String: no trailing CRLF, and no LF->CRLF rewrite.
+$prevOut = [Console]::OutputEncoding
+try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $schemaText = (& $Dest schema) -join "`n"
+} finally {
+    [Console]::OutputEncoding = $prevOut
+}
+[System.IO.File]::WriteAllText(
+    (Join-Path $CfgDir "geco.schema.json"),
+    $schemaText,
+    (New-Object System.Text.UTF8Encoding $false))
 
 # Install opencode health plugin if opencode is present.
 $OpencodePluginDir = Join-Path $env:USERPROFILE ".config\opencode\plugins"
@@ -159,11 +182,17 @@ $ErrorActionPreference = "Continue"
 $raw = $msgs | & $Dest --config $Cfg serve --no-refresh 2>$null
 $ErrorActionPreference = $prevEap
 $result = $raw | ConvertFrom-Json
-$toolCount = ($result | Where-Object { $_.id -eq 2 }).result.tools.Count
-if ($toolCount -eq 8) {
-    Say "Proxy OK: 8 meta-tools"
+# Checked BY NAME, not by count — see the matching comment in install.sh. The
+# old `-eq 8` went stale when the surface dropped to 6 and then warned on
+# every install, which teaches the user to ignore this line entirely. @() so
+# a single result still counts as a collection.
+$names = @(($result | Where-Object { $_.id -eq 2 }).result.tools.name)
+$missing = @(@("list_mcp_servers", "list_tools", "search", "execute") |
+    Where-Object { $names -notcontains $_ })
+if ($missing.Count -eq 0) {
+    Say "Proxy OK - meta-tools: $($names -join ', ')"
 } else {
-    Warn "expected 8 meta-tools, got: $toolCount"
+    Warn "proxy did not serve: $($missing -join ', ')"
 }
 
 Say "Done. Add servers to $Cfg and restart your agent."

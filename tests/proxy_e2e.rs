@@ -1592,6 +1592,205 @@ async fn backend_child_is_reaped_on_shutdown() {
     );
 }
 
+/// One cold backend, eight concurrent calls, one child process.
+///
+/// Every call used to miss the empty cache at the same moment and start its
+/// own child; seven were discarded seconds later, having already paid for an
+/// `npx` resolve and a node runtime. The cost is not only the spike: for a
+/// backend that owns an exclusive resource — a browser profile lock, a fixed
+/// port, a single-writer database — the losers contend with the winner, so the
+/// winner can fail *because* of them, and the user sees an intermittent
+/// `backend_error` that goes away on retry.
+///
+/// Counted from the children themselves, via a spawn log each one appends to
+/// on startup. Asking which child *answered* would prove nothing: geco already
+/// hands every racing caller the winner's connection, so eight spawns and one
+/// spawn give identical replies. The cost is paid at spawn, so that is where
+/// it has to be measured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_calls_on_a_cold_backend_start_exactly_one_child() {
+    let Some(py) = python_bin() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let spawn_log = dir.path().join("spawns.txt");
+
+    let cfg = config_from(serde_json::json!({
+        "stub": {
+            "command": py, "args": [stub_path()],
+            "env": {
+                "STUB_EXTRA_TOOLS": "1",
+                "STUB_SPAWN_LOG": spawn_log.to_str().unwrap(),
+            },
+        }
+    }));
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("stub").unwrap();
+
+    // Fire them together, at a backend that has never been connected.
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let backend = backend.clone();
+        let registry = registry.clone();
+        set.spawn(async move { backend.call("pid", None, &registry.proxy).await });
+    }
+    while let Some(joined) = set.join_next().await {
+        joined.expect("task").expect("every call must succeed");
+    }
+    backend.shutdown().await;
+
+    let spawned = std::fs::read_to_string(&spawn_log).unwrap_or_default();
+    let children: Vec<&str> = spawned.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        children.len(),
+        1,
+        "eight concurrent calls spawned {} children ({children:?}) — connect \
+         is not single-flight. Seven of these are discarded seconds after \
+         paying for an npx resolve and a node runtime, and on a backend that \
+         owns an exclusive resource they can make the winner fail.",
+        children.len()
+    );
+}
+
+/// The other half of single-flight: when the one child cannot start, all eight
+/// callers get that answer, rather than each queueing for a full startup
+/// timeout to discover it independently.
+/// Counted by spawns, not by wall clock.
+///
+/// A wall-clock bound proves nothing here: a missing binary fails in
+/// microseconds, so eight independent failures also finish instantly and the
+/// test passes against code with no single-flight at all. The backend used
+/// therefore STARTS — recording itself — and only then dies, so the spawn log
+/// separates "one attempt whose error seven callers reused" from "eight
+/// callers each spawning and failing on their own".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_calls_on_a_broken_backend_share_one_attempt() {
+    let Some(py) = python_bin() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let spawn_log = dir.path().join("spawns.txt");
+
+    let cfg = config_from(serde_json::json!({
+        "broken": {
+            "command": py, "args": [stub_path()],
+            "env": {
+                "STUB_SPAWN_LOG": spawn_log.to_str().unwrap(),
+                "STUB_DIE_AFTER_LOG": "1",
+            },
+        }
+    }));
+    let registry = Arc::new(Registry::from_config(&cfg));
+    let backend = registry.get("broken").unwrap();
+
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let backend = backend.clone();
+        let registry = registry.clone();
+        set.spawn(async move { backend.call("anything", None, &registry.proxy).await });
+    }
+    let mut errors = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        errors.push(
+            joined
+                .expect("task")
+                .expect_err("a backend that dies on start cannot succeed")
+                .to_string(),
+        );
+    }
+    assert_eq!(errors.len(), 8, "all eight must report the failure");
+
+    let spawned = std::fs::read_to_string(&spawn_log).unwrap_or_default();
+    let children: Vec<&str> = spawned.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        children.len(),
+        1,
+        "eight callers made {} connect attempts ({children:?}) — the queue is \
+         retrying instead of reusing the first failure, so a broken backend \
+         costs one full startup timeout per call in the batch",
+        children.len()
+    );
+    // Reusing the attempt means reusing its error, which is what the caller
+    // actually sees.
+    assert!(
+        errors.iter().all(|e| *e == errors[0]),
+        "queued callers must be handed the same failure, got: {errors:?}"
+    );
+}
+
+/// A screenshot has to arrive as an image, not as a page of base64 pretending
+/// to be prose.
+///
+/// geco used to serialize every non-text block into the same JSON string it
+/// returns as its one text block. A 200 KB PNG became ~270 KB of base64 that
+/// no client could render and the model paid tokens to not see — while
+/// `result`, the field the tool description actually documents, read `""`. A
+/// model following the documented contract concluded the screenshot returned
+/// nothing, which is the worst of the three failures because it is silent.
+#[tokio::test]
+async fn execute_returns_non_text_blocks_as_blocks_not_as_base64_prose() {
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub": { "command": py, "args": [stub_path()], "env": { "STUB_EXTRA_TOOLS": "1" } }
+    }));
+    let (proxy, _registry, _snap) = make_proxy(&cfg).await;
+
+    let result = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "screenshot".into(),
+                arguments: None,
+            }],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "execute should succeed");
+
+    // The image survives as a real image block the client can render.
+    let images: Vec<_> = result
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            rmcp::model::ContentBlock::Image(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        images.len(),
+        1,
+        "the image must come back as an image block, not folded into text"
+    );
+    assert_eq!(images[0].mime_type, "image/png");
+    assert!(!images[0].data.is_empty());
+
+    let json = extract_json(&result);
+    let entry = &json.as_array().unwrap()[0];
+    assert_eq!(entry["ok"], true);
+    // The backend's text still lands in `result` — an image alongside text
+    // must not cost the text.
+    assert_eq!(entry["result"], "captured");
+    // And the model is told something arrived, in a handful of tokens.
+    let att = entry["attachments"].as_array().expect("attachments listed");
+    assert_eq!(att.len(), 1, "{entry}");
+    assert_eq!(att[0]["type"], "image");
+    assert_eq!(att[0]["mime_type"], "image/png");
+    assert!(att[0]["bytes"].as_u64().unwrap_or(0) > 0);
+
+    // The regression that matters: the base64 must not be in the JSON text
+    // blob. This is the assertion that fails if anyone reinstates the old
+    // pass-through, and it is checked on the serialized text rather than on
+    // the parsed value, because the cost is paid in characters.
+    let text = result
+        .content
+        .iter()
+        .find_map(|b| match b {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .expect("a text summary block");
+    assert!(
+        !text.contains(&images[0].data),
+        "the base64 payload is inlined in the JSON summary — that is the bug"
+    );
+}
+
 /// Read an env var as the spawned child sees it.
 async fn backend_getenv(
     backend: &Arc<geco::backend::Backend>,

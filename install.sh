@@ -149,18 +149,43 @@ say "Building tool snapshot…"
 "$DEST" --config "$CFG" refresh || warn "refresh reported issues (fix config, then: geco refresh)"
 
 say "Verifying meta-tool surface…"
-TOOLS=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"install","version":"0"}}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' \
-  | "$DEST" --config "$CFG" serve --no-refresh 2>/dev/null \
-  | python3 -c 'import sys,json
+# The check needs python3 only to parse the reply. Saying so is the difference
+# between an honest skip and a false alarm: without this guard, a machine with
+# no python3 (macOS has not shipped one in the base system since 12.3) gets
+# "proxy did not serve: …" on a perfectly good install — which is the same
+# cry-wolf this check was just rewritten to stop.
+if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not found — skipping the meta-tool check. The install itself is fine;"
+    warn "verify by hand with: geco health"
+else
+    TOOLS=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"install","version":"0"}}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' \
+      | "$DEST" --config "$CFG" serve --no-refresh 2>/dev/null \
+      | python3 -c 'import sys,json
 for l in sys.stdin:
     m=json.loads(l)
-    if m.get("id")==2: print(len(m["result"]["tools"]))' || echo 0)
-# 8 meta-tools: 6 gateway + 2 skills. if/else rather than `A && B || C`,
-# which runs C when B fails, not only when A does.
-if [ "$TOOLS" = "8" ]; then
-    say "Proxy OK: 8 meta-tools (6 gateway + 2 skills)"
-else
-    warn "expected 8 meta-tools, got: $TOOLS"
+    if m.get("id")==2: print(" ".join(sorted(t["name"] for t in m["result"]["tools"])))' || echo "")
+    # Checked BY NAME, not by count. This used to assert exactly 8, went stale
+    # the release the surface dropped to 6, and then warned on every single
+    # install — which trains a user to ignore the one line whose whole job is
+    # to tell them the install is broken. A count is also the wrong invariant:
+    # `list_skills` and `read_skill` are served only when a skill library is
+    # configured, so the correct total is 6 or 4 depending on config. The four
+    # below are the always-on gateway surface; the rest are reported, not
+    # required.
+    # if/else rather than `A && B || C`, which runs C when B fails, not only
+    # when A does.
+    MISSING=""
+    for t in list_mcp_servers list_tools search execute; do
+        case " $TOOLS " in
+            *" $t "*) ;;
+            *) MISSING="$MISSING $t" ;;
+        esac
+    done
+    if [ -z "$MISSING" ]; then
+        say "Proxy OK — meta-tools: $TOOLS"
+    else
+        warn "proxy did not serve:$MISSING (got: ${TOOLS:-nothing})"
+    fi
 fi
 
 # Companion opencode TUI plugin: toasts gateway health problems in-app.

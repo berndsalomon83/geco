@@ -6,6 +6,99 @@ minor bump may break.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by a systematic production-readiness audit rather than by use, then each
+one adversarially re-checked before it was believed. Roughly a third of what
+the audit proposed survived that second pass; the rest is not recorded here
+because it was not real.
+
+- **A screenshot came back as `result: ""`.** `execute` serialized every
+  non-text content block into the same JSON string it returns as its one text
+  block, which is the worst available outcome in three directions at once: a
+  200 KB PNG became ~270 KB of base64 inside a *text* block, so no client could
+  render it; the model paid roughly 70k tokens to not see an image; and
+  `result` — the field the tool description actually documents — read `""`, so
+  a model following the contract concluded the call returned nothing. Non-text
+  blocks are now attached as real content blocks after the JSON summary, and
+  the summary lists them under `attachments` as `{type, mime_type, bytes}`.
+  Same path fired for audio and embedded resources from any backend.
+- **One batched `execute` against a cold backend started one child process per
+  call.** Every call missed the empty connection cache at the same moment and
+  ran its own connect; measured at **8 children for an 8-call batch**, seven of
+  them discarded seconds later having already paid for an `npx` resolve and a
+  node runtime. Worse than the spike: for a backend that owns an exclusive
+  resource — a browser profile lock, a fixed port, a single-writer database —
+  the losers contend with the winner, so the winner can fail *because* of them,
+  and the user sees an intermittent `backend_error` that goes away on retry.
+  Connects are now single-flight, and a failed attempt is shared with everyone
+  queued behind it rather than repeated by each in turn.
+- **A slow pick made the whole gateway look hung.** `search` held the snapshot
+  read guard across the picker's model round-trip — up to 20 seconds by
+  default, 300 if the timeout is raised. The next writer (a
+  `tools/list_changed` rescan, a config save) queued behind it, and every
+  reader then queued behind the writer. The one a user actually feels is
+  `execute`, whose trailing health publish reads the snapshot: a tool call that
+  had already succeeded sat there until the picker returned. Pinned by a test
+  that asserts an *order* rather than a duration, so it does not go flaky on a
+  loaded machine.
+- **The picker's command transport leaked a process on every timeout.**
+  `tokio::time::timeout` only drops the future; tokio does not reap a child on
+  drop unless told to. The command is typically an agent CLI, so the abandoned
+  process ran its inference to completion, billed the user's account for an
+  answer nobody would read, and held a rate-limit slot — while geco logged
+  nothing worse than a clean fallback. A session of searches each slightly over
+  the bound accumulated one orphan apiece. Also: a wrapper script that exits
+  non-zero is now reported rather than having its stdout parsed as an answer.
+- **Every install ended with a false warning.** Both installers verified
+  "expected 8 meta-tools" against a surface that has served 6 since 0.8.0 (or
+  4 without a skill library), so the last line before the "Done" banner was
+  always `WARN expected 8 meta-tools, got: 6` — which teaches a user to ignore
+  the one line whose job is to tell them the install is broken. A count was
+  the wrong invariant anyway; both now check the four always-on gateway tools
+  by name and report whatever else is served.
+- **`geco refresh` always exited 0**, which made both installers'
+  "refresh reported issues" branches unreachable: a fresh install whose every
+  scaffolded backend failed to spawn printed the status table and then declared
+  success. It now exits 1 and names the servers that failed, matching `health`
+  and `validate`. The snapshot is still written and a running proxy still
+  nudged — a broken config is exactly when a live proxy most needs to reload.
+- **`install.ps1` wrote `geco.schema.json` through `Set-Content`**, which in
+  PowerShell 5.1 emits the system ANSI codepage. The schema carries the config
+  doc comments verbatim, em-dashes included, so the file was not valid UTF-8:
+  the YAML language server failed to load it and config autocomplete silently
+  did not work, on Windows only — while `geco schema` from a shell looked fine,
+  making it read as an editor bug. Now written as UTF-8 with no BOM. Same fix
+  applied to `uninstall.ps1`, which rewrites the user's agent config.
+- **`uninstall.sh` did nothing at all without a working python3.** `set -e`
+  plus an unguarded heredoc meant the interpreter aborting took the whole
+  script with it — before the binary was removed, before anything was purged,
+  and without printing a word. Only the agent-config edit needs python3; that
+  step now warns and is skipped. Guarded twice, because presence is the wrong
+  question on the machine this is likeliest to happen on: macOS ships
+  `/usr/bin/python3` as a Command Line Tools **stub** that `command -v` finds
+  and that exits non-zero when run, so a presence check passes and `set -e`
+  kills the script anyway. The heredoc is now in an AND-OR list, which `set -e`
+  exempts, so an unwritable config or a raising script is survived too.
+- **`uninstall.sh --purge` left the data behind on Linux.** It listed only the
+  macOS-shaped `dev.geco.geco` paths, so on Linux it printed its success line
+  while leaving `~/.cache/geco` (a full dump of every backend tool name,
+  description and schema) and `~/.local/share/geco/health.json` (per-backend
+  call counts and the recent-no-match query log) in place — and a later
+  reinstall resurrected the stale snapshot.
+- **`list_skills` blamed the config in the one state where the config is
+  right.** The tool is only advertised when `skills.dirs` is set, so reaching
+  its empty branch means the library *is* configured and simply empty — yet it
+  answered `is_error` with "no skill libraries configured (configure
+  `skills.dirs`)". Every fresh install is in that state, because the installers
+  scaffold a `dirs` path most users have never had. It now returns a successful
+  empty answer naming the directories it searched, matching `search`, which
+  already declines to call a valid empty result a failed call.
+- **INSTALL.md** told users to ask their model about gateway health via a
+  `health` meta-tool that 0.8.0 retired, and quoted the pre-0.8.0 4.7 KB
+  context cost against README's 4.3 KB — two numbers for the headline claim of
+  the project, in the document people read while installing.
+
 ### Changed
 
 - **Dogfooded end-to-end against real MCP servers for the first time.** Every
@@ -25,6 +118,124 @@ minor bump may break.
 
 ### Added
 
+- **The picker shows the model your whole catalogue when it fits**
+  (`proxy.picker.whole_catalogue_tokens`, default ~24k tokens ≈ 500 tools).
+  This is the largest measured win in the search story, and it is both more
+  accurate *and* faster than the lexical shortlist it replaces. On a
+  realistic eight-server catalogue (324 tools), same model, same prompt,
+  same 210 vocabulary-banned queries:
+
+  | shown to the model | recall ceiling | rank-1 | latency |
+  |---|---|---|---|
+  | nothing (lexical only) | — | 24.8% | µs |
+  | BM25F's top 50 | 82% | 74.6% | 2.2s |
+  | **the whole catalogue** | **100%** | **94.8%** | **0.9s** |
+
+  Precision did not fall under seven times the distractors — 90.5% against the
+  shortlist's 90.7%, measured like for like — which was the opposite of the
+  prediction. **BM25F does not select
+  random distractors — it selects the most confusable ones.** Every
+  shortlisted candidate was chosen for sharing vocabulary with the query, so
+  a shortlist is precisely the set of plausible wrong answers, while the
+  tools it discards are mostly obvious non-answers a model rejects at a
+  glance. Pre-filtering lexically concentrates the hard negatives.
+
+  It is *faster* for a related reason: an unchanging catalogue is a
+  **cacheable prompt prefix**, and a per-query shortlist can never be one.
+  Measured at 15,243 prompt tokens: **96.6% served from cache, 13x faster**
+  than the same prompt reordered per call. `Picker::prompt` is now split into
+  a stable `catalogue_block` and a per-query `question_block`, in that order —
+  it previously put the query first, which made every byte of the catalogue
+  uncacheable. A test pins that no query text leaks into the prefix, because
+  that failure is silent: answers stay correct and only the bill changes.
+
+  The reorder also turned out **not to be accuracy-neutral: 90.5% → 94.8%**,
+  same model, same candidates, same wording, only the block order different.
+  It was done for caching; the accuracy was re-measured only because changing
+  a measured prompt invalidates its number, and the gain was the surprise.
+  Worth remembering as a class: **prompt layout moved this corpus further than
+  any scoring change ever did.**
+
+  Also newly measured and recorded: **the whole published search story was
+  measured on a corpus nobody runs.** All the 13.3%/40% figures come from
+  5,216 tools across 131 servers; a real config is a handful of servers and a
+  few hundred tools. Lexical rank-1 barely moves across that range
+  (13.3% → 24.8%) but recall nearly doubles, so every number downstream of
+  retrieval was understated. `tests/real_search_probe.rs` grew
+  `realistic_catalogue_slices` and `unreachable_queries` to keep measuring it
+  (both env-gated, no-ops in CI).
+- **Skills go through the picker too**, in the same call as tools, from one
+  combined catalogue. Deliberately one pick rather than one per surface: the
+  prompt has no "none of these" escape, so a model asked separately "which
+  skill fits?" about a pure tool request will name one anyway, and geco would
+  promote that noise to rank 1 of the skill results. Asking once lets the
+  model answer the question actually being asked — the best capability here,
+  of either kind — and the surface it did not choose keeps its lexical order.
+
+  A skill is listed as `skill: name` rather than `server::name`, and a reply
+  echoing that label back resolves — models echoing the prompt's own shape is
+  not hypothetical, it cost an entire release of silently discarded picks with
+  `server::tool`. With no skill library configured the prompt is byte-identical
+  to the one the tool measurements were taken with, so adding this cannot
+  silently re-scope a published number.
+
+  **Unmeasured, and flagged as such.** There is no labelled skill corpus, so
+  the tool figures do not transfer; the mechanism is identical and the wiring
+  is tested end to end, but that is a different claim from "measured".
+- **An optional LLM tool picker** (`proxy.picker`) — the first thing that
+  crosses the lexical-vs-semantic wall instead of measuring it. Lexical
+  ranking puts the right tool first ~13% of the time when a request shares no
+  vocabulary with it; handing BM25F's top 50 to a model and asking which one
+  the user meant measures **40% rank-1 and 87% precision when the answer was
+  in the candidate list**, on the same 210 vocabulary-banned queries over the
+  same 5,216 real tools. The right-hand number is the interesting one: the
+  semantic judgement is close to solved and what is left is retrieval, which
+  is why the picker retrieves 50 rather than the caller's `limit` (recall@50
+  is 44% against recall@5's 22%, and no picker beats the recall of its own
+  candidate list — the same ceiling that doomed the earlier embedding-rerank
+  attempt, which was fed the top 5).
+
+  **Off by default**, and no new dependencies. geco ships no HTTP client: one
+  would drag a TLS stack into a binary whose pitch is no runtime
+  dependencies, to do what `curl` in a three-line script already does. You
+  bring the transport — MCP `sampling` (your client's own model, zero config)
+  or `command` (`opencode run …`, `claude -p`, a wrapper script). Every
+  failure degrades to the lexical order: unsupported, unreachable, timed out,
+  answered in prose, or naming a tool that does not exist. Enabling a picker
+  can cost latency; it cannot break search.
+- **The picker's MCP sampling transport actually works.** It was detected at
+  `initialize` and then quietly unimplemented — `Picker::pick` returned
+  `None` for it, which from the outside is indistinguishable from a picker
+  whose model agrees with lexical ranking every time. Now the peer is stashed
+  at `initialize` and `sampling/createMessage` really crosses the wire.
+  Proven by an end-to-end test (`tests/picker_e2e.rs`) that stands up a
+  real client over an in-memory duplex, with a control run that pins the
+  lexical order first so a picker doing nothing cannot pass.
+
+  A client that *advertises* sampling and then refuses to serve it — the
+  common case, since the capability is compiled in and the user declines — is
+  asked exactly **once per session**. Retrying on every search would cost a
+  doomed round-trip and, on clients that prompt, a dialog, for a lexical
+  answer geco was always going to return. Under `mode: auto` it then falls
+  through to a configured command. A command that fails is deliberately *not*
+  treated the same way: a failed spawn costs microseconds and no interaction,
+  and hot-reload can fix the path under a running proxy.
+- **The picker prompt now tells the model not to think**, which is worth more
+  than every ranking change ever measured on this corpus. Picking a tool is
+  classification, not reasoning. Same weights, same prompt, same candidates,
+  only the serving config differing: reasoning mode scored **8% rank-1 / 20%
+  precision**, reasoning off scored **28% / 70%**. It spent 1,125 completion
+  tokens deliberating over a one-line multiple-choice question and hit the
+  ceiling before emitting any JSON. Note the direction — 8% is *below* the
+  13.3% lexical baseline the feature exists to beat, so a deliberating model
+  is worse than no picker at all. The reply budget is sized for the answer
+  and not for the thinking, so a model that ignores the instruction truncates
+  into the lexical fallback rather than being rewarded for it.
+- **The picker is documented** (README "Crossing the wall", plus a commented
+  block in `geco.example.yaml`). It shipped with four config knobs reachable
+  only by reading `src/config.rs`, which is a feature that does not exist for
+  anyone who did not write it. `proxy.search_synonyms` was missing from the
+  `proxy` table for the same reason and is now listed.
 - **`docs/search-ranking.md`** — the permanent research log for search: the
   scorer, every change that was kept (with the measured evidence), every change
   that was **rejected and why** (stopword list, confidence annotation, symmetric

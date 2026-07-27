@@ -14,7 +14,7 @@ On macOS/Linux: `python3` (used by the install script for JSON verification). Ba
 bash install.sh
 ```
 
-Downloads the prebuilt binary for your platform, verifies its SHA-256 against the release's `SHA256SUMS`, and installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid). Then scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with exactly 8 meta-tools.
+Downloads the prebuilt binary for your platform, verifies its SHA-256 against the release's `SHA256SUMS`, and installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid). Then scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with the gateway meta-tools.
 
 Pass `--from-source` to build with cargo instead. That also happens automatically if no prebuilt binary matches your platform, or the download fails.
 
@@ -74,7 +74,7 @@ The entries are the same shape — copy, paste, add a `description` (that's what
 geco refresh     # snapshot the moved servers once
 ```
 
-Restart the agent. Context cost for those servers drops to ~4.7 KB flat.
+Restart the agent. Context cost for those servers drops to ~4.3 KB flat.
 
 > **Moving a server that reads a token from your shell? Read this.**
 > Since 0.7 a backend does **not** inherit geco's environment. A server that
@@ -184,4 +184,4 @@ skills in the library directly; the gateway's watcher picks them up, or run `gec
 
 ## Health toasts in opencode
 
-The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugins/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. You can also ask any model "is the geco gateway healthy?" — the `health` meta-tool answers with the failing backends and why.
+The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugins/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. From a shell, `geco health` reports the failing backends and why, and exits 1 when something is wrong. Asking the model works too: `list_mcp_servers` carries an `issues` key whenever the gateway has any. (There is no `health` meta-tool — 0.8.0 retired it. It cost every session 218 bytes of context to answer a question only ever asked once something is already broken, and the per-server half of its answer was already in `list_mcp_servers`.)

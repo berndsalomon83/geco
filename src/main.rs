@@ -309,6 +309,28 @@ async fn main() -> Result<()> {
                     config_path.display()
                 ),
             }
+
+            // A backend that would not answer is a failed refresh, and the
+            // exit code has to say so. It used to always return 0, which made
+            // both installers' "refresh reported issues" branches unreachable:
+            // a fresh install whose every example backend failed to spawn
+            // printed the status table and then declared success. `health` and
+            // `validate` both exit 1 on errors; this now matches them.
+            let failed: Vec<&str> = snap
+                .servers
+                .iter()
+                .filter(|(_, s)| s.refresh_status != "ok")
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if !failed.is_empty() {
+                eprintln!(
+                    "{} of {} servers failed to refresh: {}",
+                    failed.len(),
+                    snap.servers.len(),
+                    failed.join(", ")
+                );
+                std::process::exit(1);
+            }
         }
         Cmd::Validate => {
             let findings = cfg.validate();

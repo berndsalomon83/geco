@@ -219,8 +219,11 @@ fn refresh_nudges_a_running_proxy_without_editing_the_config() {
         .current_dir(dir.path())
         .output()
         .expect("run");
-    assert!(out.status.success(), "{}", stderr(&out));
-
+    // Exit status is deliberately NOT asserted here. `temp_config`'s backend
+    // is a stub that cannot complete an MCP handshake, so refresh now exits 1
+    // — see `refresh_exits_non_zero_when_a_backend_fails`. The nudge must
+    // happen anyway: a config whose backends are broken is precisely when a
+    // running proxy most needs to be told to reload.
     assert!(
         mtime(&cfg) > before_mtime,
         "`geco refresh` must bump the config mtime or a running proxy never \
@@ -244,6 +247,40 @@ fn mtime(p: &Path) -> std::time::SystemTime {
     std::fs::metadata(p)
         .and_then(|m| m.modified())
         .expect("mtime")
+}
+
+/// `geco refresh` used to exit 0 no matter how many backends failed, which
+/// made both installers' "refresh reported issues" branches unreachable — a
+/// fresh install whose every scaffolded backend failed to spawn printed the
+/// status table and then declared success. `health` and `validate` both exit
+/// 1 on errors; this must match them, and must name what failed rather than
+/// leaving the user to read a table.
+#[test]
+fn refresh_exits_non_zero_when_a_backend_fails() {
+    let (dir, cfg) = temp_config();
+    let out = geco()
+        .args(["--config", cfg.to_str().unwrap(), "refresh"])
+        .current_dir(dir.path())
+        .output()
+        .expect("run");
+
+    assert!(
+        !out.status.success(),
+        "a backend that will not answer is a failed refresh:\n{}",
+        stderr(&out)
+    );
+    let err = stderr(&out);
+    // On the rendered list, not a two-character substring: `contains(" t")`
+    // matches any word starting with t anywhere in the output, so it would
+    // stay green if the message were reduced to a bare count — the precise
+    // outcome this test says it prevents.
+    assert!(
+        err.contains("failed to refresh: t"),
+        "the exit code alone is not actionable — name the server:\n{err}"
+    );
+    // The snapshot is still written and the proxy still nudged. A broken
+    // config is exactly when a running proxy most needs to be told to reload.
+    assert!(err.contains("nudged"), "must still nudge:\n{err}");
 }
 
 /// `geco schema` is consumed by editors via `$schema`. Emitting anything that

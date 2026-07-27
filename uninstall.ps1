@@ -35,7 +35,13 @@ foreach ($p in @(
 )) {
     if (-not (Test-Path $p)) { continue }
     try {
-        $cfg = Get-Content $p -Raw | ConvertFrom-Json
+        # -Encoding UTF8 on the READ as well as the write. PowerShell 5.1
+        # decodes as ANSI by default, so without this the round-trip mangles
+        # every non-ASCII character elsewhere in the user's agent config — an
+        # accented path, a project name, an em-dash — while removing the geco
+        # entry correctly. The file stays valid JSON, so nothing errors and the
+        # damage is found much later. (A read hint only; it adds no BOM.)
+        $cfg = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json
         $changed = $false
         foreach ($key in @("mcp", "mcpServers")) {
             if ($cfg.$key -and $cfg.$key.PSObject.Properties["geco"]) {
@@ -45,7 +51,15 @@ foreach ($p in @(
         }
         if ($changed) {
             Copy-Item $p "$p.bak"
-            $cfg | ConvertTo-Json -Depth 10 | Set-Content $p
+            # NOT Set-Content: PowerShell 5.1 writes the system ANSI codepage,
+            # which would mangle any non-ASCII already in the user's agent
+            # config (a project name, an accented path) while rewriting it.
+            # UTF8Encoding($false) is UTF-8 with no BOM, which is what a JSON
+            # parser expects. Same trap as the schema write in install.ps1.
+            [System.IO.File]::WriteAllText(
+                $p,
+                ($cfg | ConvertTo-Json -Depth 10),
+                (New-Object System.Text.UTF8Encoding $false))
             Say "Removed geco from $p (backup: $p.bak)"
         }
     } catch {

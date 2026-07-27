@@ -102,11 +102,18 @@
           "default": []
         },
         "candidates": {
-          "description": "How many BM25F candidates to hand the model. Measured: 50 is the sweet\nspot — a wider net raises the recall ceiling but crowds the prompt with\ndistractors (precision 87% -> 73% at 200) and triples latency.",
+          "description": "How many BM25F candidates to hand the model when the whole catalogue\ndoes NOT fit in `whole_catalogue_tokens`. Above that threshold this is\nthe fallback, not the normal path.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 50
+        },
+        "whole_catalogue_tokens": {
+          "description": "When the entire tool catalogue fits in roughly this many tokens, hand\nthe model ALL of it and skip lexical retrieval for candidate selection\nentirely. `0` disables, always using `candidates`.\n\nThis is the single biggest measured win in the whole search story, and\nit works for a reason that inverts the usual intuition about retrieval.\nOn a realistic 8-server catalogue (324 tools), same model and prompt:\n\n| candidates | recall ceiling | rank-1 |\n|---|---|---|\n| BM25F top-50 | 82% | 74.6% |\n| every tool that scores | 91% | 78.5% |\n| **the whole catalogue** | **100%** | **94.8%** |\n\nPrecision did not fall under 7x the distractors — 90.5% against the\nshortlist's 90.7%, measured like for like, with the last 4 points\ncoming from putting the catalogue before the question rather than\nafter it. **BM25F does not select random distractors — it selects the\nmost confusable ones.** Every shortlisted candidate was chosen for\nsharing vocabulary with the query, so the shortlist is precisely the\nset of plausible wrong answers, while the tools it discards are mostly\nobvious non-answers a model rejects at a glance.\n\nIt is also FASTER, because the catalogue is then a stable prompt\nprefix: measured 0.9s against 2.2s for top-50, with 96.6% of the\nprompt served from cache.\n\nThe estimate is characters/4 and deliberately rough — it decides\nbetween two working modes, not whether a request succeeds.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 24000
         },
         "timeout_secs": {
           "description": "Seconds to wait before giving up and returning the lexical order.",

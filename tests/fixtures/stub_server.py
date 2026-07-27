@@ -10,6 +10,23 @@ snapshot/count assertions keep meaning what they say:
 """
 import json, os, sys, time
 
+# Record that this process started, so a test can count how many children geco
+# actually SPAWNED. Counting which child answered is not the same question:
+# geco hands every concurrent caller the winning connection, so N racing
+# spawns and one spawn look identical from the reply side. This file is the
+# only place the difference is visible.
+_spawn_log = os.environ.get("STUB_SPAWN_LOG")
+if _spawn_log:
+    with open(_spawn_log, "a") as _f:
+        _f.write(f"{os.getpid()}\n")
+
+# Start, record the start, then die before answering initialize — a backend
+# that fails its handshake for a reason geco can only discover by spawning it.
+# Counting the log lines is then the only way to tell "one attempt, seven
+# callers reusing its error" from "eight callers each failing on their own".
+if os.environ.get("STUB_DIE_AFTER_LOG"):
+    sys.exit(1)
+
 TOOLS = [
     {"name": "echo", "description": "Echo the input text back",
      "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
@@ -36,7 +53,17 @@ if os.environ.get("STUB_EXTRA_TOOLS"):
         {"name": "sleep", "description": "Block for `ms` milliseconds, then reply",
          "inputSchema": {"type": "object", "properties": {"ms": {"type": "number"}},
                          "required": ["ms"]}},
+        # A backend that answers with something other than text — the shape
+        # every screenshot tool uses, and the one geco used to flatten into a
+        # JSON string.
+        {"name": "screenshot", "description": "Reply with a text block and an image block",
+         "inputSchema": {"type": "object", "properties": {}}},
     ]
+
+# A 1x1 transparent PNG. The pixels are irrelevant; what matters is that the
+# reply carries a block whose type is not "text".
+PNG_1PX = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+           "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
 
 def reply(id_, result):
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}) + "\n")
@@ -89,6 +116,11 @@ for line in sys.stdin:
             })
             reply(id_, {"content": [{"type": "text", "text": "grown"}], "isError": False})
             notify("notifications/tools/list_changed")
+        elif name == "screenshot":
+            reply(id_, {"content": [
+                {"type": "text", "text": "captured"},
+                {"type": "image", "data": PNG_1PX, "mimeType": "image/png"},
+            ], "isError": False})
         elif name == "echo":
             reply(id_, {"content": [{"type": "text", "text": args.get("text", "")}], "isError": False})
         elif name == "add":

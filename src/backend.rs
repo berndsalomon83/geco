@@ -84,6 +84,24 @@ pub struct Backend {
     notify: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>>,
     conn: Mutex<Option<Conn>>,
     status: Mutex<Status>,
+    /// Single-flight for `connect_raw`, holding the last attempt's error.
+    ///
+    /// Deliberately NOT `conn`: this is held for the length of a spawn plus an
+    /// MCP handshake (up to `startup_timeout_secs`), and `check_health` and
+    /// `shutdown` must not queue behind that. It exists because a batched
+    /// `execute` used to have every call miss the cache at once and start its
+    /// own child — eight `npx` processes for one eight-call batch, seven of
+    /// them discarded seconds later. For a backend holding an exclusive
+    /// resource (a browser profile lock, a fixed port, a single-writer DB)
+    /// the winner could then fail *because* of the losers, and the user saw an
+    /// intermittent `backend_error` that vanished on retry.
+    connect_gate: Mutex<Option<String>>,
+    /// Bumped once per completed connect attempt, win or lose. A caller that
+    /// queued on the gate compares this against what it saw on arrival to tell
+    /// "nobody has tried yet" from "somebody just tried and failed" — without
+    /// which the queue would spawn N sequential doomed children instead of N
+    /// parallel ones, which is slower rather than better.
+    connect_epoch: std::sync::atomic::AtomicU64,
 }
 
 pub(crate) fn now() -> String {
@@ -99,6 +117,8 @@ impl Backend {
             notify: std::sync::OnceLock::new(),
             conn: Mutex::new(None),
             status: Mutex::new(Status::Cold),
+            connect_gate: Mutex::new(None),
+            connect_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -185,47 +205,65 @@ impl Backend {
     }
 
     /// Long-lived connection for tool execution (lazy, cached, self-healing).
+    ///
+    /// Single-flight: concurrent callers against a cold backend produce
+    /// exactly one child process, and every one of them gets that child's
+    /// connection — or, if it could not start, that child's error.
     async fn connection(&self, startup: Duration) -> Result<Conn> {
-        // Check for a live connection under the lock, but don't hold it
-        // across connect_raw — that can take up to startup_timeout_secs and
-        // would block check_health, shutdown, and concurrent calls.
+        use std::sync::atomic::Ordering;
+
+        // Warm path, and the only one that matters for throughput: no gate, no
+        // contention, just the cached handle. The `conn` lock is never held
+        // across a connect, so `check_health` and `shutdown` stay responsive
+        // while a cold start is in flight.
         {
             let guard = self.conn.lock().await;
             if let Some(c) = guard.as_ref() {
                 return Ok(c.clone());
             }
         }
-        // Connect without holding the lock.
-        match self.connect_raw(startup).await {
+
+        // Read the epoch BEFORE queueing, so that after the wait it can be
+        // compared against what actually happened while we were queued.
+        let seen = self.connect_epoch.load(Ordering::SeqCst);
+        let mut gate = self.connect_gate.lock().await;
+
+        // Someone connected while we waited — take theirs. This is the good
+        // case, and the reason nothing else spawns a child.
+        {
+            let guard = self.conn.lock().await;
+            if let Some(c) = guard.as_ref() {
+                return Ok(c.clone());
+            }
+        }
+        // Someone tried while we waited and left no connection behind, so they
+        // failed. Report their error rather than starting an identical child
+        // to fail the same way: for a batch of ten calls against a backend
+        // whose command is not installed, retrying in turn would serialise ten
+        // full startup timeouts where the answer was known after the first.
+        if self.connect_epoch.load(Ordering::SeqCst) != seen {
+            if let Some(err) = gate.as_ref() {
+                tracing::debug!(
+                    "backend '{}': a concurrent connect just failed — reusing its error",
+                    self.name
+                );
+                return Err(anyhow::anyhow!(err.clone()));
+            }
+        }
+
+        let result = self.connect_raw(startup).await;
+        // Bumped for win and loss alike: what a queued caller needs to know is
+        // that an attempt *completed*, not how it went.
+        self.connect_epoch.fetch_add(1, Ordering::SeqCst);
+        match result {
             Ok(c) => {
-                let mut guard = self.conn.lock().await;
-                if let Some(existing) = guard.as_ref() {
-                    // Another task won the race — our child process will be
-                    // dropped (killed by Drop on the Conn). Log it.
-                    tracing::info!(
-                        "backend '{}': concurrent connect race — discarding our connection, using winner's",
-                        self.name
-                    );
-                    return Ok(existing.clone());
-                }
-                *guard = Some(c.clone());
-                drop(guard);
+                *gate = None;
+                *self.conn.lock().await = Some(c.clone());
                 *self.status.lock().await = Status::Up { since: now() };
                 Ok(c)
             }
             Err(e) => {
-                let guard = self.conn.lock().await;
-                if let Some(existing) = guard.as_ref() {
-                    // Another task connected successfully while we failed.
-                    // Return their connection instead of the error — the
-                    // agent sees success, not a spurious backend_error.
-                    tracing::info!(
-                        "backend '{}': concurrent connect won after our failure — using winner's connection",
-                        self.name
-                    );
-                    return Ok(existing.clone());
-                }
-                drop(guard);
+                *gate = Some(e.to_string());
                 *self.status.lock().await = Status::Failed {
                     error: e.to_string(),
                     at: now(),

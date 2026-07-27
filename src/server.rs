@@ -162,6 +162,25 @@ pub struct Proxy {
     /// at initialize. Decides whether the picker can borrow the client's own
     /// model instead of needing a configured command.
     client_supports_sampling: Arc<RwLock<bool>>,
+    /// The live connection back to the client, stashed at initialize. The
+    /// picker's sampling transport needs it to call `create_message`, and a
+    /// `#[tool]` handler cannot reach the request context without changing
+    /// every meta-tool's signature.
+    peer: Arc<RwLock<Option<rmcp::Peer<RoleServer>>>>,
+    /// Set once a client that *advertised* sampling refuses to actually serve
+    /// it. Without this, every search for the rest of the session pays a
+    /// doomed round-trip — and on clients that prompt for approval, shows the
+    /// user a dialog — before falling back to the lexical order it was always
+    /// going to return.
+    sampling_broken: Arc<std::sync::atomic::AtomicBool>,
+    /// Consecutive searches where the picker produced no usable choice.
+    ///
+    /// A picker that never answers is indistinguishable from one that always
+    /// agrees with the lexical order: same results, just slower and more
+    /// expensive. Measured against a reasoning-enabled endpoint, that was 7 of
+    /// 8 searches. A streak is the only signal geco has that the feature the
+    /// user turned on is doing nothing at all.
+    picker_misses: Arc<std::sync::atomic::AtomicUsize>,
     metrics: Arc<RwLock<crate::health::Metrics>>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// (server, tool) pairs recently surfaced by `search`, so `execute` can
@@ -231,6 +250,122 @@ const RECENT_HITS_CAP: usize = 64;
 /// How many zero-result queries to keep in metrics. Bounded because this ends
 /// up in health.json on disk, and it's a diagnostic aid, not a query log.
 const RECENT_NO_MATCH_CAP: usize = 20;
+
+/// How many consecutive empty picks before geco says the picker is not working.
+/// Three, because one is noise and a misconfigured picker fails every time —
+/// the observed rate on a reasoning-enabled endpoint was 7 in 8.
+const PICKER_MISS_STREAK: usize = 3;
+
+/// One thing the picker may choose, from either surface, owned so it outlives
+/// the locks the two catalogues are read under.
+#[derive(Clone)]
+struct PickCandidate {
+    /// "tool" or "skill". Explicit rather than inferred from an empty server:
+    /// a config can name a server `""`, and a tool mistaken for a skill would
+    /// be hoisted into the wrong list.
+    kind: &'static str,
+    server: String,
+    name: String,
+    description: String,
+}
+
+impl PickCandidate {
+    /// Roughly what this entry costs in `Picker::catalogue_block`.
+    fn chars(&self) -> usize {
+        self.server.len() + self.name.len() + self.description.len() + 8
+    }
+}
+
+/// Every tool in the snapshot as picker candidates — when they fit.
+///
+/// `None` means "does not fit, use the lexical shortlist", which is also what
+/// a `budget_chars` of 0 means. Measured, the fitting case is worth 94.8%
+/// rank-1 against the shortlist's 74.6%: a lexical shortlist keeps exactly the
+/// candidates that share vocabulary with the query — the plausible wrong
+/// answers — and discards the ones a model would reject at a glance.
+///
+/// Counted in characters against a characters-per-token estimate rather than
+/// tokenised properly. geco has no tokenizer and will not grow one for this:
+/// both branches work, so a 20% error picks a slightly different mode and
+/// nothing else. Bails as soon as the budget is passed, so an enormous
+/// catalogue costs a partial walk rather than a full build.
+fn whole_catalogue(snap: &Snapshot, budget_chars: usize) -> Option<Vec<PickCandidate>> {
+    if budget_chars == 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut chars = 0usize;
+    for (server, s) in &snap.servers {
+        for t in &s.tools {
+            // 140 to match what `search_with` puts in a Hit, so both modes
+            // describe a tool identically. `catalogue_block` caps at 160.
+            let c = PickCandidate {
+                kind: "tool",
+                server: server.clone(),
+                name: t.name.clone(),
+                description: short_desc(&t.description, 140),
+            };
+            chars += c.chars();
+            if chars > budget_chars {
+                return None;
+            }
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// The same, for the skill library. Separate function rather than a generic
+/// one because the two sources share no shape, and a library is small enough
+/// that it nearly always fits whatever the tool catalogue left over.
+fn whole_skill_library(idx: &SkillIndex, budget_chars: usize) -> Option<Vec<PickCandidate>> {
+    if budget_chars == 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut chars = 0usize;
+    for s in &idx.skills {
+        let c = PickCandidate {
+            kind: "skill",
+            server: String::new(),
+            name: s.name.clone(),
+            description: short_desc(&s.description, 140),
+        };
+        chars += c.chars();
+        if chars > budget_chars {
+            return None;
+        }
+        out.push(c);
+    }
+    Some(out)
+}
+
+/// A few tokens describing a content block, for the JSON summary, so the model
+/// knows something arrived without the bytes being spelled out to it.
+///
+/// `bytes` is the base64 length, which is ~4/3 of the real payload — close
+/// enough to answer the only question the model has ("is this big?"), and
+/// cheaper than decoding to find out.
+fn describe_block(b: &ContentBlock) -> serde_json::Value {
+    match b {
+        ContentBlock::Image(i) => {
+            json!({"type": "image", "mime_type": i.mime_type, "bytes": i.data.len()})
+        }
+        ContentBlock::Audio(a) => {
+            json!({"type": "audio", "mime_type": a.mime_type, "bytes": a.data.len()})
+        }
+        ContentBlock::Resource(_) => json!({"type": "resource"}),
+        ContentBlock::ResourceLink(r) => json!({"type": "resource_link", "uri": r.uri}),
+        // Text never reaches here — it is flattened into `result` — but the
+        // match has to be total, and a silent drop would be the bug this
+        // whole function exists to fix.
+        ContentBlock::Text(_) => json!({"type": "text"}),
+        // `ContentBlock` is `#[non_exhaustive]`: a future MCP block type
+        // still gets attached and still gets announced, just without a
+        // description geco is not yet able to write.
+        _ => json!({"type": "unknown"}),
+    }
+}
 
 fn text_result(v: serde_json::Value) -> CallToolResult {
     let text = serde_json::to_string_pretty(&v).unwrap_or_else(|e| format!("serialize error: {e}"));
@@ -339,6 +474,9 @@ impl Proxy {
             config_issues: Arc::new(RwLock::new(Vec::new())),
             client: Arc::new(RwLock::new(None)),
             client_supports_sampling: Arc::new(RwLock::new(false)),
+            peer: Arc::new(RwLock::new(None)),
+            sampling_broken: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            picker_misses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             metrics: Arc::new(RwLock::new(metrics)),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             recent_search_hits: Arc::new(RwLock::new(std::collections::VecDeque::new())),
@@ -1039,44 +1177,246 @@ impl Proxy {
             let g = self.registry.read().await;
             (g.proxy.search_synonyms.clone(), g.proxy.picker.clone())
         };
-        let picker = crate::picker::Picker::from_config(
-            &picker_cfg,
-            *self.client_supports_sampling.read().await,
-        );
+        // A client that advertised sampling and then refused to serve it is
+        // treated, from the second search on, exactly like one that never
+        // advertised it — which lets `mode: auto` fall through to a configured
+        // command instead of being stuck on a transport that does not work.
+        let sampling_usable = *self.client_supports_sampling.read().await
+            && !self
+                .sampling_broken
+                .load(std::sync::atomic::Ordering::Relaxed);
+        let picker = crate::picker::Picker::from_config(&picker_cfg, sampling_usable);
 
-        if kind != "skills" {
+        // With a picker enabled, retrieve a WIDER net than the caller asked
+        // for: the model can only choose from what it is handed, and recall@50
+        // is 44% against recall@5's 22% (docs/search-ranking.md).
+        let retrieve = if picker.is_enabled() {
+            picker.candidates.max(limit)
+        } else {
+            limit
+        };
+        let skill_limit = if limit > 20 { 20 } else { limit };
+        let budget = picker.whole_catalogue_budget_chars();
+
+        // Both surfaces are ranked lexically FIRST, before any model
+        // round-trip, and each lock is released as soon as its list is copied
+        // out. That matters more than it looks: a pick can take 20 seconds
+        // (300 if the timeout is raised), and holding a read guard that long
+        // lets the next writer — a `tools/list_changed` rescan, a config
+        // hot-reload — queue, after which every subsequent reader queues
+        // behind *it*. The one a user feels is `execute`, whose trailing
+        // `publish_health` reads the snapshot: a tool call that already
+        // succeeded sits there until the picker returns, and the whole gateway
+        // looks hung on an unrelated request.
+        let (mut tool_hits, tool_pool) = if kind != "skills" {
             let snap = self.snapshot.read().await;
-            // With a picker enabled, retrieve a WIDER net than the caller
-            // asked for: the model can only choose from what it is handed, and
-            // recall@50 is 44% against recall@5's 22% (docs/search-ranking.md).
-            let retrieve = if picker.is_enabled() {
-                picker.candidates.max(limit)
+            let hits = search::search_with(&snap, &p.query, retrieve, &user_synonyms);
+            let pool = if picker.is_enabled() {
+                whole_catalogue(&snap, budget)
             } else {
-                limit
+                None
             };
-            let mut tool_hits = search::search_with(&snap, &p.query, retrieve, &user_synonyms);
+            (hits, pool)
+        } else {
+            (Vec::new(), None)
+        };
 
-            if picker.is_enabled() && tool_hits.len() > 1 {
-                let cands: Vec<crate::picker::Candidate<'_>> = tool_hits
+        let mut skills_configured = true;
+        let (mut skill_hits, skill_pool) = if kind != "tools" {
+            let idx = self.skills.read().await;
+            skills_configured = !idx.skills.is_empty();
+            // A wider net for the picker here too, for the same reason.
+            let take = if picker.is_enabled() {
+                retrieve.max(skill_limit)
+            } else {
+                skill_limit
+            };
+            let hits: Vec<(String, String)> = idx
+                .search_with(&p.query, take, &user_synonyms)
+                .into_iter()
+                .map(|s| (s.name.clone(), short_desc(&s.description, 160)))
+                .collect();
+            // Whatever the tool catalogue left. A library is small enough that
+            // this is nearly always the whole of it.
+            let spent: usize = tool_pool
+                .as_ref()
+                .map(|p| p.iter().map(PickCandidate::chars).sum())
+                .unwrap_or(0);
+            let pool = if picker.is_enabled() {
+                whole_skill_library(&idx, budget.saturating_sub(spent))
+            } else {
+                None
+            };
+            (hits, pool)
+        } else {
+            (Vec::new(), None)
+        };
+
+        // ONE pick across both surfaces, not one per surface. Two independent
+        // picks would force a choice on whichever surface the request has
+        // nothing to do with — the prompt has no "none of these" escape, so a
+        // model asked "which skill best fits?" about a pure tool request will
+        // name one anyway, and geco would promote that noise to rank 1. Asking
+        // once lets the model answer the question that was actually asked:
+        // what is the best capability here, of either kind.
+        // A query that scored NOTHING on either surface gets no pick at all.
+        //
+        // The prompt has no "none of these" answer, so a model handed the whole
+        // catalogue for "send an SMS to my mum" against a filesystem and a
+        // github server will still name something — and geco would return it as
+        // `count: 1`, the best match, to a request this gateway cannot serve.
+        // Finding nothing is a legitimate answer that `search` is careful to
+        // give (it deliberately does not return is_error for it), and
+        // whole-catalogue mode would otherwise make it unreachable: `count` 0
+        // could never happen again, which also silences `searches_no_match` and
+        // the `recent_no_match` log — the documented signal for a tool whose
+        // description does not say what it is for.
+        //
+        // This does not cost the case the feature exists for. A target that
+        // scores zero is reached whenever OTHER tools scored, which on any real
+        // catalogue is nearly always; the guard only fires when the request has
+        // no lexical footing anywhere at all.
+        let any_lexical_signal = !tool_hits.is_empty() || !skill_hits.is_empty();
+        let pool: Vec<PickCandidate> = if picker.is_enabled() && any_lexical_signal {
+            let mut pool = tool_pool.unwrap_or_else(|| {
+                tool_hits
                     .iter()
-                    .map(|h| crate::picker::Candidate {
-                        server: &h.server,
-                        tool: &h.tool,
-                        description: &h.description,
+                    .map(|h| PickCandidate {
+                        kind: "tool",
+                        server: h.server.clone(),
+                        name: h.tool.clone(),
+                        description: h.description.clone(),
                     })
-                    .collect();
-                // A pick hoists that tool to rank 1 and leaves the lexical
-                // order beneath it. No pick (unsupported, timeout, garbage
-                // reply) simply leaves the lexical order alone.
-                if let Some(idx) = picker.pick(&p.query, &cands).await {
-                    drop(cands);
-                    let chosen = tool_hits.remove(idx);
-                    tracing::debug!("picker chose {}::{}", chosen.server, chosen.tool);
-                    tool_hits.insert(0, chosen);
+                    .collect()
+            });
+            pool.extend(skill_pool.unwrap_or_else(|| {
+                skill_hits
+                    .iter()
+                    .map(|(name, description)| PickCandidate {
+                        kind: "skill",
+                        server: String::new(),
+                        name: name.clone(),
+                        description: description.clone(),
+                    })
+                    .collect()
+            }));
+            pool
+        } else {
+            Vec::new()
+        };
+
+        let mut chosen: Option<PickCandidate> = None;
+        if pool.len() > 1 {
+            let cands: Vec<crate::picker::Candidate<'_>> = pool
+                .iter()
+                .map(|c| crate::picker::Candidate {
+                    kind: c.kind,
+                    server: &c.server,
+                    tool: &c.name,
+                    description: &c.description,
+                })
+                .collect();
+            // Cloned rather than borrowed: holding the read guard across the
+            // pick would block every reconnect for the length of a model
+            // round-trip, and `Peer` is an Arc-backed handle.
+            let peer = self.peer.read().await.clone();
+            // A pick hoists that entry to rank 1 of its own list and leaves
+            // the lexical order beneath it. No pick (unsupported, timeout,
+            // garbage reply) simply leaves both orders alone.
+            match picker.pick(&p.query, &cands, peer.as_ref()).await {
+                crate::picker::Pick::Choice(idx) => {
+                    let c = &pool[idx];
+                    tracing::debug!("picker chose {} {}::{}", c.kind, c.server, c.name);
+                    chosen = Some(c.clone());
+                    self.picker_misses
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                }
+                crate::picker::Pick::NoChoice => {
+                    // Logged at the streak threshold, not per miss: one bad
+                    // reply is noise, and a line per search would bury the
+                    // signal in the noise it is trying to report. A later
+                    // success resets the count, so this stays quiet for a
+                    // picker that merely disagrees occasionally.
+                    let streak = self
+                        .picker_misses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    if streak == PICKER_MISS_STREAK {
+                        tracing::warn!(
+                            "picker: {PICKER_MISS_STREAK} consecutive searches produced no \
+                             usable choice, so every one paid for a model round-trip and \
+                             returned the lexical order anyway. Check the picker's model is \
+                             reachable, answers with JSON, and is NOT in reasoning mode."
+                        );
+                    }
+                }
+                // Said once, then never attempted again this session. The
+                // cause was already logged where it was seen; this line is
+                // the durable consequence.
+                crate::picker::Pick::TransportDead => {
+                    self.sampling_broken
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        "picker: sampling is not usable on this connection — \
+                         lexical ranking for the rest of the session"
+                    );
                 }
             }
-            tool_hits.truncate(limit);
-            let tool_hits = tool_hits;
+        }
+
+        // Apply the pick to whichever LEXICAL list it belongs to — that is
+        // what the caller gets back. The other list is left alone, which is
+        // the correct outcome: the model said the best answer is over here.
+        if let Some(c) = chosen {
+            if c.kind == "skill" {
+                match skill_hits.iter().position(|(name, _)| *name == c.name) {
+                    Some(pos) => {
+                        let hit = skill_hits.remove(pos);
+                        skill_hits.insert(0, hit);
+                    }
+                    None => skill_hits.insert(0, (c.name, c.description)),
+                }
+            } else {
+                match tool_hits
+                    .iter()
+                    .position(|h| h.server == c.server && h.tool == c.name)
+                {
+                    Some(pos) => {
+                        let hit = tool_hits.remove(pos);
+                        tool_hits.insert(0, hit);
+                    }
+                    // The model reached past the lexical shortlist entirely —
+                    // which is the entire point of whole-catalogue mode, and
+                    // happens on roughly one search in five. Without this the
+                    // best answer would be found and then thrown away.
+                    None => tool_hits.insert(
+                        0,
+                        search::Hit {
+                            server: c.server,
+                            tool: c.name,
+                            description: c.description,
+                            score: 0.0,
+                            coverage: 0.0,
+                        },
+                    ),
+                }
+            }
+        }
+
+        tool_hits.truncate(limit);
+        skill_hits.truncate(skill_limit);
+
+        if !tool_hits.is_empty() {
+            // Re-taken only for the schemas, and only when asked for. A
+            // refresh that landed during the pick means the caller gets the
+            // newer schema for a tool ranked against the older snapshot —
+            // which is the right way round: a stale schema is what gets
+            // executed and fails, a stale ranking is merely a stale ranking.
+            let snap = include_schema.then_some(()).map(|_| self.snapshot.clone());
+            let snap = match &snap {
+                Some(s) => Some(s.read().await),
+                None => None,
+            };
             for h in &tool_hits {
                 let mut entry = json!({
                     "kind": "tool",
@@ -1084,31 +1424,21 @@ impl Proxy {
                     "name": h.tool,
                     "description": h.description,
                 });
-                if include_schema {
+                if let Some(snap) = &snap {
                     if let Some(t) = snap.find_tool(&h.server, &h.tool) {
                         entry["input_schema"] = t.input_schema.clone();
                     }
                 }
                 results.push(entry);
             }
-            drop(snap);
         }
 
-        let mut skills_configured = true;
-        if kind != "tools" {
-            let idx = self.skills.read().await;
-            skills_configured = !idx.skills.is_empty();
-            if skills_configured {
-                let skill_limit = if limit > 20 { 20 } else { limit };
-                let skill_hits = idx.search_with(&p.query, skill_limit, &user_synonyms);
-                for s in &skill_hits {
-                    results.push(json!({
-                        "kind": "skill",
-                        "name": s.name,
-                        "description": short_desc(&s.description, 160),
-                    }));
-                }
-            }
+        for (name, description) in &skill_hits {
+            results.push(json!({
+                "kind": "skill",
+                "name": name,
+                "description": description,
+            }));
         }
 
         // Record what search did, so its effectiveness is measurable in
@@ -1167,7 +1497,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Execute 1–10 tool calls. Cross-backend calls run in parallel. Results returned in input order as {server, tool, ok, result/error}. A single call: execute({calls: [{server, tool, arguments}]})."
+        description = "Execute 1–10 tool calls. Cross-backend calls run in parallel. Results returned in input order as {server, tool, ok, result/error}. A single call: execute({calls: [{server, tool, arguments}]}). A tool that returns an image, audio or a resource lists it under `attachments` and the block itself follows the JSON."
     )]
     pub async fn execute(
         &self,
@@ -1222,17 +1552,26 @@ impl Proxy {
                             "tool": call.tool,
                             "ok": false,
                             "error": { "code": "unknown_server", "message": format!("server '{}' not found", call.server) },
-                        }), start.elapsed().as_millis() as u64, false);
+                        }), Vec::new(), start.elapsed().as_millis() as u64, false);
                     }
                 };
                 let was_down = !matches!(backend.status().await, crate::backend::Status::Up { .. });
                 match backend.call(&call.tool, call.arguments, &proxy_cfg).await {
                     Ok(result) => {
                         let elapsed = start.elapsed().as_millis() as u64;
-                        // Flatten text blocks for the convenience "result" field,
-                        // but also include the full structured "content" array so
-                        // non-text blocks (images, audio, resources) survive —
-                        // e.g. Playwright screenshots return ImageContent.
+                        // Text is flattened into the convenience `result`
+                        // field. Everything else — a screenshot, audio, an
+                        // embedded resource — is carried out of here as REAL
+                        // content blocks and re-attached to geco's own reply.
+                        //
+                        // It used to be serialized into the same JSON blob,
+                        // which was the worst of both worlds: a 200 KB PNG
+                        // became ~270 KB of base64 inside a *text* block, so
+                        // no client could render it and the model paid ~70k
+                        // tokens to not see an image. Meanwhile `result` read
+                        // "" — and `result` is the field the tool description
+                        // documents, so a model following the contract
+                        // concluded the screenshot returned nothing.
                         let text = result.content.iter()
                             .filter_map(|b| {
                                 if let ContentBlock::Text(t) = b { Some(t.text.as_str()) }
@@ -1240,9 +1579,10 @@ impl Proxy {
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let has_non_text = result.content.iter().any(|b| {
-                            !matches!(b, ContentBlock::Text(_))
-                        });
+                        let attachments: Vec<ContentBlock> = result.content.iter()
+                            .filter(|b| !matches!(b, ContentBlock::Text(_)))
+                            .cloned()
+                            .collect();
                         let ok = !result.is_error.unwrap_or(false);
                         let mut entry = json!({
                             "server": call.server,
@@ -1250,11 +1590,14 @@ impl Proxy {
                             "ok": ok,
                             "result": text,
                         });
-                        // Pass through the full content array when non-text
-                        // blocks are present so images/resources aren't lost.
-                        if has_non_text {
-                            entry["content"] = serde_json::to_value(&result.content)
-                                .unwrap_or(json!([]));
+                        // A descriptor, not the payload: this tells the model
+                        // something arrived and what it is, in a handful of
+                        // tokens, while the bytes ride along as content blocks
+                        // the client can actually render.
+                        if !attachments.is_empty() {
+                            entry["attachments"] = json!(attachments.iter()
+                                .map(describe_block)
+                                .collect::<Vec<_>>());
                         }
                         if !ok {
                             entry["error"] = json!({
@@ -1262,7 +1605,7 @@ impl Proxy {
                                 "message": text,
                             });
                         }
-                        (i, entry, elapsed, was_down)
+                        (i, entry, attachments, elapsed, was_down)
                     }
                     Err(e) => {
                         let elapsed = start.elapsed().as_millis() as u64;
@@ -1275,7 +1618,7 @@ impl Proxy {
                             "tool": call.tool,
                             "ok": false,
                             "error": { "code": code, "message": msg },
-                        }), elapsed, was_down)
+                        }), Vec::new(), elapsed, was_down)
                     }
                 }
             });
@@ -1292,11 +1635,15 @@ impl Proxy {
                 })
             })
             .collect();
+        // Non-text blocks, kept per call index so they can be re-attached in
+        // the caller's order rather than in whatever order the tasks finish.
+        let mut attachments: Vec<Vec<ContentBlock>> = vec![Vec::new(); n];
         let mut needs_health_update = false;
         while let Some(joined) = join.join_next().await {
             match joined {
-                Ok((i, result, latency_ms, was_down)) => {
+                Ok((i, result, blocks, latency_ms, was_down)) => {
                     results[i] = result;
+                    attachments[i] = blocks;
                     let server = results[i]["server"].as_str().unwrap_or("").to_string();
                     let ok = results[i]["ok"].as_bool().unwrap_or(false);
                     let code = results[i]["error"]["code"]
@@ -1347,7 +1694,16 @@ impl Proxy {
         if needs_health_update {
             self.publish_health().await;
         }
-        Ok(text_result(json!(results)))
+        // The JSON summary first — it is what the model reads and what the
+        // tool description promises — then the raw blocks, in call order, so a
+        // client renders the screenshot it asked for instead of receiving a
+        // page of base64 it has to pretend is prose.
+        let mut content = vec![ContentBlock::text(
+            serde_json::to_string_pretty(&json!(results))
+                .unwrap_or_else(|e| format!("serialize error: {e}")),
+        )];
+        content.extend(attachments.into_iter().flatten());
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(
@@ -1356,10 +1712,27 @@ impl Proxy {
     pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
         let idx = self.skills.read().await;
         if idx.skills.is_empty() {
-            return Ok(structured_err(
-                "no_skills",
-                "no skill libraries configured (configure `skills.dirs`)",
-            ));
+            // This tool is only advertised when `skills.dirs` is non-empty, so
+            // reaching here means the library IS configured and simply empty —
+            // the one state in which "configure `skills.dirs`" is guaranteed
+            // to be wrong advice. Every fresh install is in it: both
+            // installers scaffold `geco.example.yaml`, whose `dirs` points at
+            // a path most new users have never had, and geco then creates it
+            // empty. The old message sent the user to edit a setting that was
+            // never the problem.
+            //
+            // Nor is an empty library an error. `search` already returns
+            // count 0 rather than `is_error` for exactly this reason: a valid
+            // empty answer marked as a failed call tells the model the call
+            // itself broke.
+            let dirs = self.skill_dirs.read().await.clone();
+            return Ok(text_result(json!({
+                "skills": [],
+                "count": 0,
+                "searched": dirs,
+                "hint": "no skills found — the library is configured but empty. \
+                         A skill is a directory containing SKILL.md.",
+            })));
         }
         let out: Vec<_> = idx
             .skills
@@ -1430,7 +1803,7 @@ impl ServerHandler for Proxy {
     async fn initialize(
         &self,
         params: InitializeRequestParams,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         // Record who we're serving ("opencode", "claude-ai", …) so the health
         // file is tagged and the companion plugin only toasts for its client.
@@ -1441,6 +1814,14 @@ impl ServerHandler for Proxy {
         // hence the other transports.
         let sampling = params.capabilities.sampling.is_some();
         *self.client_supports_sampling.write().await = sampling;
+        // Keep the connection itself: `create_message` is a request *back* to
+        // the client, and this handler is the only place the peer is handed
+        // to us. A reconnect re-runs initialize, so a stale peer is replaced
+        // rather than accumulated — and a client that failed sampling on the
+        // previous connection gets a clean slate on the new one.
+        *self.peer.write().await = Some(ctx.peer.clone());
+        self.sampling_broken
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         tracing::debug!(
             "client '{}' sampling capability: {sampling}",
             params.client_info.name
@@ -1547,10 +1928,13 @@ mod param_tests {
             wire.len(),
             instr.len()
         );
-        // Measured at 3662 + 596 bytes; the budget leaves ~29% headroom.
+        // Measured at 3780 + 596 bytes; the budget leaves ~27% headroom.
         // Schema was 4305 with eight tools. `health` (218 B) and
         // `refresh_tools` (480 B) both became CLI commands, and describing
-        // list_mcp_servers' new `issues` field spent 56 B back.
+        // list_mcp_servers' new `issues` field spent 56 B back. A further
+        // 118 B went on telling `execute`'s caller that a tool returning an
+        // image lists it under `attachments` — bought deliberately, because
+        // an undocumented field is a field the model does not use.
         assert!(
             bytes <= 6000,
             "meta-tool surface grew to {bytes} bytes (budget 6000). This is the \

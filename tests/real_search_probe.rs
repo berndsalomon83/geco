@@ -299,8 +299,54 @@ fn recall_at_k_ceiling() {
     eprintln!("\nA reranker (LLM or embedding) fed top-K can never beat recall@K.\n");
 }
 
+/// Build the catalogue one query is asked against: the target's own server
+/// plus `slice_servers - 1` others, drawn deterministically so the same query
+/// always meets the same neighbours and a change in ranking is the only thing
+/// that can move a number. `slice_servers >= servers.len()` returns everything.
+fn slice_for(
+    full: &Snapshot,
+    servers: &[String],
+    q: &LQ,
+    qi: usize,
+    slice_servers: usize,
+) -> Snapshot {
+    if slice_servers >= servers.len() {
+        return full.clone();
+    }
+    let mut state = (qi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xDEAD_BEEF;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as usize
+    };
+    let mut chosen: Vec<&str> = Vec::new();
+    if full.servers.contains_key(&q.server) {
+        chosen.push(q.server.as_str());
+    }
+    let mut guard = 0;
+    while chosen.len() < slice_servers && guard < slice_servers * 64 {
+        guard += 1;
+        let cand = servers[next() % servers.len()].as_str();
+        if !chosen.contains(&cand) {
+            chosen.push(cand);
+        }
+    }
+    let mut slice = Snapshot::default();
+    for s in chosen {
+        if let Some(v) = full.servers.get(s) {
+            slice.servers.insert(s.to_string(), v.clone());
+        }
+    }
+    slice
+}
+
 /// Emit `{query, expected, candidates[]}` JSONL so an external LLM picker can
 /// be scored against the same labeled corpus. K and sample size from env.
+///
+/// `GECO_PICKER_SERVERS=8` scores against a REALISTIC catalogue instead of all
+/// 131 servers — the condition an actual user is in, and the one the published
+/// 40% figure does not describe.
 #[test]
 fn emit_picker_candidates() {
     let Some(out) = std::env::var("GECO_PICKER_OUT").ok() else {
@@ -326,11 +372,56 @@ fn emit_picker_candidates() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(50);
 
+    let slice_servers: usize = std::env::var("GECO_PICKER_SERVERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
+    let all_servers: Vec<String> = snap.servers.keys().cloned().collect();
+
     // Stride across the corpus so the sample spans models and domains.
     let stride = (queries.len() / take).max(1);
     let mut lines = Vec::new();
-    for q in queries.iter().step_by(stride).take(take) {
-        let cands: Vec<serde_json::Value> = geco::search::search(&snap, &q.query, k)
+    let mut reachable = 0usize;
+    let mut cand_total = 0usize;
+    // `GECO_PICKER_ALL=1` skips BM25F and offers the picker the ENTIRE
+    // catalogue. Not a tuning knob — a different architecture. Lexical
+    // retrieval drops any tool scoring zero, which caps recall at 90.5%
+    // regardless of K; handing over everything is the only way to reach 100%,
+    // and the question is what the extra distractors cost in precision.
+    let send_all = std::env::var("GECO_PICKER_ALL").is_ok();
+
+    for (qi, q) in queries.iter().enumerate().step_by(stride).take(take) {
+        let catalogue = slice_for(&snap, &all_servers, q, qi, slice_servers);
+        let hits: Vec<geco::search::Hit> = if send_all {
+            // Catalogue order: stable, and arbitrary with respect to the query,
+            // so no ranking signal leaks in through position.
+            catalogue
+                .servers
+                .iter()
+                .flat_map(|(server, s)| {
+                    s.tools.iter().map(move |t| geco::search::Hit {
+                        server: server.clone(),
+                        tool: t.name.clone(),
+                        description: geco::snapshot::short_desc(&t.description, 140),
+                        score: 0.0,
+                        coverage: 0.0,
+                    })
+                })
+                .collect()
+        } else {
+            geco::search::search(&catalogue, &q.query, k)
+        };
+        // Whether the picker even CAN be right on this case. Scoring without
+        // this conflates "the model chose badly" with "the answer was not on
+        // the menu", which are different problems with different fixes.
+        if hits
+            .iter()
+            .any(|h| h.server == q.server && h.tool == q.tool)
+        {
+            reachable += 1;
+        }
+        cand_total += hits.len();
+        let cands: Vec<serde_json::Value> = hits
             .into_iter()
             .map(|h| {
                 serde_json::json!({
@@ -350,8 +441,208 @@ fn emit_picker_candidates() {
             .to_string(),
         );
     }
+    let n = lines.len();
     std::fs::write(&out, lines.join("\n")).expect("write picker candidates");
-    eprintln!("wrote {} picker cases (K={k}) to {out}", lines.len());
+    eprintln!(
+        "wrote {n} picker cases (K={k}, servers={}) to {out}\n  \
+         mean candidates {:.0}, answer reachable in {:.1}% — that is the ceiling \
+         for any picker scored on this file",
+        if slice_servers == usize::MAX {
+            "all".to_string()
+        } else {
+            slice_servers.to_string()
+        },
+        cand_total as f64 / n as f64,
+        reachable as f64 * 100.0 / n as f64,
+    );
+}
+
+/// What does search do on a catalogue somebody actually runs?
+///
+/// Every number this project has published about ranking is measured against
+/// 5,216 tools from 131 servers, which is nobody's config. A real one is a
+/// handful of servers and a few hundred tools — a corpus 20x smaller, with 20x
+/// fewer distractors. Optimising against the 131-server number without knowing
+/// the realistic one risks solving a problem no user has.
+///
+/// Method: for each labeled query, build a catalogue of S servers consisting of
+/// the query's target server plus S-1 others drawn deterministically from the
+/// harvest, then rank within it. Every query stays scorable, so n is the full
+/// 210 at every size rather than a thinning subset.
+///
+/// Two caveats worth keeping, in the direction of "this is optimistic":
+/// the co-installed servers are drawn at random across 131 diverse repos,
+/// while a real config is topically clustered (a developer installs github
+/// AND gitlab AND a git server), which packs in more near-duplicates than
+/// random sampling does. And the queries are vocabulary-banned by
+/// construction, which is the hard end of real traffic.
+///
+///   GECO_HARVEST=… GECO_LABELED=… \
+///     cargo test --test real_search_probe realistic_catalogue -- --nocapture
+#[test]
+fn realistic_catalogue_slices() {
+    let Some(full) = load() else {
+        eprintln!("GECO_HARVEST not set — skipping");
+        return;
+    };
+    let Some(lpath) = std::env::var("GECO_LABELED").ok() else {
+        eprintln!("GECO_LABELED not set — skipping");
+        return;
+    };
+    let raw = std::fs::read_to_string(&lpath).expect("read labeled");
+    let w: LabeledWrapper = serde_json::from_str(&raw).expect("labeled JSON parses");
+    let queries: Vec<LQ> = w
+        .result
+        .map(|r| r.queries)
+        .or(w.queries)
+        .expect("no queries");
+
+    let servers: Vec<String> = full.servers.keys().cloned().collect();
+    // The last K is effectively unbounded, and it measures the thing K cannot
+    // fix: `rank_with` drops any document scoring <= 0, so a tool sharing no
+    // term with the query is not a badly-ranked candidate — it is NOT A
+    // CANDIDATE. The gap between `r@inf` and `in-cat` is the share of targets
+    // lexical retrieval cannot hand a picker at ANY width, and therefore the
+    // hard ceiling on everything built downstream of it.
+    let ks = [1usize, 5, 10, 20, 50, usize::MAX];
+
+    eprintln!(
+        "\n=== Realistic-catalogue slices ({} queries) ===",
+        queries.len()
+    );
+    eprintln!(
+        "{:>8}  {:>7}  {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}  {:>7}",
+        "servers", "tools", "r@1", "r@5", "r@10", "r@20", "r@50", "r@inf", "in-cat"
+    );
+
+    for slice_servers in [4usize, 8, 12, 20, 40, servers.len()] {
+        let mut hits = vec![0usize; ks.len()];
+        let mut in_catalogue = 0usize;
+        let mut tool_total = 0usize;
+
+        for (qi, q) in queries.iter().enumerate() {
+            let slice = slice_for(&full, &servers, q, qi, slice_servers);
+            tool_total += slice.servers.values().map(|s| s.tools.len()).sum::<usize>();
+
+            // Is the target even present? It is, by construction, unless the
+            // labeled set names a server the harvest does not have.
+            if slice
+                .servers
+                .get(&q.server)
+                .is_some_and(|s| s.tools.iter().any(|t| t.name == q.tool))
+            {
+                in_catalogue += 1;
+            }
+
+            let res = geco::search::search(&slice, &q.query, *ks.iter().max().unwrap());
+            if let Some(pos) = res
+                .iter()
+                .position(|h| h.server == q.server && h.tool == q.tool)
+            {
+                for (i, k) in ks.iter().enumerate() {
+                    if pos < *k {
+                        hits[i] += 1;
+                    }
+                }
+            }
+        }
+
+        let n = queries.len() as f64;
+        eprintln!(
+            "{:>8}  {:>7.0}  {:>6.1}% {:>6.1}% {:>6.1}% {:>6.1}% {:>6.1}% {:>6.1}%  {:>6.1}%",
+            chosen_label(slice_servers, servers.len()),
+            tool_total as f64 / n,
+            hits[0] as f64 * 100.0 / n,
+            hits[1] as f64 * 100.0 / n,
+            hits[2] as f64 * 100.0 / n,
+            hits[3] as f64 * 100.0 / n,
+            hits[4] as f64 * 100.0 / n,
+            hits[5] as f64 * 100.0 / n,
+            in_catalogue as f64 * 100.0 / n,
+        );
+    }
+    eprintln!(
+        "\n`tools` is the mean catalogue size. `in-cat` is the share of queries whose\n\
+         target is present at all — the ceiling for handing the picker EVERYTHING.\n\
+         Predicted picker accuracy = recall@K x precision(K); measured precision is\n\
+         87% at K=50 and 73% at K=200 distractors (docs/search-ranking.md).\n"
+    );
+}
+
+/// The 9.5% that no value of K reaches: queries whose target tool scores
+/// exactly zero, so `rank_with` never emits it as a candidate at all.
+///
+/// This is the hard floor under every downstream idea — a picker, a reranker
+/// and an embedding cross-encoder alike can only choose from what retrieval
+/// hands over. Printing the actual pairs is the point: they are the spec for
+/// whatever is meant to fix them, and reading twenty of them says more about
+/// whether description rewriting would work than any amount of argument.
+#[test]
+fn unreachable_queries() {
+    let Some(full) = load() else {
+        eprintln!("GECO_HARVEST not set — skipping");
+        return;
+    };
+    let Some(lpath) = std::env::var("GECO_LABELED").ok() else {
+        eprintln!("GECO_LABELED not set — skipping");
+        return;
+    };
+    let raw = std::fs::read_to_string(&lpath).expect("read labeled");
+    let w: LabeledWrapper = serde_json::from_str(&raw).expect("labeled JSON parses");
+    let queries: Vec<LQ> = w
+        .result
+        .map(|r| r.queries)
+        .or(w.queries)
+        .expect("no queries");
+
+    let mut unreachable = Vec::new();
+    for q in &queries {
+        // One server only: the smallest possible catalogue. If the target does
+        // not score even when it is competing with nothing but its own
+        // siblings, the query and the tool share no term at all — a corpus-size
+        // effect is ruled out by construction.
+        let mut solo = Snapshot::default();
+        if let Some(s) = full.servers.get(&q.server) {
+            solo.servers.insert(q.server.clone(), s.clone());
+        }
+        let res = geco::search::search(&solo, &q.query, usize::MAX);
+        if !res.iter().any(|h| h.tool == q.tool) {
+            let desc = full
+                .servers
+                .get(&q.server)
+                .and_then(|s| s.tools.iter().find(|t| t.name == q.tool))
+                .map(|t| t.description.clone())
+                .unwrap_or_default();
+            unreachable.push((q.query.clone(), q.tool.clone(), desc));
+        }
+    }
+
+    eprintln!(
+        "\n=== Zero-score targets: {} of {} ({:.1}%) ===",
+        unreachable.len(),
+        queries.len(),
+        unreachable.len() as f64 * 100.0 / queries.len() as f64
+    );
+    eprintln!("Alone with its own siblings, the right tool still does not score.\n");
+    for (q, tool, desc) in unreachable.iter().take(25) {
+        eprintln!("  query: {q}");
+        eprintln!("  tool:  {tool}");
+        eprintln!(
+            "  desc:  {}\n",
+            desc.chars()
+                .take(120)
+                .collect::<String>()
+                .replace('\n', " ")
+        );
+    }
+}
+
+fn chosen_label(n: usize, total: usize) -> String {
+    if n >= total {
+        format!("{n} (all)")
+    } else {
+        n.to_string()
+    }
 }
 
 #[test]

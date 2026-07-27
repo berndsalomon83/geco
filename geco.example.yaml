@@ -22,6 +22,35 @@ proxy:
   # inherit_env: true            # restore pre-0.7 behaviour (not recommended)
   # env_passthrough: ["NODE_*"]  # extra non-secret vars for every backend
 
+  # Words a query and a tool use differently for the same thing. Applied on
+  # top of the built-in table, matched after the same stemming.
+  # search_synonyms: [["k8s", "kubernetes"], ["repo", "repository"]]
+
+  # OPTIONAL LLM tool picker — off unless you turn it on. Lexical ranking
+  # puts the right tool first only ~13% of the time when the request shares
+  # no vocabulary with it; handing the candidates to a real model and asking
+  # which one you meant measured 3x better (40% rank-1, 87% precision when
+  # the answer was in the list). Costs a model round-trip per search. Every
+  # failure falls back to the lexical order, so this can add latency but
+  # cannot break search. See README "Crossing the wall".
+  # Serves skills as well as tools: one call over one combined catalogue, so
+  # the model answers "which capability fits" rather than being made to name
+  # a skill for a request that wanted a tool.
+  # picker:
+  #   mode: command        # off (default) | auto | sampling | command
+  #   # `sampling` borrows your CLIENT's model over MCP — zero config, but
+  #   # only works if your client implements it. `command` runs anything and
+  #   # reads stdout; `{prompt}` is substituted, or appended if absent.
+  #   command: ["opencode", "run", "--agent", "minimal", "{prompt}"]
+  #   # When the whole catalogue fits in roughly this many tokens, the model
+  #   # is shown EVERY tool and lexical retrieval is skipped. Measured on a
+  #   # realistic 8-server config: 94.8% rank-1 vs 74.6% for a top-50
+  #   # shortlist — and faster, because an unchanging catalogue is a prompt
+  #   # prefix the server can cache (96.6% cached, 0.9s vs 2.2s). 0 disables.
+  #   whole_catalogue_tokens: 24000
+  #   candidates: 50       # fallback shortlist, for catalogues over budget
+  #   timeout_secs: 20     # then give up and return the lexical order
+
 mcpServers:
   playwright:
     command: [npx, "@playwright/mcp@latest"]

@@ -32,7 +32,7 @@ The agent sees exactly six meta-tools:
 | `search` | Find tools AND skills by keywords in one call; `include_schema=true` for inline schemas; `kind="tools"` or `"skills"` to filter |
 | `execute` | Run 1–10 tool calls in one round-trip; cross-backend calls run in parallel; results in input order |
 
-Six, and that is the whole always-on surface — 3.6 KB of schema plus a short instruction, whatever hides behind it. Two things are deliberately *not* here: gateway health and manual refresh. Both are operator actions, and both live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
+Six, and that is the whole always-on surface — 4,376 bytes of schema plus a short instruction, whatever hides behind it. Two things are deliberately *not* here: gateway health and manual refresh. Both are operator actions, and both live on the CLI — see [reporting problems](#reporting-problems) and [hot reload](#hot-reload).
 
 
 Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it automatically at startup when your config changes (hash-based), or on demand — backends stay cold the rest of the time. A backend process starts only when `execute` first touches it, and is reused afterwards.
@@ -233,6 +233,64 @@ If a tool you know exists isn't surfacing, the fix is its `description`: that is
 
 Measured against 5,216 tools from ~150 real MCP servers, the measured floor on *pure-intent* queries — where a user describes a goal in words the tool never uses — is about **13% rank-1**. That is the lexical-vs-semantic wall, and no tuning or synonym crosses it. The full research log, including every change that was tried and **rejected** so nobody re-walks those roads, is in [docs/search-ranking.md](docs/search-ranking.md).
 
+### Crossing the wall: the LLM picker
+
+**Off by default.** No lexical trick crosses that 13% wall, because the problem isn't spelling — it's meaning. A model crosses it in one round-trip: show it the tools, ask which one the user actually meant, hoist that answer to rank 1.
+
+The measurements above are all against **5,216 tools from 131 servers, which nobody runs**. On a catalogue the size of a real config — eight servers, ~324 tools — measured over the same 210 vocabulary-banned queries:
+
+| what the model is shown | recall ceiling | **rank-1** | latency |
+|---|---|---|---|
+| nothing (lexical only) | — | 24.8% | µs |
+| BM25F's top 50 | 82% | 74.6% | 2.2 s |
+| **the whole catalogue** | **100%** | **94.8%** | **0.9 s** |
+
+Sending everything is both **more accurate and faster**, which sounds wrong twice over. Both have the same cause.
+
+*Accuracy:* precision did not fall under seven times the distractors — 90.5% against the shortlist's 90.7%, measured like for like — because **BM25F doesn't select random distractors, it selects the most confusable ones.** Every shortlisted candidate was chosen for sharing vocabulary with the query, so a shortlist is precisely the set of plausible wrong answers, while the tools it drops are mostly obvious non-answers a model rejects at a glance. The last 4 points came from something duller: putting the catalogue *before* the question rather than after it, which was done for caching and turned out to be worth 90.5% → 94.8% on its own.
+
+*Speed:* an unchanging catalogue is a **cacheable prompt prefix**. Measured at 15,243 prompt tokens: 96.6% served from cache, 13× faster than the same prompt reordered per call. A BM25F shortlist can never cache — it's recomputed per query by definition.
+
+So geco hands the model your whole catalogue whenever it fits in `whole_catalogue_tokens` (default ~24k, about 500 tools), and falls back to `candidates` best lexical hits above that. Nothing to tune for a normal config.
+
+**Skills go through the same picker**, in the same call, from one combined list — the model answers "what is the best capability here", of either kind, and whichever surface it didn't choose keeps its lexical order. Two separate picks would be worse, not better: the prompt has no "none of these" escape, so asking "which skill fits?" about a pure tool request gets an answer anyway, and that noise would land at rank 1. (The measurements above are for tools; the skill path is the same code and is tested end to end, but there's no labelled skill corpus yet, so it's unmeasured.)
+
+geco ships **no HTTP client** to do this. Adding one would drag a TLS stack into a binary whose whole pitch is no runtime dependencies, to do a job `curl` in a three-line script already does. You bring the transport:
+
+| `mode` | What it does |
+|---|---|
+| `off` | Lexical ranking only. The default. |
+| `sampling` | Ask your own client for its model via MCP `sampling/createMessage`. Zero config and no second model to pay for — but only works if your client implements sampling, which today most do not. |
+| `command` | Run any command and read its stdout: `opencode run …`, `claude -p`, `codex exec`, or a two-line wrapper around an OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, a hosted API). |
+| `auto` | Sampling if the client advertises it, else `command` if one is configured, else off. |
+
+```yaml
+proxy:
+  picker:
+    mode: command
+    command: ["opencode", "run", "--agent", "minimal", "{prompt}"]
+```
+
+`{prompt}` anywhere in the arguments is substituted; with no placeholder the prompt is appended as the final argument. The child is spawned with `GECO_NO_PICKER=1` so a nested geco can refuse to recurse.
+
+**Every failure degrades to the lexical order** — unsupported, unreachable, timed out, answered in prose, named a tool that doesn't exist. Enabling a picker can cost you latency; it cannot break search or return something that isn't yours. One asymmetry is deliberate: a client that *advertises* sampling and then refuses to serve it is asked exactly once per session, because otherwise every search would pay a doomed round-trip — and, on clients that prompt for approval, show you a dialog — for a lexical answer geco was always going to return.
+
+This is geco asking *your client* for a model, and it is the only thing that does: a backend behind the gateway still cannot reach your model (see [What geco proxies](#what-geco-proxies-and-what-it-doesnt) below).
+
+Cost is real and worth sizing before you enable it — but less than it looks, because the catalogue caches. A 324-tool catalogue is ~16k tokens, of which ~97% is served from the prompt cache after the first search; measured at 0.9s per search against a small model on a home GPU box. Above `whole_catalogue_tokens` the shortlist path is used and nothing caches, so that's the expensive mode, not the cheap one.
+
+| Key | Default | What it does |
+|---|---|---|
+| `picker.mode` | `off` | One of the four above. |
+| `picker.command` | `[]` | Argv for `command` mode. |
+| `picker.whole_catalogue_tokens` | 24000 | Show the model every tool when the catalogue fits in roughly this many tokens (~500 tools). `0` disables, always using `candidates`. |
+| `picker.candidates` | 50 | Fallback shortlist size, for catalogues over that budget. |
+| `picker.timeout_secs` | 20 | Give up and return the lexical order. |
+
+**If your endpoint serves a reasoning model, turn thinking off in the serving config.** Picking a tool is classification, not reasoning, and the same model on the same candidates scored 8% rank-1 with thinking on against 28% with it off — it spent 1,125 tokens deliberating over a multiple-choice question and hit the token ceiling before answering. Note the direction: **8% is below the 13.3% lexical baseline**, so a deliberating model is worse than no picker at all.
+
+The prompt does ask the model not to deliberate, and carries Qwen's `/no_think`, but that is a request and not a guarantee — measured against a real endpoint, neither it nor `enable_thinking: false` on the request changed anything, because the server's chat template decides. geco detects the symptom (empty replies, or three consecutive searches with no usable answer) and says so in the log, since otherwise it looks exactly like a picker that quietly agrees with lexical ranking.
+
 ### What geco proxies (and what it doesn't)
 
 geco proxies **tools**. Backend *resources* and *prompts* are not exposed
@@ -268,6 +326,8 @@ Gateway-wide settings, all optional:
 | `refresh_concurrency` | 8 | How many backends may be probed at once during a refresh. `0` = unlimited. Caps the process storm when many servers are configured. |
 | `inherit_env` | false | Give backends geco's whole environment (pre-0.7 behaviour). See above. |
 | `env_passthrough` | `[]` | Extra non-secret variables every backend receives, as globs. |
+| `search_synonyms` | `[]` | Extra interchangeable-word groups for ranking, e.g. `[["k8s","kubernetes"]]`. Applied on top of the built-in table; picked up on hot reload. |
+| `picker` | off | Optional LLM tool picker — see [Crossing the wall](#crossing-the-wall-the-llm-picker). |
 
 ### Secrets
 

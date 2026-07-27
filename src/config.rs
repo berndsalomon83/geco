@@ -96,10 +96,40 @@ pub struct PickerConfig {
     /// OpenAI-compatible endpoint with a small wrapper script — geco ships no
     /// HTTP client, deliberately.
     pub command: Vec<String>,
-    /// How many BM25F candidates to hand the model. Measured: 50 is the sweet
-    /// spot — a wider net raises the recall ceiling but crowds the prompt with
-    /// distractors (precision 87% -> 73% at 200) and triples latency.
+    /// How many BM25F candidates to hand the model when the whole catalogue
+    /// does NOT fit in `whole_catalogue_tokens`. Above that threshold this is
+    /// the fallback, not the normal path.
     pub candidates: usize,
+    /// When the entire tool catalogue fits in roughly this many tokens, hand
+    /// the model ALL of it and skip lexical retrieval for candidate selection
+    /// entirely. `0` disables, always using `candidates`.
+    ///
+    /// This is the single biggest measured win in the whole search story, and
+    /// it works for a reason that inverts the usual intuition about retrieval.
+    /// On a realistic 8-server catalogue (324 tools), same model and prompt:
+    ///
+    /// | candidates | recall ceiling | rank-1 |
+    /// |---|---|---|
+    /// | BM25F top-50 | 82% | 74.6% |
+    /// | every tool that scores | 91% | 78.5% |
+    /// | **the whole catalogue** | **100%** | **94.8%** |
+    ///
+    /// Precision did not fall under 7x the distractors — 90.5% against the
+    /// shortlist's 90.7%, measured like for like, with the last 4 points
+    /// coming from putting the catalogue before the question rather than
+    /// after it. **BM25F does not select random distractors — it selects the
+    /// most confusable ones.** Every shortlisted candidate was chosen for
+    /// sharing vocabulary with the query, so the shortlist is precisely the
+    /// set of plausible wrong answers, while the tools it discards are mostly
+    /// obvious non-answers a model rejects at a glance.
+    ///
+    /// It is also FASTER, because the catalogue is then a stable prompt
+    /// prefix: measured 0.9s against 2.2s for top-50, with 96.6% of the
+    /// prompt served from cache.
+    ///
+    /// The estimate is characters/4 and deliberately rough — it decides
+    /// between two working modes, not whether a request succeeds.
+    pub whole_catalogue_tokens: usize,
     /// Seconds to wait before giving up and returning the lexical order.
     pub timeout_secs: u64,
 }
@@ -110,6 +140,11 @@ impl Default for PickerConfig {
             mode: "off".into(),
             command: Vec::new(),
             candidates: 50,
+            // ~500 tools. Comfortably covers a realistic catalogue (a
+            // 324-tool config measured 16k tokens) while staying inside a
+            // 32k window, which is the floor for local models. The side call
+            // carries no conversation, so this competes with nothing.
+            whole_catalogue_tokens: 24_000,
             timeout_secs: 20,
         }
     }
