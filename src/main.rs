@@ -301,6 +301,35 @@ async fn main() -> Result<()> {
         no_refresh: false,
     }) {
         Cmd::Refresh => {
+            // Absorb stray skills before rebuilding the snapshot, so a skill
+            // dropped in an absorb dir is swept into the library and shows up
+            // in the very same refresh — same contract the running proxy
+            // offers at startup and on its watcher. Without this, `geco
+            // refresh` only probes backends; absorb runs solely in the live
+            // proxy (Server::new + watcher), so a refresh with no proxy
+            // running left the native dir full and the library stale.
+            if !cfg.skills.absorb.is_empty() {
+                if let Some(library) = cfg.skills.dirs.first() {
+                    let (moved, errors) =
+                        geco::skills::absorb_into(library, &cfg.skills.absorb);
+                    if !moved.is_empty() {
+                        eprintln!(
+                            "absorbed {} stray skill(s) into the library: {}",
+                            moved.len(),
+                            moved.join(", ")
+                        );
+                    }
+                    for e in &errors {
+                        eprintln!("skill absorb: {e}");
+                    }
+                } else {
+                    eprintln!(
+                        "note: skills.absorb configured but skills.dirs is \
+                         empty — nothing to absorb into"
+                    );
+                }
+            }
+
             let snap = registry.build_snapshot(hash, None).await;
             snap.save(&snapshot_path)?;
             for (name, s) in &snap.servers {

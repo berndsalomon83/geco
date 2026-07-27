@@ -373,3 +373,58 @@ fn missing_config_explains_itself() {
         "the error should mention the config:\n{text}"
     );
 }
+
+/// `geco refresh` must sweep skills from `skills.absorb` dirs into the first
+/// `skills.dirs` entry — the same contract the running proxy offers at
+/// startup and on its watcher. Without this, a refresh run with no proxy
+/// alive left stray skills in the native dir and the library stale. This is
+/// the regression guard for bug #1 found by the 50-skill stress test.
+#[test]
+fn refresh_absorbs_stray_skills_into_the_library() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let library = dir.path().join("library");
+    let absorb = dir.path().join("native");
+    std::fs::create_dir_all(&library).expect("mk library");
+    std::fs::create_dir_all(&absorb).expect("mk absorb");
+
+    // A stray skill in the absorb dir.
+    let stray = absorb.join("stray-skill");
+    std::fs::create_dir_all(&stray).expect("mk skill dir");
+    std::fs::write(
+        stray.join("SKILL.md"),
+        "---\nname: stray-skill\ndescription: dropped in the native dir\n---\n\n# Body\n",
+    )
+    .expect("write SKILL.md");
+
+    let cfg = dir.path().join("geco.yaml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "skills:\n  dirs: [\"{lib}\"]\n  absorb: [\"{nat}\"]\nmcpServers:\n  t:\n    command: [\"cargo\", \"--version\"]\n    description: \"probe\"\n",
+            lib = library.display(),
+            nat = absorb.display(),
+        ),
+    )
+    .expect("write config");
+
+    let out = geco()
+        .args(["--config", cfg.to_str().unwrap(), "refresh"])
+        .current_dir(dir.path())
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+
+    // The skill must have moved into the library and out of the absorb dir.
+    assert!(
+        library.join("stray-skill").join("SKILL.md").is_file(),
+        "refresh must move stray skills into skills.dirs[0]:\n{err}"
+    );
+    assert!(
+        !absorb.join("stray-skill").exists(),
+        "refresh must empty the absorb dir of moved skills:\n{err}"
+    );
+    assert!(
+        err.contains("absorbed 1 stray skill"),
+        "refresh should report the absorb:\n{err}"
+    );
+}

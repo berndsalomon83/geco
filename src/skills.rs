@@ -83,9 +83,57 @@ fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
         if let Ok(fm) = serde_norway::from_str::<Frontmatter>(candidate) {
             return Some(fm);
         }
+        // Parse failed. The most common cause is an unquoted scalar value
+        // containing ": " (colon-space), which YAML reads as a nested
+        // mapping ("mapping values are not allowed in this context"). A
+        // SKILL.md description like "phases: initiation, elongation" hits
+        // this and the skill silently loses its description. Retry with
+        // every plain-scalar value line double-quoted, which makes the
+        // colons literal. Only reached on failure, so the happy path is
+        // untouched.
+        let quoted = quote_plain_scalar_values(candidate);
+        if quoted != candidate {
+            if let Ok(fm) = serde_norway::from_str::<Frontmatter>(&quoted) {
+                return Some(fm);
+            }
+        }
         // Parse failed — this --- was inside a block scalar. Keep searching.
         search_from = abs + 4;
     }
+}
+
+/// Double-quote any `key: value` line whose value is an unquoted scalar
+/// containing ": " (colon-space). Leaves already-quoted, block-scalar, or
+/// colon-free values alone. Used only as a retry after a strict parse fails,
+/// to rescue SKILL.md frontmatter whose description has a mid-sentence colon.
+fn quote_plain_scalar_values(frontmatter: &str) -> String {
+    frontmatter
+        .lines()
+        .map(|line| {
+            // Skip lines that are already quoted or use a block scalar
+            // indicator, and lines with no `key: value` structure.
+            let Some((key, val)) = line.split_once(':') else {
+                return line.to_string();
+            };
+            let val = val.trim_start();
+            if val.is_empty()
+                || val.starts_with('"')
+                || val.starts_with('\'')
+                || val.starts_with('|')
+                || val.starts_with('>')
+            {
+                return line.to_string();
+            }
+            // Only needs quoting when the value itself contains ": ".
+            if !val.contains(": ") {
+                return line.to_string();
+            }
+            // Double-quote, escaping inner quotes and backslashes.
+            let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("{key}: \"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn expand_tilde(p: &str) -> PathBuf {
@@ -398,6 +446,40 @@ mod tests {
                 .expect("frontmatter should parse");
         assert_eq!(fm.name.as_deref(), Some("a"));
         assert_eq!(fm.description, "d");
+    }
+
+    #[test]
+    fn frontmatter_description_with_colon_space_is_rescued() {
+        // An unquoted scalar value containing ": " (colon-space) is valid
+        // prose but invalid YAML — "mapping values are not allowed in this
+        // context". Without the quote-retry the skill silently loses its
+        // description and becomes invisible to search. This is the exact
+        // case found by the 50-skill stress test (stress-38: "phases:
+        // initiation, elongation").
+        let fm = parse_frontmatter(
+            "---\nname: stress-38\ndescription: Animated walkthrough of ribosome translation phases: initiation, elongation, and termination at codon resolution.\n---\n\n# Body\n",
+        )
+        .expect("colon-space description must parse via the quote-retry");
+        assert_eq!(fm.name.as_deref(), Some("stress-38"));
+        assert_eq!(
+            fm.description,
+            "Animated walkthrough of ribosome translation phases: initiation, elongation, and termination at codon resolution."
+        );
+    }
+
+    #[test]
+    fn frontmatter_description_with_colon_space_and_quotes_is_escaped() {
+        // The quote-retry must escape inner double quotes and backslashes,
+        // not just wrap the value. A description that already contains a
+        // quoted phrase round-trips intact.
+        let fm = parse_frontmatter(
+            "---\nname: q\ndescription: She said \"hello: world\" and left C:\\Users\\x\n---\n\n# Body\n",
+        )
+        .expect("colon-space with quotes must parse and escape");
+        assert_eq!(
+            fm.description,
+            "She said \"hello: world\" and left C:\\Users\\x"
+        );
     }
 
     #[test]
