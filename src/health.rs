@@ -106,6 +106,13 @@ pub struct Metrics {
     pub skill_surfaces: u64,
     /// Successful `read_skill` calls — a skill that actually got used.
     pub skill_reads: u64,
+    /// Calls per meta-tool. The always-on surface is the one cost geco makes a
+    /// promise about, so which of those tools a model ACTUALLY reaches for is
+    /// the number that should decide whether any of them keeps its bytes.
+    /// Without this the question can only be argued, and in this project
+    /// roughly 30% of confident-looking predictions survive measurement.
+    #[serde(default)]
+    pub per_meta_tool: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

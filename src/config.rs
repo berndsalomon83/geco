@@ -73,6 +73,28 @@ pub struct ProxyConfig {
     /// user meant measured 3x better (see docs/search-ranking.md). Off by
     /// default — it costs a round-trip per search.
     pub picker: PickerConfig,
+    /// How many meta-tools to advertise: `full` (default) or `lean`.
+    ///
+    /// `lean` serves only `search`, `execute` and `read_skill`, hiding
+    /// `list_mcp_servers`, `list_tools` and `list_skills`. Those three are
+    /// ~1 KB of the always-on surface — about a quarter of it — and everything
+    /// they do is reachable another way:
+    ///
+    /// - browsing what exists → `search("*")`, which returns one entry per
+    ///   server (and every skill), and is also volunteered automatically in
+    ///   the hint whenever a search matches nothing
+    /// - a tool's input schema → `search(include_schema=true)`
+    /// - gateway problems → the `issues` key, which rides on every `search`
+    ///   response that needs it
+    ///
+    /// The one thing genuinely lost is enumerating a single server's whole
+    /// tool list; `search("*")` previews five names per server, and
+    /// `geco inspect` has the rest for humans.
+    ///
+    /// Left at `full` by default until there is evidence rather than a
+    /// prediction — `geco stats` now counts calls per meta-tool, so a real
+    /// session answers whether the browse path is used at all.
+    pub surface: String,
 }
 
 /// How (and whether) to ask a language model which candidate tool a request
@@ -162,11 +184,20 @@ impl Default for ProxyConfig {
             refresh_concurrency: 8,
             search_synonyms: Vec::new(),
             picker: PickerConfig::default(),
+            surface: "full".into(),
         }
     }
 }
 
 impl ProxyConfig {
+    /// True when only `search` / `execute` / `read_skill` should be served.
+    /// Anything that is not "lean" means the full surface, so a typo costs a
+    /// user the tools they expected rather than silently taking away tools
+    /// they never asked to lose.
+    pub fn lean_surface(&self) -> bool {
+        self.surface.eq_ignore_ascii_case("lean")
+    }
+
     pub fn env_policy(&self) -> EnvPolicy {
         EnvPolicy {
             inherit: self.inherit_env,

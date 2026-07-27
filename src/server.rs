@@ -218,6 +218,18 @@ const INSTRUCTIONS_BASE: &str =
      (1–10 calls in one round-trip, cross-backend parallel), or \
      list_mcp_servers → list_tools → execute. Backends start lazily on first execution.";
 
+/// The `proxy.surface: lean` variant: no browse tools, so the flow that
+/// mentions them would be an instruction to call something that is not served.
+/// Shorter than the full text, which is part of the point — these bytes are
+/// always-on too, so trimming the surface and then keeping its instructions
+/// would give back a chunk of the saving.
+const INSTRUCTIONS_LEAN: &str =
+    "Gateway to multiple MCP servers whose tools load on demand instead of \
+     polluting your context. Flow: search (include_schema=true for input \
+     schemas inline; kind=\"tools\" or \"skills\" to filter) → execute (1–10 \
+     calls in one round-trip, cross-backend parallel). Search \"*\" to see \
+     what servers are behind the gateway. Backends start lazily on first execution.";
+
 /// Appended only when a skill library actually exists.
 ///
 /// Skills are a "push" resource: nothing in a user's request names one, so the
@@ -255,6 +267,63 @@ const RECENT_NO_MATCH_CAP: usize = 20;
 /// Three, because one is noise and a misconfigured picker fails every time —
 /// the observed rate on a reasoning-enabled endpoint was 7 in 8.
 const PICKER_MISS_STREAK: usize = 3;
+
+/// The query that means "show me what is behind the gate".
+///
+/// A documented sentinel VALUE rather than a second tool, or an argument whose
+/// absence changes the answer. That distinction is the whole reason this works:
+/// a model choosing between named tools is doing selection, which is what it is
+/// good at, while inferring behaviour from a missing argument is not — and here
+/// the trigger is spelled out in the tool description it already reads.
+const OVERVIEW_QUERY: &str = "*";
+
+/// One line per server: what it is, how much is behind it, and a few names.
+///
+/// The same shape every other search result has — `kind`/`name`/`description`
+/// — with `kind: "server"` added rather than a new response format, because a
+/// response whose shape depends on its input is a trap for anything parsing it.
+fn server_overview(snap: &Snapshot) -> Vec<serde_json::Value> {
+    snap.servers
+        .iter()
+        .map(|(name, s)| {
+            let preview: Vec<&str> = s.tools.iter().take(5).map(|t| t.name.as_str()).collect();
+            let mut e = json!({
+                "kind": "server",
+                "name": name,
+                "description": short_desc(&s.description, 160),
+                "tools": s.tools.len(),
+                "tool_preview": preview,
+            });
+            // Only when it is not "ok" — a healthy gateway should not spend
+            // tokens saying so once per server on every overview.
+            if s.refresh_status != "ok" && !s.refresh_status.is_empty() {
+                e["status"] = json!(s.refresh_status);
+            }
+            e
+        })
+        .collect()
+}
+
+/// The compact form, for the hint on a search that matched nothing.
+///
+/// This is the half that needs no cleverness from the model: it arrives
+/// automatically, exactly when a miss raises the question it answers — is this
+/// my wording, or does the gateway simply not have it?
+fn server_summary_line(snap: &Snapshot) -> String {
+    let mut parts: Vec<String> = snap
+        .servers
+        .iter()
+        .map(|(name, s)| format!("{name} ({} tools)", s.tools.len()))
+        .collect();
+    // Bounded: an overview that costs more than the answer is not a hint.
+    const MAX: usize = 12;
+    if parts.len() > MAX {
+        let rest = parts.len() - MAX;
+        parts.truncate(MAX);
+        parts.push(format!("+{rest} more"));
+    }
+    parts.join(", ")
+}
 
 /// One thing the picker may choose, from either surface, owned so it outlives
 /// the locks the two catalogues are read under.
@@ -448,18 +517,41 @@ impl Proxy {
         // call, so a client cannot reach a capability that isn't configured.
         // Note this is decided once, at construction: adding skills.dirs to a
         // running proxy needs a restart before the two tools appear.
+        // Read off the registry rather than taking a seventh parameter: the
+        // config is already in hand, and every caller stays untouched. Like the
+        // skills gate above, this is decided once at construction — flipping
+        // `proxy.surface` on a running proxy needs a restart, because the
+        // router is built here and hot-reload does not rebuild it.
+        let lean = registry.proxy.lean_surface();
         let mut tool_router = Self::tool_router();
         if skill_dirs.is_empty() {
             tool_router.disable_route("list_skills");
             tool_router.disable_route("read_skill");
         }
+        // The lean surface: `search` / `execute` / `read_skill` only. The three
+        // browse tools are ~1 KB of the ~4.4 KB every session carries, and
+        // nothing they do is unreachable — `search("*")` is the catalogue,
+        // `search(include_schema=true)` is the schema, and gateway `issues`
+        // ride on every search response that needs them. What actually goes is
+        // enumerating ONE server's full tool list; `search("*")` previews five
+        // names each and `geco inspect` has the rest for a human.
+        if lean {
+            tool_router.disable_route("list_mcp_servers");
+            tool_router.disable_route("list_tools");
+            tool_router.disable_route("list_skills");
+        }
 
         // Only claim skills exist when some were actually found. A count of
         // zero would be a lie, and a nudge towards an empty library wastes a
         // call on every task.
+        let base = if lean {
+            INSTRUCTIONS_LEAN
+        } else {
+            INSTRUCTIONS_BASE
+        };
         let instructions = match skills.skills.len() {
-            0 => INSTRUCTIONS_BASE.to_string(),
-            n => format!("{INSTRUCTIONS_BASE}{}", skill_instructions(n)),
+            0 => base.to_string(),
+            n => format!("{base}{}", skill_instructions(n)),
         };
 
         Self {
@@ -485,6 +577,36 @@ impl Proxy {
             tool_router,
             instructions,
         }
+    }
+
+    /// Count one meta-tool call. The always-on surface is the one cost geco
+    /// makes a promise about, so which of those tools a model actually reaches
+    /// for is the number that decides whether any of them keeps its bytes.
+    async fn count_meta_tool(&self, name: &str) {
+        let mut m = self.metrics.write().await;
+        *m.per_meta_tool.entry(name.to_string()).or_insert(0) += 1;
+    }
+
+    /// Attach gateway problems to a response, when there are any.
+    ///
+    /// Health used to live on `list_mcp_servers`, which the lean surface does
+    /// not serve — and before that in a `health` meta-tool that 0.8.0 retired
+    /// for costing every session 218 bytes to answer a question only asked
+    /// once something is already broken. Riding on `search` costs nothing at
+    /// all: it is a response field, omitted when healthy, on the tool the
+    /// model calls most.
+    async fn attach_issues(&self, body: &mut serde_json::Value) {
+        let issues = self.all_issues().await;
+        if issues.is_empty() {
+            return;
+        }
+        body["issues"] = json!(issues
+            .iter()
+            .map(|i| json!({
+                "kind": i.kind, "subject": i.subject,
+                "detail": i.detail, "severity": i.severity
+            }))
+            .collect::<Vec<_>>());
     }
 
     /// Watch for backends reporting `tools/list_changed` and re-scan just that
@@ -1046,6 +1168,7 @@ impl Proxy {
         description = "List the MCP servers behind this proxy: name, what it's for, tool count, running state, and a preview of up to 5 tool names. Reports gateway problems in `issues` when there are any. Start here."
     )]
     pub async fn list_mcp_servers(&self) -> Result<CallToolResult, McpError> {
+        self.count_meta_tool("list_mcp_servers").await;
         let servers: Vec<_> = {
             let snap = self.snapshot.read().await;
             snap.servers.iter()
@@ -1110,6 +1233,7 @@ impl Proxy {
         &self,
         Parameters(p): Parameters<ListToolsParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.count_meta_tool("list_tools").await;
         let snap = self.snapshot.read().await;
         let Some(server) = snap.servers.get(&p.server) else {
             return Ok(structured_err_ctx(
@@ -1170,6 +1294,59 @@ impl Proxy {
         let limit = p.limit.unwrap_or(8).clamp(1, 25) as usize;
         let include_schema = p.include_schema.unwrap_or(false);
         let mut results = Vec::new();
+        self.count_meta_tool("search").await;
+
+        // `search("*")` is the browse path: what is behind the gate, rather
+        // than what matches a query. Deliberately NOT truncated to `limit` —
+        // an overview that stops after eight entries is not an overview, and
+        // this is bounded by how many servers and skills exist, not by how
+        // many tools hide behind them.
+        if p.query.trim() == OVERVIEW_QUERY {
+            // Servers only unless skills were asked for by name. A broad
+            // question should get a compact answer: a library of a hundred
+            // skills would otherwise bury the servers under a wall of text
+            // that nothing in the question asked for.
+            //
+            // Skills are not dropped, they are COUNTED — one number is a few
+            // tokens where the list is hundreds, and it still tells the model
+            // they exist and names the one call that shows them. That matters
+            // because skills are a push resource: nothing in a user's request
+            // names one, so if the model is never told they are there it will
+            // not go looking.
+            let hint = if kind == "skills" {
+                let idx = self.skills.read().await;
+                for s in &idx.skills {
+                    results.push(json!({
+                        "kind": "skill",
+                        "name": s.name,
+                        "description": short_desc(&s.description, 160),
+                    }));
+                }
+                "every skill in the library. read_skill fetches one.".to_string()
+            } else {
+                {
+                    let snap = self.snapshot.read().await;
+                    results.extend(server_overview(&snap));
+                }
+                let skills = self.skills.read().await.skills.len();
+                let mut h = "the servers behind this gateway. Search by keyword for a \
+                             specific capability, then execute — a server's full tool \
+                             list is not here, only a preview."
+                    .to_string();
+                if skills > 0 {
+                    h.push_str(&format!(
+                        " {skills} skill(s) are also available: search \"*\" with \
+                         kind=\"skills\" to list them."
+                    ));
+                }
+                h
+            };
+            let count = results.len();
+            let mut body = json!({ "results": results, "count": count, "hint": hint });
+            self.attach_issues(&mut body).await;
+            self.metrics.write().await.searches += 1;
+            return Ok(text_result(body));
+        }
 
         // User-provided synonym groups (proxy.search_synonyms). Cloned once so
         // the registry lock isn't held across the searches below.
@@ -1482,18 +1659,34 @@ impl Proxy {
                 "no skill libraries are configured — set `skills.dirs` in the geco config"
                     .to_string()
             } else {
+                // Volunteer what IS here. A miss raises exactly one question —
+                // is this my wording, or does the gateway not have it? — and
+                // answering it costs nothing, because this response was
+                // otherwise almost empty. It also needs no cleverness from the
+                // model: it arrives without anyone knowing to ask.
+                let available = {
+                    let snap = self.snapshot.read().await;
+                    server_summary_line(&snap)
+                };
                 format!(
-                    "nothing matched '{}' — try fewer or more general keywords, \
-                     or list_mcp_servers to browse what's available",
-                    p.query
+                    "nothing matched '{}' — try fewer or more general keywords. \
+                     Available: {}. Search \"*\" for the full catalogue.",
+                    p.query,
+                    if available.is_empty() {
+                        "no servers configured".to_string()
+                    } else {
+                        available
+                    }
                 )
             };
-            return Ok(text_result(
-                json!({ "results": [], "count": 0, "hint": hint }),
-            ));
+            let mut body = json!({ "results": [], "count": 0, "hint": hint });
+            self.attach_issues(&mut body).await;
+            return Ok(text_result(body));
         }
         let count = results.len();
-        Ok(text_result(json!({ "results": results, "count": count })))
+        let mut body = json!({ "results": results, "count": count });
+        self.attach_issues(&mut body).await;
+        Ok(text_result(body))
     }
 
     #[tool(
@@ -1503,6 +1696,7 @@ impl Proxy {
         &self,
         Parameters(p): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.count_meta_tool("execute").await;
         if p.calls.is_empty() {
             return Ok(structured_err(
                 "empty_calls",
@@ -1710,6 +1904,7 @@ impl Proxy {
         description = "List every available agent skill (name + one-line description). Use when asked what skills exist; use search with kind=\"skills\" for targeted lookup."
     )]
     pub async fn list_skills(&self) -> Result<CallToolResult, McpError> {
+        self.count_meta_tool("list_skills").await;
         let idx = self.skills.read().await;
         if idx.skills.is_empty() {
             // This tool is only advertised when `skills.dirs` is non-empty, so
@@ -1756,6 +1951,7 @@ impl Proxy {
         &self,
         Parameters(p): Parameters<ReadSkillParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.count_meta_tool("read_skill").await;
         let meta = {
             let idx = self.skills.read().await;
             idx.get(&p.name).cloned()
@@ -1847,8 +2043,15 @@ mod param_tests {
     /// `Proxy::new` is sync and touches the filesystem only through
     /// absorb/scan, which are no-ops for empty or missing dirs.
     fn surface_probe(skill_dirs: Vec<String>) -> Proxy {
-        let cfg: crate::config::Config =
-            serde_json::from_value(json!({"mcpServers": {"s": {"command": ["true"]}}})).unwrap();
+        surface_probe_with(skill_dirs, "full")
+    }
+
+    fn surface_probe_with(skill_dirs: Vec<String>, surface: &str) -> Proxy {
+        let cfg: crate::config::Config = serde_json::from_value(json!({
+            "proxy": { "surface": surface },
+            "mcpServers": {"s": {"command": ["true"]}}
+        }))
+        .unwrap();
         Proxy::new(
             crate::backend::Registry::from_config(&cfg),
             Snapshot::default(),
@@ -1857,6 +2060,61 @@ mod param_tests {
             skill_dirs,
             vec![],
         )
+    }
+
+    /// The lean surface is the whole point of `proxy.surface`, and the point is
+    /// bytes — so the test measures bytes, not just which names survive. A
+    /// version that trimmed the tools and kept the full instruction text would
+    /// hand a chunk of the saving straight back, and nothing else would notice.
+    #[test]
+    fn the_lean_surface_serves_three_tools_and_costs_a_quarter_less() {
+        let full = surface_probe_with(vec!["/nonexistent/skills".into()], "full");
+        let lean = surface_probe_with(vec!["/nonexistent/skills".into()], "lean");
+
+        let names = |p: &Proxy| -> Vec<String> {
+            let mut n: Vec<String> = p
+                .tool_router
+                .list_all()
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(
+            names(&lean),
+            vec!["execute", "read_skill", "search"],
+            "lean serves search/execute/read_skill and nothing else"
+        );
+        assert_eq!(names(&full).len(), 6);
+
+        let bytes = |p: &Proxy| -> usize {
+            serde_json::to_string(&p.tool_router.list_all())
+                .unwrap()
+                .len()
+                + p.instructions.len()
+        };
+        let (fb, lb) = (bytes(&full), bytes(&lean));
+        eprintln!(
+            "surface: full {fb} B, lean {lb} B (saves {} B, {}%)",
+            fb - lb,
+            (fb - lb) * 100 / fb
+        );
+        assert!(
+            fb - lb >= 900,
+            "lean saved only {} B (full {fb}, lean {lb}) — the three browse \
+             tools are ~1 KB, so much less than that means the instruction \
+             text grew back and handed the saving straight in",
+            fb - lb
+        );
+        // The specific regression the byte assertion aims at, stated directly
+        // so a failure names its own cause.
+        assert!(
+            lean.instructions.len() <= full.instructions.len(),
+            "lean instructions must not be longer than full: {} vs {}",
+            lean.instructions.len(),
+            full.instructions.len()
+        );
     }
 
     /// Two of the six meta-tools exist only to serve a skill library. If

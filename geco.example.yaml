@@ -29,6 +29,15 @@ proxy:
   # top of the built-in table, matched after the same stemming.
   # search_synonyms: [["k8s", "kubernetes"], ["repo", "repository"]]
 
+  # How many meta-tools to advertise. `lean` serves only search, execute and
+  # read_skill — the three browse tools are a quarter of the always-on
+  # surface, and everything they do is reachable another way: search("*") is
+  # the catalogue, search("*", kind="skills") lists skills,
+  # search(include_schema=true) returns schemas, and gateway `issues` ride on
+  # search responses. What you lose is enumerating ONE server's full tool
+  # list. `geco stats` counts calls per meta-tool — look at yours first.
+  # surface: lean
+
   # OPTIONAL LLM tool picker — off unless you turn it on. Lexical ranking
   # puts the right tool first only ~13% of the time when the request shares
   # no vocabulary with it; handing the candidates to a real model and asking

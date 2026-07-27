@@ -81,6 +81,11 @@
         "picker": {
           "description": "Optional LLM-backed tool picker. Lexical ranking finds the right tool\nfirst only ~13% of the time when the request shares no vocabulary with\nit; handing BM25F's candidates to a real model and asking which one the\nuser meant measured 3x better (see docs/search-ranking.md). Off by\ndefault — it costs a round-trip per search.",
           "$ref": "#/$defs/PickerConfig"
+        },
+        "surface": {
+          "description": "How many meta-tools to advertise: `full` (default) or `lean`.\n\n`lean` serves only `search`, `execute` and `read_skill`, hiding\n`list_mcp_servers`, `list_tools` and `list_skills`. Those three are\n~1 KB of the always-on surface — about a quarter of it — and everything\nthey do is reachable another way:\n\n- browsing what exists → `search(\"*\")`, which returns one entry per\n  server (and every skill), and is also volunteered automatically in\n  the hint whenever a search matches nothing\n- a tool's input schema → `search(include_schema=true)`\n- gateway problems → the `issues` key, which rides on every `search`\n  response that needs it\n\nThe one thing genuinely lost is enumerating a single server's whole\ntool list; `search(\"*\")` previews five names per server, and\n`geco inspect` has the rest for humans.\n\nLeft at `full` by default until there is evidence rather than a\nprediction — `geco stats` now counts calls per meta-tool, so a real\nsession answers whether the browse path is used at all.",
+          "type": "string",
+          "default": "full"
         }
       }
     },

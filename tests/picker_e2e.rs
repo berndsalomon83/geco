@@ -232,6 +232,29 @@ async fn search_all(proxy: &Proxy, query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The whole parsed search response, for the tests that care about the
+/// envelope — hints, counts, the `issues` channel — and not just the order.
+async fn search_body(proxy: &Proxy, query: &str, kind: Option<&str>) -> serde_json::Value {
+    let res = proxy
+        .search(Parameters(SearchParams {
+            query: query.into(),
+            limit: Some(10),
+            include_schema: None,
+            kind: kind.map(str::to_string),
+        }))
+        .await
+        .expect("search must not error");
+    let text = res
+        .content
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .expect("text block");
+    serde_json::from_str(&text).expect("search returns JSON")
+}
+
 /// Run one search and return the (server, tool) pairs in ranked order.
 async fn search_order(proxy: &Proxy, query: &str) -> Vec<(String, String)> {
     let res = proxy
@@ -504,6 +527,93 @@ async fn a_catalogue_over_budget_really_falls_back_to_the_shortlist() {
         got, lexical,
         "over budget the model never sees the tool it named, so the pick must \
          be discarded and the lexical order returned untouched: {got:?}"
+    );
+}
+
+/// `search("*")` is the browse path, and it has to answer three things at
+/// once: what servers exist, that skills exist at all, and how to see them.
+///
+/// It returns SERVERS, not every skill — a broad question should not be
+/// answered with a wall of text nothing in it asked for. Skills are counted
+/// rather than listed, which is a few tokens instead of hundreds and still
+/// tells the model they are there. That matters because skills are a push
+/// resource: nothing in a user's request names one, so a model never told they
+/// exist will not go looking.
+#[tokio::test]
+async fn the_overview_query_lists_servers_and_points_at_skills() {
+    let lib = skill_library();
+    let dirs = vec![lib.path().to_str().unwrap().to_string()];
+    let proxy = proxy_with_skills(json!({ "mode": "off" }), dirs);
+
+    let body = search_body(&proxy, "*", None).await;
+    let kinds: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        kinds.iter().all(|k| *k == "server"),
+        "the broad overview is servers only: {kinds:?}"
+    );
+    let names: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        names.contains(&"files") && names.contains(&"docs"),
+        "{names:?}"
+    );
+    // The envelope is the same one every other search returns — a response
+    // whose shape depends on its input is a trap for anything parsing it.
+    assert_eq!(body["count"], 2);
+    assert!(body["results"][0]["tools"].is_number(), "{body}");
+
+    let hint = body["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("2 skill"),
+        "the count is the whole nudge — say how many: {hint}"
+    );
+    assert!(
+        hint.contains("kind=\"skills\""),
+        "and name the call that lists them: {hint}"
+    );
+
+    // Asked for by name, skills ARE listed in full — this is the list_skills
+    // replacement.
+    let skills = search_body(&proxy, "*", Some("skills")).await;
+    let listed: Vec<&str> = skills["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed.contains(&"code-reviewer"), "{listed:?}");
+}
+
+/// A miss has to say what IS here, without the model knowing any trick.
+///
+/// It arrives automatically on the one response that was otherwise nearly
+/// empty, and it answers the only question a miss actually raises: was that my
+/// wording, or does this gateway simply not have it?
+#[tokio::test]
+async fn a_search_that_matches_nothing_volunteers_what_is_available() {
+    let proxy = proxy_with(json!({ "mode": "off" }));
+    let body = search_body(&proxy, "xylophone quantum tectonics", Some("tools")).await;
+
+    assert_eq!(body["count"], 0);
+    let hint = body["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("files") && hint.contains("docs"), "{hint}");
+    assert!(
+        hint.contains("tools"),
+        "say how much is behind each: {hint}"
+    );
+    assert!(
+        hint.contains('*'),
+        "and name the call that shows everything: {hint}"
     );
 }
 

@@ -118,6 +118,47 @@ because it was not real.
 
 ### Added
 
+- **`proxy.surface: lean`** — serve only `search`, `execute` and `read_skill`.
+  The three browse tools are **~1 KB of the ~4.1 KB always-on surface, a
+  quarter of it**, and nothing they do is unreachable:
+
+  | dropped | reachable via |
+  |---|---|
+  | `list_mcp_servers` | `search("*")` — one entry per server, tool count, five-name preview |
+  | `list_skills` | `search("*", kind="skills")` |
+  | `list_tools(server, tool)` | `search(include_schema=true)` |
+  | the `issues` health key | now rides on every `search` response that needs it |
+
+  The cost moves from always-on to on-demand, which is the argument geco makes
+  about backend schemas, applied to its own surface. `search("*")` is a
+  documented sentinel VALUE rather than a second tool or an argument whose
+  absence changes the answer — a model choosing between named things is doing
+  selection, which is what it is good at; inferring behaviour from a missing
+  argument is not. The response keeps the same envelope with `kind: "server"`
+  added, because a response whose shape depends on its input is a trap for
+  anything parsing it.
+
+  **A miss now volunteers the catalogue by itself**: *nothing matched 'deploy a
+  container' — try fewer or more general keywords. Available: github (42
+  tools), filesystem (11). Search "\*" for the full catalogue.* Zero always-on
+  bytes, arrives exactly when the question is raised, and requires no
+  cleverness from the model — which is what makes the browse path safe to hide
+  rather than merely cheaper to drop.
+
+  `search("*")` returns **servers**, not every skill: a broad question should
+  not be answered with a wall of text nothing in it asked for. Skills are
+  counted in the hint instead — a few tokens against hundreds — which still
+  tells a model they exist, and that matters because skills are a push
+  resource nothing in a user's request ever names.
+
+  **Not the default.** The case for it is a prediction about model behaviour,
+  and roughly 30% of those survive measurement here. What genuinely goes is
+  enumerating one server's whole tool list; `search("*")` previews five names
+  each and `geco inspect` has the rest.
+- **`geco stats` counts calls per meta-tool.** The always-on surface is the one
+  cost geco publishes a number for, and there was no way to tell which of those
+  tools a model ever reaches for — so the question above could only be argued.
+  A real session now answers it.
 - **The picker shows the model your whole catalogue when it fits**
   (`proxy.picker.whole_catalogue_tokens`, default ~24k tokens ≈ 500 tools).
   This is the largest measured win in the search story, and it is both more

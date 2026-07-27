@@ -192,6 +192,22 @@ async fn main() -> Result<()> {
                             metrics.skill_surfaces, metrics.skill_reads
                         );
                     }
+                    // Which meta-tools the model actually reaches for. The
+                    // always-on surface is the one cost geco promises a number
+                    // for, so a tool at zero calls after real use is a tool
+                    // whose bytes are being paid for nothing — and this is the
+                    // only way to know rather than guess. `proxy.surface: lean`
+                    // drops the three browse tools; these counts are the
+                    // evidence for or against making that the default.
+                    if !metrics.per_meta_tool.is_empty() {
+                        eprintln!();
+                        eprintln!("meta-tool calls (the always-on surface earning its bytes):");
+                        let mut rows: Vec<(&String, &u64)> = metrics.per_meta_tool.iter().collect();
+                        rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+                        for (name, n) in rows {
+                            eprintln!("  {name:18} {n:>6}");
+                        }
+                    }
                     eprintln!();
                     if !metrics.recent_no_match.is_empty() {
                         eprintln!("queries that matched nothing (most recent last):");

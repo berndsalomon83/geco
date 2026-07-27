@@ -243,6 +243,37 @@ If a tool you know exists isn't surfacing, the fix is its `description`: that is
 
 Measured against 5,216 tools from ~150 real MCP servers, the measured floor on *pure-intent* queries — where a user describes a goal in words the tool never uses — is about **13% rank-1**. That is the lexical-vs-semantic wall, and no tuning or synonym crosses it. The full research log, including every change that was tried and **rejected** so nobody re-walks those roads, is in [docs/search-ranking.md](docs/search-ranking.md).
 
+### A leaner surface
+
+The six meta-tools cost ~4.1 KB of always-on context. Three of them — `list_mcp_servers`, `list_tools`, `list_skills` — are **~1 KB of that, a quarter**, and everything they do is reachable another way:
+
+```yaml
+proxy:
+  surface: lean     # search, execute, read_skill — and nothing else
+```
+
+| what you lose | what replaces it |
+|---|---|
+| `list_mcp_servers` | `search("*")` — one entry per server, with a tool count and a five-name preview |
+| `list_skills` | `search("*", kind="skills")` |
+| `list_tools(server, tool)` | `search(include_schema=true)`, which returns schemas inline |
+| the `issues` health key | rides on **every** `search` response that needs it |
+
+A miss volunteers the catalogue by itself — `nothing matched 'deploy a container' — try fewer or more general keywords. Available: github (42 tools), filesystem (11). Search "*" for the full catalogue.` That costs zero always-on bytes, arrives exactly when the question comes up, and needs the model to know no tricks.
+
+`search("*")` returns **servers**, not every skill: a broad question shouldn't be answered with a wall of text nothing asked for. Skills are *counted* in the hint instead, which is a few tokens rather than hundreds and still tells the model they exist and how to list them.
+
+**One thing genuinely goes:** enumerating a single server's whole tool list. `search("*")` previews five names each; `geco inspect` has the rest for a human.
+
+It is **not the default**, deliberately. The case for it is a prediction about how models behave, and in this project roughly 30% of those survive measurement. `geco stats` now counts calls per meta-tool — run your real workload and look before deciding:
+
+```
+meta-tool calls (the always-on surface earning its bytes):
+  search                  2
+  execute                 1
+  list_mcp_servers        1
+```
+
 ### Crossing the wall: the LLM picker
 
 **Off by default.** No lexical trick crosses that 13% wall, because the problem isn't spelling — it's meaning. A model crosses it in one round-trip: show it the tools, ask which one the user actually meant, hoist that answer to rank 1.
@@ -340,6 +371,7 @@ Gateway-wide settings, all optional:
 | `refresh_concurrency` | 8 | How many backends may be probed at once during a refresh. `0` = unlimited. Caps the process storm when many servers are configured. |
 | `inherit_env` | false | Give backends geco's whole environment (pre-0.7 behaviour). See above. |
 | `env_passthrough` | `[]` | Extra non-secret variables every backend receives, as globs. |
+| `surface` | `full` | `lean` serves only `search`, `execute` and `read_skill` — see [a leaner surface](#a-leaner-surface). |
 | `search_synonyms` | `[]` | Extra interchangeable-word groups for ranking, e.g. `[["k8s","kubernetes"]]`. Applied on top of the built-in table; picked up on hot reload. |
 | `picker` | off | Optional LLM tool picker — see [Crossing the wall](#crossing-the-wall-the-llm-picker). |
 
