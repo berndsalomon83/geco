@@ -6,7 +6,10 @@
 
 skills:
   dirs: ["~/.config/opencode/skills-library"]
-  absorb: ["~/.config/opencode/skills"]   # swept into the library at startup
+  # Swept into the library on every scan, not only at startup — both these
+  # and `dirs` are watched, so a skill dropped in while geco is running is
+  # searchable within seconds with nothing restarted.
+  absorb: ["~/.config/opencode/skills"]
 
 proxy:
   call_timeout_secs: 120

@@ -17,6 +17,16 @@ So here comes this rusty reptile geco to tackle it. It sits between your IDE and
 
 The cost is fixed: **~4.3 KB of context, whatever is behind the gate** — 10 servers or 100. That number is measured by a test, not asserted, so it can't quietly drift.
 
+### And you stop restarting your agent
+
+Add an MCP server to a normal setup and you restart the harness, because the client asks for the tool list once at connect and caches it. Same for a new skill. It is a small thing that happens constantly, and it breaks your train of thought every time.
+
+**Behind geco, nothing downstream ever has to restart.** Drop a new skill into the library, drop one into the absorb inbox, or add a whole new MCP server to `geco.yaml` — the next `search` finds it, in the same session, with the agent none the wiser.
+
+This is not a feature bolted on; it falls out of the design. Your client's tool list is the same six meta-tools before and after, so there is nothing for it to reload. The servers and skills live *behind* `search`, which reads the current snapshot every time it is called. geco watches the config and the skill directories, and listens for backends that announce their own tool changes (`notifications/tools/list_changed`), so the catalogue behind the gate keeps up on its own.
+
+Verified end to end in a single MCP session, never reconnected: a new skill in the library, a new skill via the inbox, and a brand-new server's tools all appeared in later searches. One caveat, and it is the only one: if you had **no** skill library at all and add your first one, the two skill meta-tools stay hidden until geco itself restarts — the skills are searchable immediately, but `list_skills` and `read_skill` are decided at startup.
+
 Built with Rust as single static binary, no runtime dependencies. macOS, Linux, and Windows. Design inspired by [lazy-mcp](https://github.com/voicetreelab/lazy-mcp) (MIT) — reimplemented from scratch on the official [rmcp](https://crates.io/crates/rmcp) SDK, with search, self-refreshing snapshots, allowlists, and status built in.
 
 ## How it works
@@ -365,6 +375,10 @@ geco schema                           # print the config JSON Schema (YAML + JSO
 ## Hot reload
 
 The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. No restart, no manual step. Removed backends are shut down; new ones are snapshotted and available immediately.
+
+The same goes for skills: the directories in `skills.dirs` and `skills.absorb` are watched too, so a skill written or dropped in while geco is running is swept into the library and searchable without anything being restarted. The one thing decided at startup is *whether the skill meta-tools exist at all* — configure your first skill library on a running geco and the skills are searchable straight away, but `list_skills` and `read_skill` appear at the next start.
+
+**The reason none of this reaches your client is the whole design.** Its tool list is the same six meta-tools throughout, so there is nothing to invalidate and nothing to reconnect. Compare the usual case: a client asks for `tools/list` once at connect, so a new MCP server means restarting the harness.
 
 The watcher triggers on **mtime**, not content, which is what makes `geco refresh` work against a live proxy: it rewrites the snapshot file *and* touches the config, so a running instance rebuilds instead of quietly serving its in-memory copy. (Content is untouched — only the timestamp moves.)
 
