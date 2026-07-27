@@ -287,9 +287,13 @@ Cost is real and worth sizing before you enable it — but less than it looks, b
 | `picker.candidates` | 50 | Fallback shortlist size, for catalogues over that budget. |
 | `picker.timeout_secs` | 20 | Give up and return the lexical order. |
 
-**If your endpoint serves a reasoning model, turn thinking off in the serving config.** Picking a tool is classification, not reasoning, and the same model on the same candidates scored 8% rank-1 with thinking on against 28% with it off — it spent 1,125 tokens deliberating over a multiple-choice question and hit the token ceiling before answering. Note the direction: **8% is below the 13.3% lexical baseline**, so a deliberating model is worse than no picker at all.
+**Give the picker a small, fast, non-reasoning model.** Picking a tool is classification, and a reasoning model answers it as though it were reasoning: measured on one endpoint, `qwen4b` spent its whole 512-token budget in a hidden reasoning channel and returned **empty content on 7 of 8 searches**, while `qwen-coder` answered the identical prompt in **20 tokens**. Same box, same endpoint, same prompt — the fix was the model name, not a setting.
 
-The prompt does ask the model not to deliberate, and carries Qwen's `/no_think`, but that is a request and not a guarantee — measured against a real endpoint, neither it nor `enable_thinking: false` on the request changed anything, because the server's chat template decides. geco detects the symptom (empty replies, or three consecutive searches with no usable answer) and says so in the log, since otherwise it looks exactly like a picker that quietly agrees with lexical ranking.
+That is the whole recommendation, because there is no geco knob for this and there cannot be one. geco has no model: under `sampling` your client picks it, and under `command` it is whatever your CLI or wrapper script runs. Where thinking is decided depends on that stack, and it is not always reachable from the request — on the endpoint above, neither `/no_think` in the prompt nor `enable_thinking: false` on the call changed anything, because the chat template had the last word. Swapping the model is one line; chasing the serving config is not.
+
+Getting it wrong costs latency, not correctness. Every failure degrades to the lexical order, which is what you get with the picker off anyway — so the real hazard is paying a round-trip per search for nothing, silently. geco watches for the signature (an empty reply at the token ceiling, or three consecutive searches with no usable answer) and logs what to do, because otherwise it looks exactly like a picker whose model agrees with lexical ranking every time.
+
+For scale: a deliberating model measured **8% rank-1 against the 13.3% lexical baseline** — worse than not asking at all. That is why the reply budget is sized for the answer rather than the thinking, and why geco does not simply raise it.
 
 ### What geco proxies (and what it doesn't)
 
