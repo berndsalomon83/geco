@@ -104,13 +104,12 @@ case "$CLIENT" in
         # so it advised the user to check that their model is not in reasoning
         # mode — for a harness that had no runner at all. A non-zero exit
         # routes through the branch that logs this script's own stderr.
-        MODEL=$(discover_opencode || true)
-        if command -v opencode >/dev/null 2>&1; then
-            run_opencode "$MODEL" "$PROMPT"
-        else
+        if ! command -v opencode >/dev/null 2>&1; then
             echo "pick.sh: no runner for GECO_CLIENT='${CLIENT:-<unset>}' and opencode is" \
                  "not installed — add a discover_/run_ branch for your harness" >&2
             exit 1
         fi
+        MODEL=$(discover_opencode || true)
+        run_opencode "$MODEL" "$PROMPT"
         ;;
 esac

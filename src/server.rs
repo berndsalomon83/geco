@@ -1,4 +1,4 @@
-//! The proxy's own MCP surface: eight small meta-tools instead of every
+//! The proxy's own MCP surface: a handful of small meta-tools instead of every
 //! backend schema. This is the whole point — the agent's context carries
 //! ~2.5 KB no matter how many tools hide behind the gate. That number is
 //! measured, not asserted by hand: see
@@ -1596,7 +1596,10 @@ impl Proxy {
             // A pick hoists that entry to rank 1 of its own list and leaves
             // the lexical order beneath it. No pick (unsupported, timeout,
             // garbage reply) simply leaves both orders alone.
-            match picker.pick(&p.query, &cands, peer.as_ref(), client.as_deref()).await {
+            match picker
+                .pick(&p.query, &cands, peer.as_ref(), client.as_deref())
+                .await
+            {
                 crate::picker::Pick::Choice(idx) => {
                     let c = &pool[idx];
                     tracing::debug!("picker chose {} {}::{}", c.kind, c.server, c.name);

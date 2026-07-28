@@ -1,9 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "_comment": "Tools the picker sub-session does not need. Disabling them strips opencode's system prompt from ~10k tokens to ~737, which is most of what a per-search model call costs. The measured reduction assumes geco is your only MCP server: if you have others, add their tool prefixes here too, since an MCP server's tools are named <server>_<tool>.",
   "tools": {
     "bash": false, "edit": false, "write": false, "read": false,
     "glob": false, "grep": false, "task": false, "webfetch": false,
     "todowrite": false, "question": false, "skill": false,
-    "hooks_*": false, "icm_*": false, "geco_*": false
+    "geco_*": false
   }
 }

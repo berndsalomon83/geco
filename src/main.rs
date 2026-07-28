@@ -310,8 +310,7 @@ async fn main() -> Result<()> {
             // running left the native dir full and the library stale.
             if !cfg.skills.absorb.is_empty() {
                 if let Some(library) = cfg.skills.dirs.first() {
-                    let (moved, errors) =
-                        geco::skills::absorb_into(library, &cfg.skills.absorb);
+                    let (moved, errors) = geco::skills::absorb_into(library, &cfg.skills.absorb);
                     if !moved.is_empty() {
                         eprintln!(
                             "absorbed {} stray skill(s) into the library: {}",
@@ -441,10 +440,18 @@ async fn main() -> Result<()> {
                     }
                 })
             };
+            // Not a constant: the surface is `lean` by default (three tools,
+            // two without a skill library) and `full` is six. The line said 6
+            // unconditionally, which was never true for the default config.
             tracing::info!(
-                "geco up: {} servers, {} tools behind 6 meta-tools",
+                "geco up: {} servers, {} tools behind the {} meta-tool surface",
                 snapshot.servers.len(),
-                snapshot.tool_count()
+                snapshot.tool_count(),
+                if cfg.proxy.lean_surface() {
+                    "lean"
+                } else {
+                    "full"
+                }
             );
             let proxy = Proxy::new(
                 (*registry).clone(),

@@ -159,6 +159,8 @@ skills:
   dirs: ["~/.config/opencode/skills-library"]
 ```
 
+(`geco refresh` sweeps any configured `skills.absorb` dirs into the library before it rebuilds the snapshot — it moves files, not only cache entries.)
+
 Restart the agent. `list_skills` shows the whole catalogue; `search` with `kind="skills"` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `geco refresh` re-scans the library (the gateway also watches it and picks up changes on its own). Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
 
 ### The absorb model (nothing is ever native)

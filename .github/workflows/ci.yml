@@ -145,7 +145,7 @@ jobs:
       # The installers are the entry point and have had three bugs between
       # them (CRLF endings, `2>&1`, `2>$null`); neither was linted until now.
       - name: shellcheck
-        run: shellcheck install.sh uninstall.sh
+        run: shellcheck install.sh uninstall.sh picker/pick.sh
 
       - name: PSScriptAnalyzer
         shell: pwsh

@@ -90,4 +90,15 @@ for d in "plugins" "plugin"; do
         say "Removed opencode health plugin ($d/)"
     fi
 done
+
+# The picker agent, also dropped by install.sh into opencode's own tree. It
+# lives outside ~/.config/geco, so --purge would never have reached it — an
+# uninstalled geco left an agent named "picker" in the user's opencode.
+for d in "agents" "agent"; do
+    f="$HOME/.config/opencode/$d/picker.md"
+    if [ -f "$f" ]; then
+        rm -f "$f"
+        say "Removed picker agent ($d/)"
+    fi
+done
 say "Done. Restart your agents; re-add any servers you still want direct."

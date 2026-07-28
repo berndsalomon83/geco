@@ -28,6 +28,16 @@ foreach ($d in @("plugins", "plugin")) {
     }
 }
 
+# Remove the picker agent. It lives in opencode's tree rather than geco's, so
+# -Purge would never have reached it.
+foreach ($d in @("agents", "agent")) {
+    $Agent = Join-Path $env:USERPROFILE ".config\opencode\$d\picker.md"
+    if (Test-Path $Agent) {
+        Remove-Item $Agent -Force
+        Say "Removed picker agent ($d/)"
+    }
+}
+
 # Remove from agent configs.
 foreach ($p in @(
     (Join-Path $env:USERPROFILE ".config\opencode\opencode.json"),

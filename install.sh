@@ -149,25 +149,38 @@ fi
 # picker works out of the box for opencode. The script is generic — it
 # branches on GECO_CLIENT — and users can edit it or add harnesses.
 # Existing files are never overwritten: the user may have customised them.
+#
+# Guarded on the FILE, not the directory: a first run that created the dir and
+# then failed would otherwise mean the assets are never scaffolded again. The
+# copies are non-fatal because a release-tarball install has no repo to copy
+# from, and a missing picker must not abort an otherwise good install.
 PICKER_DIR="$CFG_DIR/picker"
-if [ ! -d "$PICKER_DIR" ]; then
+if [ ! -f "$PICKER_DIR/pick.sh" ] && [ -f "$REPO_DIR/picker/pick.sh" ]; then
     mkdir -p "$PICKER_DIR"
-    cp "$REPO_DIR/picker/pick.sh" "$PICKER_DIR/pick.sh"
-    cp "$REPO_DIR/picker/opencode.json" "$PICKER_DIR/opencode.json"
-    chmod +x "$PICKER_DIR/pick.sh"
-    say "Scaffolded picker: $PICKER_DIR/pick.sh (+ opencode.json)"
-else
+    if cp "$REPO_DIR/picker/pick.sh" "$PICKER_DIR/pick.sh" &&
+       cp "$REPO_DIR/picker/opencode.json" "$PICKER_DIR/opencode.json"; then
+        chmod +x "$PICKER_DIR/pick.sh"
+        say "Scaffolded picker: $PICKER_DIR/pick.sh (+ opencode.json)"
+    else
+        warn "picker assets not scaffolded — the LLM picker stays off until you add them"
+    fi
+elif [ -f "$PICKER_DIR/pick.sh" ]; then
     say "Picker assets exist: $PICKER_DIR (not overwritten)"
 fi
-# The picker agent for opencode — a minimal named agent with no tools.
-# Goes where opencode discovers agents: ~/.config/opencode/agents/.
+# The picker agent for opencode — a minimal named agent with no tools. Goes
+# where opencode discovers agents. Only for people who actually have opencode:
+# creating ~/.config/opencode here would also make the health-plugin block
+# below think opencode is installed, and drop a plugin on a machine that has
+# never seen it.
 OC_AGENTS_DIR="$HOME/.config/opencode/agents"
-if [ ! -f "$OC_AGENTS_DIR/picker.md" ]; then
-    mkdir -p "$OC_AGENTS_DIR"
-    cp "$REPO_DIR/picker/picker.md" "$OC_AGENTS_DIR/picker.md"
-    say "Scaffolded picker agent: $OC_AGENTS_DIR/picker.md"
-else
-    say "Picker agent exists: $OC_AGENTS_DIR/picker.md (not overwritten)"
+if [ -d "$HOME/.config/opencode" ] && [ -f "$REPO_DIR/picker/picker.md" ]; then
+    if [ ! -f "$OC_AGENTS_DIR/picker.md" ]; then
+        mkdir -p "$OC_AGENTS_DIR"
+        cp "$REPO_DIR/picker/picker.md" "$OC_AGENTS_DIR/picker.md" &&
+            say "Scaffolded picker agent: $OC_AGENTS_DIR/picker.md"
+    else
+        say "Picker agent exists: $OC_AGENTS_DIR/picker.md (not overwritten)"
+    fi
 fi
 
 say "Building tool snapshot…"

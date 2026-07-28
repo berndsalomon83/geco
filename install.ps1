@@ -120,6 +120,13 @@ if (-not (Test-Path $Cfg)) {
     Say "Config already exists at $Cfg (kept)"
 }
 
+# The picker assets are deliberately NOT scaffolded here. pick.sh is a bash
+# script that discovers an opencode session model through sqlite3; neither is
+# present on a stock Windows box, so copying it would leave a config pointing
+# at something that cannot run. The example config says as much and tells
+# Windows users to point `picker.command` at their own wrapper instead. This
+# comment exists so the omission reads as a decision, not an oversight.
+
 # Generate editor schema.
 Say "Generating config schema..."
 # NOT Set-Content: in PowerShell 5.1 it writes the system ANSI codepage, and

@@ -6,7 +6,56 @@ minor bump may break.
 
 ## [Unreleased]
 
+### Added
+
+- **The picker can use the model you are already talking to.** geco now passes
+  the MCP client's own name from the initialize handshake to the `command`
+  transport as **`GECO_CLIENT`** (`opencode`, `claude-ai`, …), and ships a
+  wrapper script — `picker/pick.sh`, scaffolded to `~/.config/geco/picker/` by
+  `install.sh` — that branches on it: a `discover_<harness>` finds that
+  harness's current session model, a `run_<harness>` calls it. Only the
+  handshake can answer "which harness is this"; guessing from environment
+  variables or paths breaks the moment two of them share a machine. Adding a
+  harness is two shell functions and a `case` branch, so geco itself stays
+  generic and the env var is the entire coupling. A companion `opencode.json`
+  disables every tool in the picker sub-session, which strips its system prompt
+  from ~10k tokens to ~737.
+
 ### Fixed
+
+- **`geco refresh` did not absorb.** Sweeping stray skills out of
+  `skills.absorb` into the library ran only in the live proxy's startup and
+  watcher, so a refresh with no proxy running left the native dir full and the
+  library stale. It now absorbs first, then builds the snapshot — note that
+  this makes `refresh` a command that *moves files*, not only one that rebuilds
+  a cache.
+- **A description containing `": "` silently emptied itself.** A SKILL.md whose
+  frontmatter said `description: phases: initiation, elongation` is valid prose
+  and invalid YAML, and the skill registered with an empty description —
+  present in the library, unreachable by search, with nothing logged. The
+  parser now retries with plain scalar values quoted. Found by a 50-skill
+  stress test.
+- **The picker command could not use `~`.** There is no shell between geco and
+  the picker, so a leading `~/` in the program was handed to `execvp` verbatim
+  and spawned nothing — including in the config the installer scaffolds. Every
+  search logged one ENOENT and fell back to the lexical order while the
+  miss-streak advice pointed at the model. `~/` in the program is now expanded;
+  arguments are still passed through untouched, since one of them is the query.
+- **The quote-retry damaged what it rescued.** Being a line-by-line rewriter
+  with no notion of an open block scalar, it wrapped `|`/`>` prose lines in
+  quotes that then became part of the description; it also swallowed trailing
+  `#` comments and, on CRLF files, a carriage return. All three now behave as
+  the strict parser does.
+- **A failed cross-filesystem absorb stranded the skill permanently.** When the
+  copy fallback failed part way, the half-written destination stayed, so every
+  later run reported "already in library (resolve manually)" against debris
+  absorb itself had left. The destination is now cleared on failure.
+- **`install.sh` created `~/.config/opencode` on machines without it**, which
+  also defeated the guard on the health-plugin block below and installed a
+  plugin for a tool the user does not have. Both blocks now check first, and
+  `uninstall.sh` / `uninstall.ps1` remove the picker agent they leave behind.
+- **Release archives did not contain `picker/`**, though the config they ship
+  points at it.
 
 Found by a systematic production-readiness audit rather than by use, then each
 one adversarially re-checked before it was believed. Roughly a third of what

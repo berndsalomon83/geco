@@ -53,7 +53,7 @@ run() {
 }
 
 if have shellcheck; then
-    run "shellcheck" shellcheck install.sh uninstall.sh scripts/lint.sh
+    run "shellcheck" shellcheck install.sh uninstall.sh scripts/lint.sh picker/pick.sh
 else
     skipped+=("shellcheck")
 fi
