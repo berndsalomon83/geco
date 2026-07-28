@@ -41,6 +41,23 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).to_string()
 }
 
+/// A filesystem path as a YAML double-quoted scalar.
+///
+/// A Windows temp dir is `C:\Users\RUNNER~1\...`, and inside YAML double
+/// quotes `\U` is the start of an 8-digit Unicode escape — so pasting the
+/// path in raw produced "did not find expected hexadecimal number" and the
+/// config never parsed. That failure is invisible on Linux and macOS, where
+/// paths have no backslashes, so it reached CI as a Windows-only red build.
+fn yaml_quote(p: &Path) -> String {
+    format!(
+        "\"{}\"",
+        p.display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    )
+}
+
 /// A minimal valid config in a fresh temp dir. Returns the dir (kept alive by
 /// the caller) and the config path.
 fn temp_config() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -400,9 +417,9 @@ fn refresh_absorbs_stray_skills_into_the_library() {
     std::fs::write(
         &cfg,
         format!(
-            "skills:\n  dirs: [\"{lib}\"]\n  absorb: [\"{nat}\"]\nmcpServers:\n  t:\n    command: [\"cargo\", \"--version\"]\n    description: \"probe\"\n",
-            lib = library.display(),
-            nat = absorb.display(),
+            "skills:\n  dirs: [{lib}]\n  absorb: [{nat}]\nmcpServers:\n  t:\n    command: [\"cargo\", \"--version\"]\n    description: \"probe\"\n",
+            lib = yaml_quote(&library),
+            nat = yaml_quote(&absorb),
         ),
     )
     .expect("write config");

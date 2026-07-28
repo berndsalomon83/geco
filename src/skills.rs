@@ -106,28 +106,54 @@ fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
 /// containing ": " (colon-space). Leaves already-quoted, block-scalar, or
 /// colon-free values alone. Used only as a retry after a strict parse fails,
 /// to rescue SKILL.md frontmatter whose description has a mid-sentence colon.
+///
+/// It rewrites only lines at mapping level. A `|` or `>` block scalar opens a
+/// region whose lines are prose, not `key: value` pairs, and quoting one of
+/// them puts two literal `"` characters into the description the model reads.
+/// The block-scalar author is exactly the author who had colons to escape, so
+/// the two shapes turn up together.
 fn quote_plain_scalar_values(frontmatter: &str) -> String {
+    // Indent of the key that opened a block scalar, if we are inside one.
+    // Everything indented past it belongs to the block.
+    let mut block_indent: Option<usize> = None;
     frontmatter
         .lines()
         .map(|line| {
+            let indent = line.len() - line.trim_start().len();
+            if let Some(open) = block_indent {
+                // A blank line inside a block scalar is content, not the end.
+                if line.trim().is_empty() || indent > open {
+                    return line.to_string();
+                }
+                block_indent = None;
+            }
             // Skip lines that are already quoted or use a block scalar
             // indicator, and lines with no `key: value` structure.
             let Some((key, val)) = line.split_once(':') else {
                 return line.to_string();
             };
-            let val = val.trim_start();
-            if val.is_empty()
-                || val.starts_with('"')
-                || val.starts_with('\'')
-                || val.starts_with('|')
-                || val.starts_with('>')
-            {
+            // `trim`, not `trim_start`: on a CRLF file every value ends in a
+            // carriage return, which inside the quotes we are about to add is
+            // a literal character rather than a line ending.
+            let val = val.trim();
+            if val.starts_with('|') || val.starts_with('>') {
+                block_indent = Some(indent);
+                return line.to_string();
+            }
+            if val.is_empty() || val.starts_with('"') || val.starts_with('\'') {
                 return line.to_string();
             }
             // Only needs quoting when the value itself contains ": ".
             if !val.contains(": ") {
                 return line.to_string();
             }
+            // A plain scalar ends at " #" — YAML would have dropped the rest as
+            // a comment, and swallowing it into the quotes would make the retry
+            // disagree with the strict path about what the value even is.
+            let val = match val.find(" #") {
+                Some(i) => val[..i].trim_end(),
+                None => val,
+            };
             // Double-quote, escaping inner quotes and backslashes.
             let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
             format!("{key}: \"{escaped}\"")
@@ -188,6 +214,13 @@ pub fn absorb_into(library: &str, absorb_dirs: &[String]) -> (Vec<String>, Vec<S
                     // rename fails with EXDEV across filesystems — fall back
                     // to copy + remove so absorb works on cross-mounted dirs.
                     if let Err(copy_err) = copy_dir_recursive(&src, &dst) {
+                        // Clear the half-written destination. Left in place it
+                        // makes `dst.exists()` true forever, so every later
+                        // absorb reports "already in library (resolve
+                        // manually)" — pointing the user at a collision with
+                        // debris this function created, while the real skill
+                        // stays stranded in the native dir costing context.
+                        let _ = std::fs::remove_dir_all(&dst);
                         errors.push(format!(
                             "absorb failed for '{}': rename: {e}; copy fallback: {copy_err}",
                             name.to_string_lossy()
@@ -480,6 +513,48 @@ mod tests {
             fm.description,
             "She said \"hello: world\" and left C:\\Users\\x"
         );
+    }
+
+    /// The retry must not damage what it is rescuing. A block scalar's lines
+    /// are prose; the rewriter used to treat any of them containing a second
+    /// ": " as a `key: value` pair and wrap it in quotes, so the description
+    /// the model reads came back with two literal `"` in the middle of a
+    /// sentence. The trigger is ordinary: one sibling key with a colon is
+    /// enough to fail the strict parse and send the whole block through here.
+    #[test]
+    fn the_retry_leaves_block_scalar_prose_alone() {
+        let fm = parse_frontmatter(
+            "---\nname: pdf\ndescription: |\n  Supports: AcroForm: yes.\nlicense: see LICENSE: MIT\n---\n\n# Body\n",
+        )
+        .expect("the sibling colon must still be rescued");
+        assert_eq!(
+            fm.description, "Supports: AcroForm: yes.\n",
+            "block-scalar content must survive byte for byte"
+        );
+    }
+
+    /// CRLF is what a SKILL.md written on Windows looks like. The carriage
+    /// return sits at the end of the value, and inside the quotes the retry
+    /// adds it stops being a line ending and becomes part of the description.
+    #[test]
+    fn a_crlf_file_does_not_smuggle_a_carriage_return_into_the_value() {
+        let fm = parse_frontmatter(
+            "---\r\nname: crlf\r\ndescription: phases: one, two\r\n---\r\n\r\n# Body\r\n",
+        )
+        .expect("CRLF frontmatter must parse");
+        assert_eq!(fm.description, "phases: one, two");
+    }
+
+    /// A trailing `#` comment is not part of the value. The strict path drops
+    /// it; before this the retry path kept it, so the same SKILL.md described
+    /// itself differently depending on whether it happened to parse.
+    #[test]
+    fn a_trailing_comment_is_not_swallowed_into_the_value() {
+        let fm = parse_frontmatter(
+            "---\nname: c\ndescription: phases: one, two # internal note\n---\n\n# Body\n",
+        )
+        .expect("must parse via the retry");
+        assert_eq!(fm.description, "phases: one, two");
     }
 
     #[test]
