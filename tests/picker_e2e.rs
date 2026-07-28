@@ -151,6 +151,37 @@ fn python_bin() -> Option<String> {
     None
 }
 
+/// The interpreter's ABSOLUTE path, for the one test that needs to reach it
+/// through `~/` — `Command` resolves a bare name through PATH, which would
+/// make a tilde test pass without any expansion happening.
+fn python_path() -> Option<std::path::PathBuf> {
+    let bin = python_bin()?;
+    let exts: &[&str] = if cfg!(windows) { &[".exe", ""] } else { &[""] };
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for ext in exts {
+            let candidate = dir.join(format!("{bin}{ext}"));
+            if !candidate.is_file() {
+                continue;
+            }
+            // Existing as a file is not enough. Windows puts an App Execution
+            // Alias for `python3.exe` on PATH which is a real file, runs, and
+            // exits 9009 — the same trap `python_bin` already documents, one
+            // level down. Take the first entry that actually answers.
+            let runs = std::process::Command::new(&candidate)
+                .arg("--version")
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false);
+            if runs {
+                return Some(candidate);
+            }
+        }
+    }
+    eprintln!("`{bin}` runs but no PATH entry for it does — skipping the tilde test");
+    None
+}
+
 /// A two-skill library on disk. The names deliberately share no vocabulary
 /// with the query used against them, which is the case the picker exists for.
 fn skill_library() -> tempfile::TempDir {
@@ -862,40 +893,41 @@ async fn a_command_gets_the_prompt_substituted_and_a_no_recursion_marker() {
 /// with `~/` would otherwise be rewritten on its way to the model.
 #[tokio::test]
 async fn a_picker_command_under_a_tilde_is_found() {
+    let Some(python) = python_path() else { return };
+
     let plain = proxy_with(json!({ "mode": "off" }));
     let lexical = search_order(&plain, "read").await;
     assert!(lexical.len() >= 2, "need two hits: {lexical:?}");
     let (want_server, want_tool) = lexical.last().unwrap().clone();
 
-    // A real, directly-spawnable script at a real path, reached only through
-    // `~/` — exactly the shape install.sh scaffolds. HOME is repointed at the
-    // temp dir for the length of the test; the expansion reads it at spawn
-    // time, so this is what a user's `~` resolves to.
-    let home = tempfile::tempdir().expect("tempdir");
-    let reply = format!("{{\"server\": \"{want_server}\", \"tool\": \"{want_tool}\"}}");
-    let name = if cfg!(windows) {
-        let p = home.path().join("pick_probe.bat");
-        std::fs::write(&p, format!("@echo off\r\necho {reply}\r\n")).expect("write probe");
-        "~/pick_probe.bat"
-    } else {
-        let p = home.path().join("pick_probe.sh");
-        std::fs::write(&p, format!("#!/bin/sh\necho '{reply}'\n")).expect("write probe");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        }
-        "~/pick_probe.sh"
-    };
+    // HOME is repointed at the directory the interpreter already lives in, so
+    // `~/<its name>` is a real, directly-spawnable program on both platforms.
+    //
+    // The obvious alternative — write a script into a temp HOME — does not
+    // work on Windows: a `.bat`/`.cmd` program is routed through cmd.exe, and
+    // the prompt geco appends is multi-line, which cmd cannot be handed
+    // safely. That is a genuine platform limit rather than a test artifact,
+    // and it is why the shipped wrapper is documented as macOS/Linux.
+    let dir = python
+        .parent()
+        .expect("interpreter has a parent")
+        .to_owned();
+    let name = python
+        .file_name()
+        .expect("interpreter has a name")
+        .to_owned();
+    let script = format!(
+        "import sys\nprint('{{\"server\": \"{want_server}\", \"tool\": \"{want_tool}\"}}')\n"
+    );
 
     let proxy = proxy_with(json!({
         "mode": "command",
-        "command": [name],   // no {prompt}: geco appends it, the script ignores it
+        "command": [format!("~/{}", name.to_string_lossy()), "-c", script, "{prompt}"],
         "candidates": 10,
         "timeout_secs": 30,
     }));
 
-    let _home_guard = HomeGuard::pointing_at(home.path());
+    let _home_guard = HomeGuard::pointing_at(&dir);
     let picked = search_order(&proxy, "read").await;
     assert_eq!(
         picked.first(),
