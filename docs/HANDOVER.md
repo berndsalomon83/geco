@@ -1,4 +1,4 @@
-# Handover — geco, 2026-07-25
+# Handover — geco, 2026-07-28
 
 Start-here for a fresh session. What is done, what is measured, what is next,
 and the traps that already cost time once.
@@ -7,13 +7,21 @@ and the traps that already cost time once.
 
 ## 1. State of the repo
 
-`main` is clean and green. **161 tests**, CI runs 10 checks on
-Linux/macOS/Windows. Version is **0.8.0 in `Cargo.toml` but deliberately NOT
-tagged** — no public release, because there are no users yet and shipping
-binaries nobody downloads is waste.
+`main` is at `7043364` with **177 tests** and CI runs 10 checks on
+Linux/macOS/Windows.
 
-Branch `feat/picker-sampling` carries the picker's last gap plus a batch of
-audit fixes (§4). Everything else is merged and the stale branches are deleted.
+Two commits arrived from outside this session (`92a7628`, `945a800`) and **both
+were red on CI** — rustfmt, and the Windows test leg. They are reviewed and
+repaired in the three commits above; §5 has what the review found.
+
+**The last release is v0.7.0.** `Cargo.toml` says 0.8.0, which never shipped,
+and everything since — the picker, the lean surface, two audits' worth of fixes
+— is unreleased. So the prebuilt binaries the installers fetch are older than
+the docs describe; `main` needs a source build. Whatever is tagged next carries
+**three breaking changes**: the default meta-tool surface (six → three),
+`execute`'s response shape (`content` → `attachments` + real blocks), and
+`geco refresh` now exiting 1 when a backend fails. A 0.9.0 covers it under the
+pre-1.0 caveat the changelog already states.
 
 **Untracked junk:** `ts.py` in the repo root is not mine and not referenced —
 left alone deliberately. There is also a zero-byte file whose name is the
@@ -94,6 +102,23 @@ LM Studio binds 127.0.0.1 and WSL cannot reach it):
 README ("Crossing the wall"), `geco.example.yaml` and the CHANGELOG — it
 shipped in #29 with none of that, reachable only by reading `src/config.rs`.
 
+**The headline result, on a realistic 8-server catalogue (324 tools), same 210
+queries:** lexical 24.8% → BM25F top-50 + picker 74.6% → **whole catalogue +
+picker 94.8%**. Sending everything is more accurate *and* faster (0.9s vs
+2.2s), for two linked reasons:
+
+- **BM25F does not select random distractors, it selects the most confusable
+  ones.** A shortlist is precisely the set of plausible wrong answers; the
+  tools it discards are obvious non-answers. Precision did not fall under 7x
+  the distractors.
+- **An unchanging catalogue is a cacheable prompt prefix** — 96.6% of a 15k
+  prompt served from cache, 13x faster. A per-query shortlist can never cache.
+
+And the surprise: **putting the catalogue BEFORE the question was worth 4.3
+points on its own** (90.5% → 94.8%), same model, same candidates, same wording.
+It was done for caching. Prompt *layout* moved this corpus further than any
+scoring change ever has — worth remembering as a class.
+
 - **Both transports work and are proven end to end** in
   `tests/picker_e2e.rs`: `sampling` over a real MCP session on an in-memory
   duplex, `command` with a real child process. Each test pins the lexical
@@ -150,15 +175,59 @@ writing non-UTF-8, `uninstall.sh` dying silently without python3 and missing
 the Linux purge paths, `list_skills` blaming a correct config, and two stale
 INSTALL.md claims. Details in the CHANGELOG.
 
+A second, pre-merge audit ran on 2026-07-27 over the whole diff before it
+landed: six dimensions again, adversarially verified again, **16 survived**,
+zero blockers. The one that mattered: whole-catalogue mode let `search`
+fabricate a rank-1 hit for a request the gateway could not serve, because the
+prompt has no "none of these" escape. A query that scores nothing on either
+surface now gets no pick at all.
+
+A third review ran on 2026-07-28 over the two externally-authored commits:
+five dimensions, adversarially verified, **21 of 26 survived** plus 4 from a
+completeness critic. The pattern worth carrying forward is *where* the defects
+were. The Rust logic was sound; what broke was everything around it —
+
+- the shipped example config named a path geco could not spawn (`~`),
+- the new test could not pass on Windows (`\U` in a YAML double-quoted scalar),
+- the installer wrote into another tool's config tree unconditionally,
+- release archives did not contain the assets the shipped config points at,
+- the one new coupling (`GECO_CLIENT`) had no test at all.
+
+Every one of those is invisible to "it worked on my machine", because the
+machine in question was a Mac with opencode already installed. **The surfaces
+that break are the ones the author does not stand on.**
+
 ### Still open, in rough order
 
-1. **`geco health` discards the real backend failure reason.** When the cached
-   snapshot says `ok` but a live call failed, health prints "connection lost
-   (child process exited)" — while the actual cause ("npx is not on the PATH
-   geco was started with") was computed, stored in `Status::Failed.error`, and
-   then thrown away one layer later. `src/server.rs`, the `snapshot_ok` branch.
-   Small, and it misdirects users on the #1 first-run stumble.
-2. **Picker prompt injection is unmitigated, and may be unmitigable.** Tool
+1. **Nobody has used it.** Every number here is measured against corpora,
+   stubs and a driven binary. The picker's 94.8% is on *vocabulary-banned*
+   queries, deliberately the hard end; real traffic is unmeasured. "Does an
+   agent work better with this, all day, for weeks" is the question that
+   decides production readiness and cannot be answered from this side. First
+   real use is on a Mac with opencode.
+2. **The lean default is a judgement, not a measurement.** `proxy.surface`
+   defaults to `lean` (search/execute/read_skill, 2,562 B). Everything the
+   browse tools did is reachable — `search("*")`, the automatic
+   catalogue-in-the-hint on a miss, `issues` riding on search — but whether
+   models take those routes in daily use is unverified. `geco stats` counts
+   calls per meta-tool; that is the evidence to look at.
+3. **Skills are unmeasured.** They go through the same picker in the same
+   call, and the wiring is tested end to end, but there is no labelled skill
+   corpus, so the tool numbers do not transfer. Building one (same shape as
+   `labeled_eval.json`) is the only way to know.
+4. **The whole-catalogue budget is a guess above 324 tools.** 805 and 1,589
+   are unmeasured. That is where a two-stage server-then-tool pick would earn
+   its keep, if it does.
+5. **Untested: the upgrade path.** A 0.7.0 snapshot and config meeting the new
+   binary. v0.7.0 shipped, so those users exist. `Snapshot::load` survives
+   corrupt JSON but nothing covers schema evolution.
+6. **Untested: failure drills.** Disk full mid-snapshot, a backend that hangs
+   rather than dies, killed mid-refresh.
+7. **The picker has never met a real client.** Every measurement went through
+   the scoring harness or a stub command. `mode: sampling` has not faced a
+   client that implements it; `mode: command` has not run a real agent CLI in
+   a real session.
+8. **Picker prompt injection is unmitigated, and may be unmitigable.** Tool
    descriptions come from third-party backends and become the prompt of a
    model — under `command` mode, a model with shell access running as the
    user. You cannot pick a tool without showing the model its description, so
@@ -166,7 +235,7 @@ INSTALL.md claims. Details in the CHANGELOG.
    `{prompt}` argv contract should be replaced by stdin (so no user is tempted
    to write `bash -lc "... '{prompt}'"`), and what the README should say.
    Currently it says nothing.
-3. **Result compaction** (unbuilt, from the previous handover). geco can
+9. **Result compaction** (unbuilt, from the previous handover). geco can
    compact a tool *result* before it enters context — same mission as hiding
    schemas, one layer up. Cheapest start: `execute` already has typed error
    codes, so return a compact error instead of a backend's raw dump. Only a
@@ -174,7 +243,7 @@ INSTALL.md claims. Details in the CHANGELOG.
    opencode plugins can edit transcripts — check the docs before promising it.
    **Trap:** stripping failed tool calls entirely makes the model forget it
    failed, so it retries the same broken call forever. Replace, don't delete.
-4. **Scaling `candidates` to the model was considered and rejected** — see
+10. **Scaling `candidates` to the model was considered and rejected** — see
    `docs/search-ranking.md`. geco has no signal for which model is behind an
    opaque argv or which one a client routes sampling to, so any auto-shrink is
    guessing at hardware it cannot see, and guessing downward costs recall. The
@@ -195,15 +264,29 @@ INSTALL.md claims. Details in the CHANGELOG.
   <file>` when you want it back. Cost one redo of a finished change.
 - **`sed -i` fails on `/mnt/c`** from WSL ("Operation not permitted"). Edit
   from the Windows side or use a different tool.
+- **WSL's `/tmp` does not survive between `wsl -e` invocations.** A probe that
+  writes a workspace in one call and reads it in the next finds nothing, and
+  the symptom is an empty result rather than an error — which reads exactly
+  like "the feature did nothing". Put multi-step probes in one shell, or under
+  `$HOME`.
+- **`git` inside WSL sees every CRLF file as modified.** `git diff --stat` from
+  WSL on this checkout reports ~11k changed lines across files nothing touched.
+  Use Windows git to read the working-tree state.
+- **Piping to `tail`/`grep` hides the exit code.** `cargo fmt --check | tail;
+  echo $?` reports *tail's* status, which is always 0. That is how a red
+  rustfmt was read as green this session. Redirect to a file and echo `$?`
+  straight after the command.
 - **The pre-push hook** now finds the WSL toolchain (it silently checked
   *nothing* for weeks before that fix). It runs fmt/clippy/tests, and typos if
   installed.
 - **`scripts/lint.sh`** mirrors CI's lint job locally (shellcheck, actionlint,
   typos, gitleaks). Run it before pushing prose-heavy commits — a typo has
   failed CI before. It reports what it *skipped*, so a clean result is honest.
-  **PSScriptAnalyzer is not available locally**, so `.ps1` changes are
-  unlinted until CI. Parse-check them with
-  `[System.Management.Automation.Language.Parser]::ParseFile(...)` at least.
+  **PSScriptAnalyzer runs too**, via `powershell.exe` — it was installed all
+  along, and the script probed only for `pwsh` (PowerShell 7), so it reported
+  "NOT CHECKED" while claiming everything that ran was clean, and `.ps1`
+  findings reached CI. Fixed; a run that reports no skips really did check all
+  five.
 - **PowerShell 5.1 writes the system ANSI codepage** from `Set-Content`,
   `>` and `Out-File` unless told otherwise. It also sends request bodies as
   ISO-8859-1: the harvest contains CJK tool descriptions, and without explicit
