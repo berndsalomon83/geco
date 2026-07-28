@@ -1590,10 +1590,13 @@ impl Proxy {
             // pick would block every reconnect for the length of a model
             // round-trip, and `Peer` is an Arc-backed handle.
             let peer = self.peer.read().await.clone();
+            // The harness name from the MCP handshake, so the command
+            // transport can discover the model the harness-specific way.
+            let client = self.client.read().await.clone();
             // A pick hoists that entry to rank 1 of its own list and leaves
             // the lexical order beneath it. No pick (unsupported, timeout,
             // garbage reply) simply leaves both orders alone.
-            match picker.pick(&p.query, &cands, peer.as_ref()).await {
+            match picker.pick(&p.query, &cands, peer.as_ref(), client.as_deref()).await {
                 crate::picker::Pick::Choice(idx) => {
                     let c = &pool[idx];
                     tracing::debug!("picker chose {} {}::{}", c.kind, c.server, c.name);

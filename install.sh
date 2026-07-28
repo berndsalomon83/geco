@@ -145,6 +145,31 @@ else
     "$NEW_BIN" schema > "$CFG_DIR/geco.schema.json" 2>/dev/null || true
 fi
 
+# Scaffold the picker assets (wrapper script + harness configs) so the LLM
+# picker works out of the box for opencode. The script is generic — it
+# branches on GECO_CLIENT — and users can edit it or add harnesses.
+# Existing files are never overwritten: the user may have customised them.
+PICKER_DIR="$CFG_DIR/picker"
+if [ ! -d "$PICKER_DIR" ]; then
+    mkdir -p "$PICKER_DIR"
+    cp "$REPO_DIR/picker/pick.sh" "$PICKER_DIR/pick.sh"
+    cp "$REPO_DIR/picker/opencode.json" "$PICKER_DIR/opencode.json"
+    chmod +x "$PICKER_DIR/pick.sh"
+    say "Scaffolded picker: $PICKER_DIR/pick.sh (+ opencode.json)"
+else
+    say "Picker assets exist: $PICKER_DIR (not overwritten)"
+fi
+# The picker agent for opencode — a minimal named agent with no tools.
+# Goes where opencode discovers agents: ~/.config/opencode/agents/.
+OC_AGENTS_DIR="$HOME/.config/opencode/agents"
+if [ ! -f "$OC_AGENTS_DIR/picker.md" ]; then
+    mkdir -p "$OC_AGENTS_DIR"
+    cp "$REPO_DIR/picker/picker.md" "$OC_AGENTS_DIR/picker.md"
+    say "Scaffolded picker agent: $OC_AGENTS_DIR/picker.md"
+else
+    say "Picker agent exists: $OC_AGENTS_DIR/picker.md (not overwritten)"
+fi
+
 say "Building tool snapshot…"
 "$DEST" --config "$CFG" refresh || warn "refresh reported issues (fix config, then: geco refresh)"
 

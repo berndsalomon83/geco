@@ -370,11 +370,18 @@ impl Picker {
     /// `peer` is the live MCP connection back to the client, needed only by
     /// the sampling transport; pass `None` and sampling reports itself dead
     /// rather than retrying against nothing.
+    ///
+    /// `client` is the harness name from the MCP initialize handshake
+    /// (e.g. "opencode", "claude-ai"). Passed to the command transport via
+    /// the `GECO_CLIENT` env var so a wrapper script can branch on which
+    /// harness is calling and discover its model accordingly. Ignored by
+    /// sampling (the harness's own model is used directly) and when off.
     pub async fn pick(
         &self,
         query: &str,
         cands: &[Candidate<'_>],
         peer: Option<&Peer<RoleServer>>,
+        client: Option<&str>,
     ) -> Pick {
         let prompt = Self::prompt(query, cands);
         let reply = match &self.transport {
@@ -393,7 +400,7 @@ impl Picker {
                     Err(SamplingFailure::Dead) => return Pick::TransportDead,
                 }
             }
-            Transport::Command(argv) => match self.run_command(argv, &prompt).await {
+            Transport::Command(argv) => match self.run_command(argv, &prompt, client).await {
                 Some(r) => r,
                 None => return Pick::NoChoice,
             },
@@ -481,7 +488,12 @@ impl Picker {
     /// replaced by the prompt; if the template contains no placeholder the
     /// prompt is appended as a final argument, which is what agent CLIs like
     /// `opencode run "<prompt>"` expect.
-    async fn run_command(&self, argv: &[String], prompt: &str) -> Option<String> {
+    ///
+    /// `client` is the harness name from the MCP handshake, exposed to the
+    /// command via `GECO_CLIENT` so a wrapper script can branch on which
+    /// harness is calling and discover its model the right way — each
+    /// harness stores its session model differently.
+    async fn run_command(&self, argv: &[String], prompt: &str, client: Option<&str>) -> Option<String> {
         let (bin, args) = argv.split_first()?;
         let mut cmd = tokio::process::Command::new(bin);
         let mut substituted = false;
@@ -500,6 +512,13 @@ impl Picker {
         // pick. Sub-sessions are expected to use a stripped profile, and this
         // marker lets a nested geco refuse to serve as a belt-and-braces.
         cmd.env("GECO_NO_PICKER", "1");
+        // Tell the command which harness is calling, so a wrapper script can
+        // discover the model the harness-specific way. The MCP handshake is
+        // the only reliable source — guessing from env vars or paths would
+        // break the moment two harnesses share a machine.
+        if let Some(name) = client {
+            cmd.env("GECO_CLIENT", name);
+        }
         cmd.stdin(std::process::Stdio::null());
         // Without this, a timeout leaks the process. `timeout` only drops the
         // future; tokio does NOT reap a child on drop unless told to. The
@@ -861,7 +880,7 @@ mod tests {
         // Selecting sampling means the client advertised it, so arriving here
         // without a peer is geco's own bug. Reporting it dead makes it show up
         // once in the log instead of once per search, forever.
-        assert_eq!(p.pick("q", &cands(), None).await, Pick::TransportDead);
+        assert_eq!(p.pick("q", &cands(), None, None).await, Pick::TransportDead);
     }
 
     /// A command that will not run is NOT treated as a dead transport, unlike
@@ -879,7 +898,7 @@ mod tests {
             Picker::from_config(&c, false)
         };
         assert!(matches!(p.transport(), Transport::Command(_)));
-        assert_eq!(p.pick("q", &cands(), None).await, Pick::NoChoice);
+        assert_eq!(p.pick("q", &cands(), None, None).await, Pick::NoChoice);
     }
 
     #[tokio::test]
@@ -888,6 +907,6 @@ mod tests {
             let _env = env_guard();
             Picker::from_config(&PickerConfig::default(), true)
         };
-        assert_eq!(p.pick("q", &cands(), None).await, Pick::NoChoice);
+        assert_eq!(p.pick("q", &cands(), None, None).await, Pick::NoChoice);
     }
 }

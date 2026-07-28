@@ -50,12 +50,17 @@ proxy:
   # Serves skills as well as tools: one call over one combined catalogue, so
   # the model answers "which capability fits" rather than being made to name
   # a skill for a request that wanted a tool.
+  #
+  # `mode: auto` borrows your CLIENT's model over MCP sampling — zero config,
+  # but only works if your client implements it. `mode: command` runs a
+  # script and reads stdout; `{prompt}` is substituted, or appended if absent.
+  #
+  # The install scaffolds a wrapper script at ~/.config/geco/picker/pick.sh
+  # that discovers the calling harness's current model (via GECO_CLIENT,
+  # set by geco from the MCP handshake) and invokes it. Uncomment to enable:
   # picker:
-  #   mode: command        # off (default) | auto | sampling | command
-  #   # `sampling` borrows your CLIENT's model over MCP — zero config, but
-  #   # only works if your client implements it. `command` runs anything and
-  #   # reads stdout; `{prompt}` is substituted, or appended if absent.
-  #   command: ["opencode", "run", "--agent", "minimal", "{prompt}"]
+  #   mode: command
+  #   command: ["~/.config/geco/picker/pick.sh", "{prompt}"]
   #   # When the whole catalogue fits in roughly this many tokens, the model
   #   # is shown EVERY tool and lexical retrieval is skipped. Measured on a
   #   # realistic 8-server config: 94.8% rank-1 vs 74.6% for a top-50
@@ -63,7 +68,7 @@ proxy:
   #   # prefix the server can cache (96.6% cached, 0.9s vs 2.2s). 0 disables.
   #   whole_catalogue_tokens: 24000
   #   candidates: 50       # fallback shortlist, for catalogues over budget
-  #   timeout_secs: 20     # then give up and return the lexical order
+  #   timeout_secs: 30     # then give up and return the lexical order
 
 mcpServers:
   playwright:
