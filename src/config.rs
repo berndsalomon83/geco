@@ -117,10 +117,15 @@ pub struct PickerConfig {
     /// Anything configured but unavailable degrades to lexical ranking rather
     /// than failing the search.
     pub mode: String,
-    /// Command to run, e.g.
-    /// `["opencode", "run", "--agent", "minimal", "--format", "json"]`.
+    /// Command to run, e.g. `["~/.config/geco/picker/pick.sh", "{prompt}"]`
+    /// — the wrapper the installer scaffolds, which discovers your harness's
+    /// current model and calls it.
+    ///
     /// `{prompt}` anywhere in the arguments is replaced by the prompt; with no
-    /// placeholder it is appended as the final argument. Reach an
+    /// placeholder it is appended as the final argument. A leading `~/` in the
+    /// program is expanded; arguments are passed through untouched, since one
+    /// of them is the user's own query. The child sees `GECO_NO_PICKER=1` and,
+    /// when a client has handshaken, `GECO_CLIENT` with its name. Reach an
     /// OpenAI-compatible endpoint with a small wrapper script — geco ships no
     /// HTTP client, deliberately.
     pub command: Vec<String>,
@@ -950,6 +955,28 @@ impl Config {
             }
         }
 
+        // The picker's own command. Nothing else checks it: a picker that
+        // cannot spawn is not an error, it is a silent fallback to the lexical
+        // order, one WARN per search in a log nobody is reading — and the
+        // advice the model surfaces after three misses is about the model, not
+        // the path. `geco validate` is where that should be visible instead.
+        if let Some(bin) = self.proxy.picker.command.first() {
+            let expanded = crate::skills::expand_tilde(bin);
+            let looks_reachable = match expanded.to_str() {
+                Some(s) => binary_exists(s),
+                None => true,
+            };
+            if !looks_reachable {
+                findings.push((
+                    "warning".into(),
+                    format!(
+                        "proxy.picker.command: '{bin}' not found (searches will fall back \
+                         to lexical ranking)"
+                    ),
+                ));
+            }
+        }
+
         // Skills dir checks.
         for dir in &self.skills.dirs {
             let expanded = crate::skills::expand_tilde(dir);
@@ -1600,6 +1627,44 @@ mcpServers:
                 .iter()
                 .any(|(s, m)| s == "warning" && m.contains("not found on PATH")),
             "expected warning about missing binary: {findings:?}"
+        );
+    }
+
+    /// A picker command that cannot spawn is invisible at runtime — the search
+    /// still answers, just with the lexical order, and the only trace is one
+    /// WARN per search. `validate` is the one place a user goes looking, so it
+    /// has to say so. The tilde case is the one that actually shipped broken:
+    /// the path is right and only the `~` is unexpanded, so a check that does
+    /// not expand it reports a false alarm for the config the installer writes.
+    #[test]
+    fn validate_warns_about_an_unspawnable_picker_command() {
+        let _env = env_guard();
+        let raw = r#"{"proxy":{"picker":{"mode":"command",
+                     "command":["~/geco-nonexistent-picker-xyz.sh","{prompt}"]}},
+                     "mcpServers":{}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("proxy.picker.command")),
+            "expected a warning about the picker command: {:?}",
+            cfg.validate()
+        );
+
+        // And the inverse, so the assertion above cannot pass vacuously: a
+        // program that does resolve must produce no such warning.
+        let bin = if cfg!(windows) { "cmd" } else { "sh" };
+        let raw = format!(
+            r#"{{"proxy":{{"picker":{{"mode":"command","command":["{bin}","{{prompt}}"]}}}},
+               "mcpServers":{{}}}}"#
+        );
+        let cfg: Config = serde_json::from_str(&raw).unwrap();
+        assert!(
+            !cfg.validate()
+                .iter()
+                .any(|(_, m)| m.contains("proxy.picker.command")),
+            "a resolvable picker command must not warn: {:?}",
+            cfg.validate()
         );
     }
 

@@ -493,9 +493,22 @@ impl Picker {
     /// command via `GECO_CLIENT` so a wrapper script can branch on which
     /// harness is calling and discover its model the right way — each
     /// harness stores its session model differently.
-    async fn run_command(&self, argv: &[String], prompt: &str, client: Option<&str>) -> Option<String> {
+    async fn run_command(
+        &self,
+        argv: &[String],
+        prompt: &str,
+        client: Option<&str>,
+    ) -> Option<String> {
         let (bin, args) = argv.split_first()?;
-        let mut cmd = tokio::process::Command::new(bin);
+        // `~` is a shell convention, and there is no shell here — the binary
+        // is handed straight to execvp. The config the installer scaffolds
+        // says `command: ["~/.config/geco/picker/pick.sh", …]`, which spawned
+        // nothing at all: every search logged one ENOENT and fell back to the
+        // lexical order, while the miss-streak advice blamed the model. Expand
+        // it the same way skills dirs are expanded. A bare PATH name like
+        // `opencode` has no `~/` prefix, so it comes back untouched and still
+        // resolves through PATH.
+        let mut cmd = tokio::process::Command::new(crate::skills::expand_tilde(bin));
         let mut substituted = false;
         for a in args {
             if a.contains("{prompt}") {

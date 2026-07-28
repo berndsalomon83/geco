@@ -304,10 +304,14 @@ geco ships **no HTTP client** to do this. Adding one would drag a TLS stack into
 proxy:
   picker:
     mode: command
-    command: ["opencode", "run", "--agent", "minimal", "{prompt}"]
+    command: ["~/.config/geco/picker/pick.sh", "{prompt}"]
 ```
 
-`{prompt}` anywhere in the arguments is substituted; with no placeholder the prompt is appended as the final argument. The child is spawned with `GECO_NO_PICKER=1` so a nested geco can refuse to recurse.
+`pick.sh` is scaffolded by `install.sh` (macOS/Linux) and is yours to edit. It exists because the picker should use *the model you are already talking to*, and only the harness knows which that is — so geco passes the client name from the MCP handshake as **`GECO_CLIENT`** (`opencode`, `claude-ai`, …) and the script branches on it: a `discover_<harness>` that finds the session's model, a `run_<harness>` that calls it. Today it implements opencode and falls back to opencode for anything else. Adding a harness is two functions and a `case` branch; geco itself stays generic, and the env var is the entire coupling.
+
+On Windows, or if you'd rather not use the wrapper, point `command` at anything that prints an answer to stdout — `claude -p`, `codex exec`, a three-line curl script.
+
+`{prompt}` anywhere in the arguments is substituted; with no placeholder the prompt is appended as the final argument. A leading `~/` in the *program* is expanded; arguments are left alone, since one of them is the query. The child is spawned with `GECO_NO_PICKER=1` so a nested geco can refuse to recurse.
 
 **Every failure degrades to the lexical order** — unsupported, unreachable, timed out, answered in prose, named a tool that doesn't exist. Enabling a picker can cost you latency; it cannot break search or return something that isn't yours. One asymmetry is deliberate: a client that *advertises* sampling and then refuses to serve it is asked exactly once per session, because otherwise every search would pay a doomed round-trip — and, on clients that prompt for approval, show you a dialog — for a lexical answer geco was always going to return.
 
@@ -389,7 +393,7 @@ A missing keychain item fails the spawn loudly — plain `${VAR}` env references
 
 ```bash
 geco serve [--refresh|--no-refresh]   # run the proxy (default command)
-geco refresh                          # rebuild the snapshot; nudges a running proxy to reload
+geco refresh                          # sweep absorb dirs, rebuild the snapshot, nudge a running proxy to reload
 geco inspect                          # show the cached snapshot
 geco health                           # what's broken right now (exit 1 on errors)
 geco stats                            # show runtime metrics (calls, errors, latency)

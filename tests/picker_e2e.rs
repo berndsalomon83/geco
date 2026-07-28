@@ -49,15 +49,19 @@ struct FakeClient {
     /// How many times the proxy actually asked. The number that proves geco
     /// stops asking a client that will not answer.
     calls: Arc<AtomicUsize>,
+    /// The name this client reports at initialize. `None` keeps the build-env
+    /// default; a test that cares what geco does with the harness name sets it.
+    client_name: Option<String>,
 }
 
 impl ClientHandler for FakeClient {
     #[allow(deprecated)]
     fn get_info(&self) -> ClientInfo {
-        ClientInfo::new(
-            ClientCapabilities::builder().enable_sampling().build(),
-            Implementation::from_build_env(),
-        )
+        let mut me = Implementation::from_build_env();
+        if let Some(name) = &self.client_name {
+            me.name = name.clone();
+        }
+        ClientInfo::new(ClientCapabilities::builder().enable_sampling().build(), me)
     }
 
     #[allow(deprecated)]
@@ -331,6 +335,7 @@ async fn sampling_hoists_the_model_choice_to_rank_one() {
             reply: format!(r#"{{"server":"{want_server}","tool":"{want_tool}"}}"#),
             refuse: false,
             calls: calls.clone(),
+            client_name: None,
         },
     )
     .await;
@@ -368,6 +373,7 @@ async fn a_client_that_refuses_sampling_is_asked_once_and_never_again() {
             reply: String::new(),
             refuse: true,
             calls: calls.clone(),
+            client_name: None,
         },
     )
     .await;
@@ -840,4 +846,153 @@ async fn a_command_gets_the_prompt_substituted_and_a_no_recursion_marker() {
         Some(&(want_server, want_tool)),
         "substituted prompt + `server::tool` reply must resolve: {picked:?}"
     );
+}
+
+/// `~` in the picker command must be expanded, because the config the
+/// installer scaffolds is written that way.
+///
+/// There is no shell between geco and the picker — argv[0] goes to execvp —
+/// so a literal `~/…` spawned nothing at all. The shipped
+/// `command: ["~/.config/geco/picker/pick.sh", "{prompt}"]` logged one ENOENT
+/// per search and fell back to the lexical order, while the miss-streak
+/// message told the user to check their model. The whole feature was
+/// unreachable through the only configuration documented for it.
+/// Only `argv[0]` is expanded, deliberately. Arguments are the command's own
+/// business, and one of them is the prompt: a request that happens to begin
+/// with `~/` would otherwise be rewritten on its way to the model.
+#[tokio::test]
+async fn a_picker_command_under_a_tilde_is_found() {
+    let plain = proxy_with(json!({ "mode": "off" }));
+    let lexical = search_order(&plain, "read").await;
+    assert!(lexical.len() >= 2, "need two hits: {lexical:?}");
+    let (want_server, want_tool) = lexical.last().unwrap().clone();
+
+    // A real, directly-spawnable script at a real path, reached only through
+    // `~/` — exactly the shape install.sh scaffolds. HOME is repointed at the
+    // temp dir for the length of the test; the expansion reads it at spawn
+    // time, so this is what a user's `~` resolves to.
+    let home = tempfile::tempdir().expect("tempdir");
+    let reply = format!("{{\"server\": \"{want_server}\", \"tool\": \"{want_tool}\"}}");
+    let name = if cfg!(windows) {
+        let p = home.path().join("pick_probe.bat");
+        std::fs::write(&p, format!("@echo off\r\necho {reply}\r\n")).expect("write probe");
+        "~/pick_probe.bat"
+    } else {
+        let p = home.path().join("pick_probe.sh");
+        std::fs::write(&p, format!("#!/bin/sh\necho '{reply}'\n")).expect("write probe");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        "~/pick_probe.sh"
+    };
+
+    let proxy = proxy_with(json!({
+        "mode": "command",
+        "command": [name],   // no {prompt}: geco appends it, the script ignores it
+        "candidates": 10,
+        "timeout_secs": 30,
+    }));
+
+    let _home_guard = HomeGuard::pointing_at(home.path());
+    let picked = search_order(&proxy, "read").await;
+    assert_eq!(
+        picked.first(),
+        Some(&(want_server, want_tool)),
+        "a `~/` picker command must be expanded and spawned, was: {picked:?}"
+    );
+}
+
+/// The harness name from the MCP handshake must reach the picker child as
+/// `GECO_CLIENT`. That variable is the entire point of the coupling: a wrapper
+/// script branches on it to discover the calling harness's model. Nothing
+/// asserted it reached the child, so the feature could have shipped inert and
+/// every pick would still have looked fine — the wrapper would simply have
+/// taken its unknown-harness branch forever.
+#[tokio::test]
+async fn the_harness_name_reaches_the_picker_as_geco_client() {
+    let Some(python) = python_bin() else { return };
+
+    let plain = proxy_with(json!({ "mode": "off" }));
+    let lexical = search_order(&plain, "read").await;
+    assert!(lexical.len() >= 2, "need two hits: {lexical:?}");
+    let (want_server, want_tool) = lexical.last().unwrap().clone();
+
+    // The child refuses to answer unless it sees the name the client gave at
+    // initialize, so a missing or wrong GECO_CLIENT is a failed pick and the
+    // assertion below fails rather than passing on a lexical fallback.
+    let script = format!(
+        "import sys, os; \
+         c = os.environ.get('GECO_CLIENT'); \
+         assert c == 'opencode-under-test', 'GECO_CLIENT was %r' % (c,); \
+         print('{{\"server\": \"{want_server}\", \"tool\": \"{want_tool}\"}}')"
+    );
+    let proxy = proxy_with(json!({
+        "mode": "command",
+        "command": [python, "-c", script, "{prompt}"],
+        "candidates": 10,
+        "timeout_secs": 30,
+    }));
+
+    // Only a connected client has a name, so this test must hold a session
+    // open — unlike the other command tests, which never handshake.
+    let _session = connect(
+        &proxy,
+        FakeClient {
+            reply: String::new(),
+            refuse: true,
+            calls: Arc::new(AtomicUsize::new(0)),
+            client_name: Some("opencode-under-test".into()),
+        },
+    )
+    .await;
+
+    let picked = search_order(&proxy, "read").await;
+    assert_eq!(
+        picked.first(),
+        Some(&(want_server, want_tool)),
+        "the child must have seen GECO_CLIENT=opencode-under-test, was: {picked:?}"
+    );
+}
+
+/// Repoint HOME (and USERPROFILE, which `expand_tilde` falls back to on
+/// Windows) for the length of a test, then put back exactly what was there.
+///
+/// Process environment is global, so this serialises against the other tests
+/// that read it. Held by value only; the restore runs on drop even if the test
+/// panics.
+struct HomeGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl HomeGuard {
+    fn pointing_at(dir: &std::path::Path) -> Self {
+        let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = ["HOME", "USERPROFILE"]
+            .into_iter()
+            .map(|k| {
+                let old = std::env::var_os(k);
+                // SAFETY: single-threaded with respect to env access — every
+                // writer of these two variables takes HOME_LOCK first.
+                unsafe { std::env::set_var(k, dir) };
+                (k, old)
+            })
+            .collect();
+        Self { _lock: lock, prev }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        for (k, old) in &self.prev {
+            match old {
+                Some(v) => unsafe { std::env::set_var(k, v) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+    }
 }

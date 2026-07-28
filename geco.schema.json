@@ -99,7 +99,7 @@
           "default": "off"
         },
         "command": {
-          "description": "Command to run, e.g.\n`[\"opencode\", \"run\", \"--agent\", \"minimal\", \"--format\", \"json\"]`.\n`{prompt}` anywhere in the arguments is replaced by the prompt; with no\nplaceholder it is appended as the final argument. Reach an\nOpenAI-compatible endpoint with a small wrapper script — geco ships no\nHTTP client, deliberately.",
+          "description": "Command to run, e.g. `[\"~/.config/geco/picker/pick.sh\", \"{prompt}\"]`\n— the wrapper the installer scaffolds, which discovers your harness's\ncurrent model and calls it.\n\n`{prompt}` anywhere in the arguments is replaced by the prompt; with no\nplaceholder it is appended as the final argument. A leading `~/` in the\nprogram is expanded; arguments are passed through untouched, since one\nof them is the user's own query. The child sees `GECO_NO_PICKER=1` and,\nwhen a client has handshaken, `GECO_CLIENT` with its name. Reach an\nOpenAI-compatible endpoint with a small wrapper script — geco ships no\nHTTP client, deliberately.",
           "type": "array",
           "items": {
             "type": "string"

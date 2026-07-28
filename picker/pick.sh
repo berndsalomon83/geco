@@ -32,12 +32,29 @@ done
 
 # opencode: SQLite DB at ~/.local/share/opencode/opencode.db, session.model
 # column (JSON: {"id":"...","providerID":"..."}). Latest session = current.
+#
+# Caveat: this is the most recently CREATED session, which is normally the one
+# calling geco but is not guaranteed to be — with two windows open, or once
+# this script's own `opencode run` has written a row, the newest session may be
+# a different one. The consequence is a picker on a neighbouring session's
+# model, not a broken pick, so it is not worth a heavier correlation scheme.
 discover_opencode() {
-    local db="$HOME/.local/share/opencode/opencode.db"
-    [[ -f "$db" ]] || return 1
+    local db="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db"
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "pick.sh: sqlite3 not found — cannot read the opencode session model," \
+             "falling back to opencode's default" >&2
+        return 1
+    fi
+    if [[ ! -f "$db" ]]; then
+        echo "pick.sh: no opencode database at $db — falling back to its default model" >&2
+        return 1
+    fi
+    # Say nothing on success; only the failures above are worth a line. Without
+    # them a missing sqlite3 silently swapped the session's model for whatever
+    # opencode defaults to, and the picks just quietly got worse.
     sqlite3 "$db" \
         "SELECT json_extract(model, '\$.providerID') || '/' || json_extract(model, '\$.id') \
-         FROM session ORDER BY time_created DESC LIMIT 1;" 2>/dev/null
+         FROM session ORDER BY time_created DESC LIMIT 1;"
 }
 
 # Claude Desktop / claude-ai: add discovery here when it stores a model.
@@ -81,13 +98,19 @@ case "$CLIENT" in
     #     run_claude "$MODEL" "$PROMPT"
     #     ;;
     *)
-        # Unknown harness: try opencode as the most common, then fail
-        # gracefully — geco falls back to lexical ranking on any error.
+        # Unknown harness: try opencode, the most common one. If that is not
+        # installed either, say so and exit non-zero. Printing an empty line
+        # and exiting 0 looked to geco like a model that answered with nothing,
+        # so it advised the user to check that their model is not in reasoning
+        # mode — for a harness that had no runner at all. A non-zero exit
+        # routes through the branch that logs this script's own stderr.
         MODEL=$(discover_opencode || true)
-        if [[ -n "$MODEL" ]]; then
+        if command -v opencode >/dev/null 2>&1; then
             run_opencode "$MODEL" "$PROMPT"
         else
-            echo ""
+            echo "pick.sh: no runner for GECO_CLIENT='${CLIENT:-<unset>}' and opencode is" \
+                 "not installed — add a discover_/run_ branch for your harness" >&2
+            exit 1
         fi
         ;;
 esac

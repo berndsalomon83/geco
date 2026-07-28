@@ -55,9 +55,14 @@ proxy:
   # but only works if your client implements it. `mode: command` runs a
   # script and reads stdout; `{prompt}` is substituted, or appended if absent.
   #
-  # The install scaffolds a wrapper script at ~/.config/geco/picker/pick.sh
-  # that discovers the calling harness's current model (via GECO_CLIENT,
-  # set by geco from the MCP handshake) and invokes it. Uncomment to enable:
+  # install.sh (macOS/Linux) scaffolds a wrapper script at
+  # ~/.config/geco/picker/pick.sh that discovers the calling harness's current
+  # model — via GECO_CLIENT, which geco sets from the MCP handshake — and
+  # invokes it, so the picker uses the model you are already talking to.
+  # A leading ~/ in the program is expanded; arguments are not.
+  #
+  # On Windows there is no pick.sh: point `command` at anything that prints an
+  # answer on stdout, e.g. ["claude", "-p", "{prompt}"] or your own wrapper.
   # picker:
   #   mode: command
   #   command: ["~/.config/geco/picker/pick.sh", "{prompt}"]
