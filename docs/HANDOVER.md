@@ -7,8 +7,16 @@ and the traps that already cost time once.
 
 ## 1. State of the repo
 
-`main` is at `7043364` with **177 tests** and CI runs 10 checks on
+`main` is at `9d18351` with **178 tests** and CI runs 10 checks on
 Linux/macOS/Windows.
+
+The commit at head is a warning about method: an external 33-finding review
+(`FINDINGS.md`, untracked) was triaged by code inspection, which refuted all
+four of its concurrency claims — then an adversarial pass tasked with
+*proving* each one defeated one refutation with a live repro on the real
+binary. The hot-reload guard swallowed same-mtime-tick config edits forever.
+Inspection said "self-healing"; the machine said otherwise. For timing and
+watcher claims, refutation by reading is not refutation.
 
 Two commits arrived from outside this session (`92a7628`, `945a800`) and **both
 were red on CI** — rustfmt, and the Windows test leg. They are reviewed and
