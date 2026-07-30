@@ -2340,6 +2340,80 @@ async fn config_watcher_rebuilds_the_snapshot_on_a_real_file_edit() {
     proxy.set_shutdown();
 }
 
+/// An edit whose mtime equals the one the watcher last recorded must still
+/// reload. Found by an external review's claim surviving an adversarial
+/// proof pass — demonstrated live on the real binary before this test
+/// existed.
+///
+/// Filesystem mtimes are quantized (NTFS ticks are ~15.6ms by default;
+/// measured on this project's own deployment host, 15 of 50 back-to-back
+/// writes shared an identical mtime). The old guard compared mtime alone and
+/// recorded it BEFORE parsing, so a save whose completing write landed in
+/// the same tick the watcher had already stat'ed was swallowed — and every
+/// later event with it, because the mtime never moved again. Disk held a
+/// valid new config; geco served the old one until the next unrelated edit.
+/// The sibling test above steps around exactly this with its 1100ms sleep;
+/// this one pins the collision instead: the new config arrives by atomic
+/// rename from a temp file whose mtime is forced back to the recorded one,
+/// so the config path never exists with a differing timestamp and only
+/// content can give the change away.
+#[tokio::test]
+async fn a_config_edit_in_the_same_mtime_tick_still_reloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.yaml");
+    let config_body = |desc: &str| {
+        format!(
+            "mcpServers:\n  s:\n    command: [\"/nonexistent/binary\"]\n    description: \"{desc}\"\n"
+        )
+    };
+    std::fs::write(&cfg_path, config_body("before")).unwrap();
+
+    let cfg = Config::load(&cfg_path).unwrap();
+    let registry = Registry::from_config(&cfg);
+    let snapshot = registry.build_snapshot(cfg.snapshot_hash(), None).await;
+    let proxy = Proxy::new(
+        registry,
+        snapshot,
+        dir.path().join("snapshot.json"),
+        cfg_path.clone(),
+        vec![],
+        vec![],
+    );
+
+    proxy.clone().spawn_hot_reload();
+    // Give the watcher time to arm — it seeds its change detection from the
+    // file as it stands, which is exactly the state we collide with below.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // New content, OLD timestamp: write a temp file, pin its mtime to the
+    // one the watcher recorded, and rename it over the config atomically.
+    let old_mtime = std::fs::metadata(&cfg_path).unwrap().modified().unwrap();
+    let tmp = dir.path().join("config.yaml.new");
+    std::fs::write(&tmp, config_body("after")).unwrap();
+    {
+        let f = std::fs::OpenOptions::new().write(true).open(&tmp).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(old_mtime))
+            .unwrap();
+    }
+    std::fs::rename(&tmp, &cfg_path).unwrap();
+
+    wait_until(
+        30,
+        "a same-mtime config edit to be noticed by content",
+        || async {
+            let json = extract_json(&proxy.list_mcp_servers().await.unwrap());
+            json["servers"]
+                .as_array()
+                .and_then(|a| a.first())
+                .map(|s| s["description"] == "after")
+                .unwrap_or(false)
+        },
+    )
+    .await;
+
+    proxy.set_shutdown();
+}
+
 #[tokio::test]
 async fn skill_watcher_picks_up_a_skill_added_on_disk() {
     let lib = make_skill_library();

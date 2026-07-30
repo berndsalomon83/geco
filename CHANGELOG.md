@@ -23,6 +23,20 @@ minor bump may break.
 
 ### Fixed
 
+- **A config edit could be swallowed forever by its own timestamp.** The
+  hot-reload guard compared mtime alone and recorded it *before* parsing.
+  Filesystem mtimes are quantized (NTFS defaults to ~15.6ms ticks; 15 of 50
+  back-to-back writes measured identical), so a save whose completing write
+  landed in the tick the watcher had already stat'ed compared equal — that
+  event and every later one was discarded, and geco served the old config
+  until the next unrelated edit while the disk held a valid new one.
+  Demonstrated live against the real binary before it was believed: an
+  ordinary two-chunk save was caught permanently stale on the second attempt.
+  The guard now compares mtime *and* content, skipping only when both are
+  unchanged — content catches same-tick edits, mtime keeps `geco refresh`'s
+  pure-bump nudge working. Out of 33 findings in an external review, this was
+  the one that survived adversarial verification; the rest are dispositioned
+  with evidence in the review record.
 - **`geco refresh` did not absorb.** Sweeping stray skills out of
   `skills.absorb` into the library ran only in the live proxy's startup and
   watcher, so a refresh with no proxy running left the native dir full and the

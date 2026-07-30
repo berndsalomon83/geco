@@ -788,15 +788,20 @@ impl Proxy {
         std::mem::forget(watcher);
 
         tokio::spawn(async move {
-            // Seed from the config's current mtime. Starting at None would
-            // make the very first event pass the "did it actually change?"
-            // check unconditionally — and since we watch the whole parent
-            // directory (which also holds geco.schema.json, editor swap
-            // files, …), an unrelated write there would trigger a full
-            // reload and re-spawn every backend exactly once per process.
-            let mut last_mtime: Option<std::time::SystemTime> = std::fs::metadata(&config_path)
-                .and_then(|m| m.modified())
-                .ok();
+            // Seed from the config as it stands. Starting at None would make
+            // the very first event pass the "did it actually change?" check
+            // unconditionally — and since we watch the whole parent directory
+            // (which also holds geco.schema.json, editor swap files, …), an
+            // unrelated write there would trigger a full reload and re-spawn
+            // every backend exactly once per process.
+            let mut last: Option<(std::time::SystemTime, Vec<u8>)> = {
+                let mtime = std::fs::metadata(&config_path).and_then(|m| m.modified());
+                let bytes = std::fs::read(&config_path);
+                match (mtime, bytes) {
+                    (Ok(m), Ok(b)) => Some((m, b)),
+                    _ => None,
+                }
+            };
             loop {
                 if proxy.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -808,16 +813,42 @@ impl Proxy {
                 // firing multiple events in quick succession).
                 while rx.try_recv().is_ok() {}
 
-                // Verify the config file actually changed (mtime check filters
-                // out events on sibling files in the watched directory).
+                // Did the config actually change? BOTH signals matter, and
+                // comparing either alone has shipped a bug:
+                //
+                //   - Content, because mtime alone misses same-tick edits.
+                //     Filesystem mtimes are quantized (NTFS defaults to
+                //     ~15.6ms ticks; 15 of 50 back-to-back writes measured
+                //     identical), and this guard used to record the mtime
+                //     BEFORE parsing — so when a save's completing write
+                //     landed in the tick the loop had already stat'ed, that
+                //     event and every later one compared equal and geco
+                //     served the old config forever while the disk held a
+                //     valid new one. Demonstrated live against the real
+                //     binary before it was believed.
+                //   - Mtime, because content alone would turn `geco refresh`
+                //     into a no-op: its nudge to a running proxy is a pure
+                //     mtime bump with the bytes untouched, and content
+                //     equality would swallow it — reintroducing the exact
+                //     "refresh did nothing" bug the CLI tests exist for.
+                //
+                // A transient read failure updates nothing, so the next
+                // event retries from the same baseline.
                 let mtime = match std::fs::metadata(&config_path).and_then(|m| m.modified()) {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                if last_mtime == Some(mtime) {
+                let bytes = match std::fs::read(&config_path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if last
+                    .as_ref()
+                    .is_some_and(|(m, b)| *m == mtime && *b == bytes)
+                {
                     continue;
                 }
-                last_mtime = Some(mtime);
+                last = Some((mtime, bytes));
 
                 // Reload config, rebuild registry, rebuild snapshot.
                 let cfg = match crate::config::Config::load(&config_path) {
