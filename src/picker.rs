@@ -408,8 +408,17 @@ impl Picker {
         match Self::parse_choice(&reply, cands) {
             Some(i) => Pick::Choice(i),
             // A reply that names nothing recognisable is the model's problem,
-            // not the transport's — the connection worked fine.
-            None => Pick::NoChoice,
+            // not the transport's — the connection worked fine. An empty reply
+            // was already diagnosed upstream; a non-empty one that resolves to
+            // nothing is the picker's silent-failure mode, so leave a trace of
+            // what the model actually said rather than falling back mutely.
+            None => {
+                tracing::debug!(
+                    "picker: reply named no candidate, falling back to lexical: {:?}",
+                    reply.chars().take(200).collect::<String>()
+                );
+                Pick::NoChoice
+            }
         }
     }
 

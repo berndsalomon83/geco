@@ -23,6 +23,19 @@ minor bump may break.
 
 ### Fixed
 
+- **The absorb copy fallback followed symlinks out of a skill.** When the
+  library and an absorb dir sit on different filesystems, `absorb_into` falls
+  back from `rename` to a recursive copy, and that copy decided directory-vs-file
+  with a call that follows symlinks — so a skill containing a link to somewhere
+  outside its own tree copied that outside data *into* the library, and a
+  symlink loop would recurse until the stack overflowed. Absorbed skills are
+  only semi-trusted (a model or installer may drop one), so it was reachable;
+  confirmed by repro. The copy now reads each entry's own file type and skips
+  symlinks — a self-contained skill has no need of them. From a second external
+  security review; the rest of that review is dispositioned with evidence in the
+  review record (the standout non-issue: a claimed PowerShell-injection path
+  that turned out to pass the credential name as an opaque env value, never into
+  the script text).
 - **A config edit could be swallowed forever by its own timestamp.** The
   hot-reload guard compared mtime alone and recorded it *before* parsing.
   Filesystem mtimes are quantized (NTFS defaults to ~15.6ms ticks; 15 of 50

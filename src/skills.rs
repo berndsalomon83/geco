@@ -16,13 +16,28 @@ use serde::Deserialize;
 
 /// Recursively copy a directory tree (used as a cross-filesystem fallback
 /// for `rename` in `absorb_into`).
+///
+/// Symlinks are SKIPPED, not followed. `absorb_into`'s primary path is
+/// `rename`, which moves a symlink as a symlink; this fallback runs only when
+/// the absorb dir and library are on different filesystems, and absorbed
+/// content is only semi-trusted (a skill can be dropped by a model, an
+/// installer, or a playbook). Deciding dir-vs-file with the entry's OWN file
+/// type instead of `path().is_dir()` — which follows the link — stops a
+/// symlink inside a skill from (a) copying data from OUTSIDE the tree into the
+/// library, verified by repro, and (b) recursing forever around a symlink
+/// loop and overflowing the stack. A self-contained skill has no need of
+/// symlinks, so dropping them is safe and predictable.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let p = entry.path();
         let target = dst.join(entry.file_name());
-        if p.is_dir() {
+        if file_type.is_dir() {
             copy_dir_recursive(&p, &target)?;
         } else {
             std::fs::copy(&p, &target)?;
@@ -562,6 +577,48 @@ mod tests {
         let idx = SkillIndex::scan(&["/nonexistent/skills".into()]);
         assert!(idx.skills.is_empty());
         assert_eq!(idx.errors.len(), 1);
+    }
+
+    /// The cross-filesystem copy fallback must not follow a symlink out of the
+    /// skill it is copying — doing so pulled data from OUTSIDE the tree into the
+    /// library (verified by repro) and could loop forever around a link cycle.
+    /// This drives `copy_dir_recursive` directly, because forcing an EXDEV
+    /// rename inside a test is not portable.
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_does_not_follow_symlinks_out_of_the_tree() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "not part of any skill").unwrap();
+
+        let skill = tmp.path().join("skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: s\ndescription: d\n---\n",
+        )
+        .unwrap();
+        std::fs::write(skill.join("real.txt"), "a genuine bundled file").unwrap();
+        symlink(&outside, skill.join("link_to_outside")).unwrap();
+
+        let dst = tmp.path().join("copied");
+        copy_dir_recursive(&skill, &dst).expect("copy must succeed, skipping the link");
+
+        assert!(dst.join("SKILL.md").is_file(), "real files are copied");
+        assert!(
+            dst.join("real.txt").is_file(),
+            "real bundled files are copied"
+        );
+        assert!(
+            !dst.join("link_to_outside").exists(),
+            "the symlink must be skipped, not recreated"
+        );
+        assert!(
+            !dst.join("link_to_outside").join("secret.txt").exists(),
+            "data from outside the skill must never reach the library"
+        );
     }
 
     #[test]
