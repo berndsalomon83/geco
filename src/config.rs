@@ -834,34 +834,53 @@ impl Config {
                     "error".into(),
                     format!("server '{name}': empty command array"),
                 ));
-            } else if let Ok((bin, _)) = s.command_line() {
-                // Warn if the binary doesn't exist on PATH or as a path.
-                // Skipped for known package managers that download the real
-                // server at runtime — a missing npx is the user's env problem,
-                // not a config mistake.
-                const DOWNLOADERS: &[&str] = &[
-                    "npx",
-                    "uvx",
-                    "uv",
-                    "node",
-                    "nodejs",
-                    "python3",
-                    "python",
-                    "pip",
-                    "pipx",
-                    "docker",
-                    "docker-compose",
-                    "bun",
-                    "deno",
-                    "cargo",
-                ];
-                let bin_name = std::path::Path::new(&bin)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(&bin);
-                if !DOWNLOADERS.contains(&bin_name) && !binary_exists(&bin) {
-                    findings.push(("warning".into(),
-                        format!("server '{name}': command '{bin}' not found on PATH (will fail at spawn)")));
+            } else {
+                match s.command_line() {
+                    Err(e) => {
+                        // A ${keychain:...} in command/args that cannot
+                        // resolve, or an unterminated ${...}. This is
+                        // exactly the "will fail at spawn" class validate
+                        // exists to catch — and `if let Ok` used to swallow
+                        // it silently while the env loop below only covered
+                        // refs in `env`.
+                        findings.push((
+                            "error".into(),
+                            format!(
+                                "server '{name}': command cannot be resolved \
+                                 (will fail at spawn): {e:#}"
+                            ),
+                        ));
+                    }
+                    Ok((bin, _)) => {
+                        // Warn if the binary doesn't exist on PATH or as a
+                        // path. Skipped for known package managers that
+                        // download the real server at runtime — a missing npx
+                        // is the user's env problem, not a config mistake.
+                        const DOWNLOADERS: &[&str] = &[
+                            "npx",
+                            "uvx",
+                            "uv",
+                            "node",
+                            "nodejs",
+                            "python3",
+                            "python",
+                            "pip",
+                            "pipx",
+                            "docker",
+                            "docker-compose",
+                            "bun",
+                            "deno",
+                            "cargo",
+                        ];
+                        let bin_name = std::path::Path::new(&bin)
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or(&bin);
+                        if !DOWNLOADERS.contains(&bin_name) && !binary_exists(&bin) {
+                            findings.push(("warning".into(),
+                                format!("server '{name}': command '{bin}' not found on PATH (will fail at spawn)")));
+                        }
+                    }
                 }
             }
             // Try keychain lookups — verifies the item exists at validate time.
@@ -871,7 +890,12 @@ impl Config {
                 while let Some(start) = v[search..].find("${keychain:") {
                     let abs = search + start;
                     if let Some(end) = v[abs..].find('}') {
-                        let service = &v[abs + 11..abs + end];
+                        // Trimmed, because the RUNTIME trims: resolve_var
+                        // calls keychain_lookup(service.trim()), so
+                        // "${keychain: github_token}" (natural YAML spacing)
+                        // spawns fine — and validating the untrimmed slice
+                        // made `geco validate` exit 1 on a working config.
+                        let service = v[abs + 11..abs + end].trim();
                         if service.is_empty() {
                             findings.push((
                                 "error".into(),
@@ -955,11 +979,36 @@ impl Config {
             }
         }
 
-        // The picker's own command. Nothing else checks it: a picker that
+        // The picker's own config. Nothing else checks it: a picker that
         // cannot spawn is not an error, it is a silent fallback to the lexical
         // order, one WARN per search in a log nobody is reading — and the
         // advice the model surfaces after three misses is about the model, not
         // the path. `geco validate` is where that should be visible instead.
+        //
+        // The mode string gets the same treatment. Picker::from_config
+        // resolves any unrecognized mode — and "command" with no command —
+        // to Transport::Off via its catch-all, so a typo like `mode: comand`
+        // turned a deliberately-enabled picker off with zero diagnostics
+        // anywhere. (`surface` documents its typo-leniency as deliberate;
+        // no such rationale applies here.)
+        let mode = self.proxy.picker.mode.as_str();
+        if !matches!(mode, "off" | "auto" | "sampling" | "command") {
+            findings.push((
+                "warning".into(),
+                format!(
+                    "proxy.picker.mode: '{mode}' is not one of off/auto/sampling/command \
+                     — the picker will silently never run"
+                ),
+            ));
+        }
+        if mode == "command" && self.proxy.picker.command.is_empty() {
+            findings.push((
+                "warning".into(),
+                "proxy.picker.mode is 'command' but picker.command is empty \
+                 — the picker will silently never run"
+                    .into(),
+            ));
+        }
         if let Some(bin) = self.proxy.picker.command.first() {
             let expanded = crate::skills::expand_tilde(bin);
             let looks_reachable = match expanded.to_str() {
@@ -1013,24 +1062,51 @@ impl Config {
                 h.update((bytes.len() as u64).to_le_bytes());
                 h.update(bytes);
             };
+            // Tag + element count before every collection. Length-prefixing
+            // strings only prevents INTRA-string boundary shifts; without a
+            // group separator, adjacent collections still collide across
+            // their shared boundary — moving "delete_*" from allow to deny
+            // hashed identically (same concatenation), so an edit made while
+            // the proxy was stopped served a snapshot filtered by the OLD
+            // rules, with refresh_on_start's staleness check reporting it
+            // current. Same shape: description Some("X")+pass_env [] vs
+            // None+["X"], and args ["K","V"] vs env {"K":"V"}.
+            let group = |h: &mut Sha256, tag: u8, len: usize| {
+                h.update([tag]);
+                h.update((len as u64).to_le_bytes());
+            };
             field(&mut hasher, name.as_bytes());
+            group(&mut hasher, b'c', s.command.0.len());
             for part in &s.command.0 {
                 field(&mut hasher, part.as_bytes());
             }
+            group(&mut hasher, b'a', s.args.len());
             for a in &s.args {
                 field(&mut hasher, a.as_bytes());
             }
+            group(&mut hasher, b'e', s.env.len());
             for (k, v) in &s.env {
                 field(&mut hasher, k.as_bytes());
                 field(&mut hasher, v.as_bytes());
             }
-            for p in s.allow.iter().chain(s.deny.iter()) {
+            group(&mut hasher, b'A', s.allow.len());
+            for p in &s.allow {
+                field(&mut hasher, p.as_bytes());
+            }
+            group(&mut hasher, b'D', s.deny.len());
+            for p in &s.deny {
                 field(&mut hasher, p.as_bytes());
             }
             hasher.update([s.enabled as u8]);
-            if let Some(d) = &s.description {
-                field(&mut hasher, d.as_bytes());
+            // A tagged sentinel for None vs Some, for the same reason.
+            match &s.description {
+                Some(d) => {
+                    group(&mut hasher, b'd', 1);
+                    field(&mut hasher, d.as_bytes());
+                }
+                None => group(&mut hasher, b'd', 0),
             }
+            group(&mut hasher, b'p', s.pass_env.len());
             for p in &s.pass_env {
                 field(&mut hasher, p.as_bytes());
             }
@@ -1544,6 +1620,100 @@ mcpServers:
                 .iter()
                 .any(|(s, m)| s == "error" && m.contains("nonexistent-xyz-123")),
             "expected error about missing keychain item: {findings:?}"
+        );
+    }
+
+    /// validate must judge the SAME string the runtime resolves. resolve_var
+    /// trims the service name, so "${keychain: x}" (natural YAML spacing)
+    /// spawns fine — validate reporting ' x' untrimmed made it exit 1 on a
+    /// working config. The item is missing either way here; what the test
+    /// pins down is that the reported name is the trimmed one.
+    #[test]
+    fn validate_checks_keychain_refs_trimmed_like_the_runtime() {
+        let _env = env_guard();
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"env":{"TOKEN":"${keychain: nonexistent-xyz-123}"}}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "error" && m.contains("'nonexistent-xyz-123'")),
+            "the service name must be validated and reported trimmed: {findings:?}"
+        );
+    }
+
+    /// A ${keychain:...} in command/args is expanded at spawn — a missing
+    /// item fails the spawn. validate used to scan only `env` for keychain
+    /// refs and `if let Ok` swallowed command_line()'s error, so exactly the
+    /// "will fail at spawn" case passed `geco validate` clean.
+    #[test]
+    fn validate_catches_missing_keychain_in_command_and_args() {
+        let _env = env_guard();
+        let raw = r#"{"mcpServers":{"s":{"command":["npx"],"args":["${keychain:nonexistent-xyz-456}"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "error" && m.contains("cannot be resolved")),
+            "a keychain ref in args must be validated: {findings:?}"
+        );
+    }
+
+    /// An unrecognized picker.mode — and mode "command" with no command —
+    /// resolve to Transport::Off via from_config's catch-all: a picker the
+    /// user deliberately enabled that silently never runs. validate is the
+    /// designated place for that to become visible.
+    #[test]
+    fn validate_flags_a_picker_that_can_never_run() {
+        let _env = env_guard();
+        let raw = r#"{"proxy":{"picker":{"mode":"comand","command":["/usr/bin/true"]}},"mcpServers":{"s":{"command":["npx"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("'comand'")),
+            "a mis-typed picker.mode must be flagged: {findings:?}"
+        );
+
+        let raw =
+            r#"{"proxy":{"picker":{"mode":"command"}},"mcpServers":{"s":{"command":["npx"]}}}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let findings = cfg.validate();
+        assert!(
+            findings
+                .iter()
+                .any(|(s, m)| s == "warning" && m.contains("picker.command is empty")),
+            "mode 'command' with no command must be flagged: {findings:?}"
+        );
+    }
+
+    /// Group tags in the hash: without them, adjacent collections collide
+    /// across their shared boundary, and an edit made while the proxy was
+    /// stopped served a stale snapshot that the staleness check called
+    /// current. Each pair here hashed IDENTICALLY before the fix.
+    #[test]
+    fn snapshot_hash_separates_adjacent_field_groups() {
+        let mk = |json: &str| {
+            let cfg: Config = serde_json::from_str(json).unwrap();
+            cfg.snapshot_hash()
+        };
+        // Moving a glob between allow and deny is the security-relevant one.
+        assert_ne!(
+            mk(r#"{"mcpServers":{"s":{"command":["npx"],"allow":["delete_*"]}}}"#),
+            mk(r#"{"mcpServers":{"s":{"command":["npx"],"deny":["delete_*"]}}}"#),
+            "allow vs deny must hash differently"
+        );
+        assert_ne!(
+            mk(r#"{"mcpServers":{"s":{"command":["npx"],"description":"X"}}}"#),
+            mk(r#"{"mcpServers":{"s":{"command":["npx"],"pass_env":["X"]}}}"#),
+            "description vs pass_env must hash differently"
+        );
+        assert_ne!(
+            mk(r#"{"mcpServers":{"s":{"command":["npx"],"args":["K","V"]}}}"#),
+            mk(r#"{"mcpServers":{"s":{"command":["npx"],"env":{"K":"V"}}}}"#),
+            "args vs env must hash differently"
         );
     }
 
