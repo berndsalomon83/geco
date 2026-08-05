@@ -183,6 +183,16 @@ pub struct Proxy {
     picker_misses: Arc<std::sync::atomic::AtomicUsize>,
     metrics: Arc<RwLock<crate::health::Metrics>>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Mutual exclusion between `reload_from_config` and `refresh_server`.
+    /// A reload's two swaps (registry, then snapshot) bracket a slow full
+    /// rebuild, and a tools/list_changed re-scan landing anywhere inside
+    /// that span can either plant a removed server into the new snapshot or
+    /// have its fresher listing silently overwritten by the reload's staler
+    /// one. Hash/epoch checks were tried first and every lock-free variant
+    /// left an interleaving that lost data (adversarially reproduced); a
+    /// plain gate is small enough to reason about. Held across a whole
+    /// re-scan, so a config reload can wait up to one backend probe.
+    reload_gate: Arc<tokio::sync::Mutex<()>>,
     /// (server, tool) pairs recently surfaced by `search`, so `execute` can
     /// tell whether search actually led anywhere. Bounded ring buffer — this
     /// is a coarse signal, not an audit trail.
@@ -584,6 +594,7 @@ impl Proxy {
             picker_misses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             metrics: Arc::new(RwLock::new(metrics)),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reload_gate: Arc::new(tokio::sync::Mutex::new(())),
             recent_search_hits: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             tool_change_tx,
             tool_change_rx: Arc::new(std::sync::Mutex::new(Some(tool_change_rx))),
@@ -709,31 +720,62 @@ impl Proxy {
     /// Re-scan one backend's tools and merge the result into the snapshot.
     /// Used by the tool-change listener; config hot-reload has its own path
     /// because it also reports a diff.
+    ///
+    /// Mutually exclusive with `reload_from_config` via `reload_gate` — a
+    /// reload landing anywhere inside a re-scan either resurrected a removed
+    /// server (merge into the new snapshot from a stale registry clone) or
+    /// silently overwrote this scan's fresher listing with its own staler
+    /// probe. Discard-on-hash-mismatch and lock-free epoch schemes were both
+    /// tried first and each left a losing interleaving (adversarially
+    /// reproduced); the gate makes the whole lap atomic against reloads.
+    /// The loop then only covers a reload completing BETWEEN laps — its
+    /// swap changes the config hash, and the re-scan repeats against the
+    /// post-reload registry, which either yields the fresh listing or finds
+    /// the server gone. Bounded: three laps outlast any realistic save
+    /// burst, and the failure mode past the bound is a stale-but-valid
+    /// listing plus a warn.
     async fn refresh_server(&self, name: &str) {
-        let hash = { self.snapshot.read().await.config_hash.clone() };
-        let fresh = {
-            let registry = self.registry.read().await.clone();
-            registry.build_snapshot(hash, Some(name)).await
-        };
-        let Some(entry) = fresh.servers.get(name).cloned() else {
-            // Server vanished from the registry between notification and
-            // refresh (a hot-reload removed it) — nothing to update.
+        for _ in 0..3 {
+            let _reload_gate = self.reload_gate.lock().await;
+            let hash = { self.snapshot.read().await.config_hash.clone() };
+            let fresh = {
+                let registry = self.registry.read().await.clone();
+                registry.build_snapshot(hash.clone(), Some(name)).await
+            };
+            let Some(entry) = fresh.servers.get(name).cloned() else {
+                // Server vanished from the registry between notification and
+                // refresh (a hot-reload removed it) — nothing to update.
+                return;
+            };
+            let (before, after) = {
+                let mut snap = self.snapshot.write().await;
+                // With the gate held no reload can interleave this lap; a
+                // changed hash here means one completed while we were
+                // queued for the gate. Go around against the new state.
+                if snap.config_hash != hash {
+                    tracing::debug!(
+                        "tools/list_changed: config reloaded mid-refresh of '{name}' — re-scanning"
+                    );
+                    continue;
+                }
+                let before = snap.servers.get(name).map(|s| s.tools.len()).unwrap_or(0);
+                let after = entry.tools.len();
+                snap.generated_at = fresh.generated_at.clone();
+                snap.servers.insert(name.to_string(), entry);
+                (before, after)
+            };
+            tracing::info!("tools/list_changed: re-scanned '{name}', {before} -> {after} tools");
+            let to_save = self.snapshot.read().await.clone();
+            if let Err(e) = to_save.save(&self.snapshot_path) {
+                tracing::warn!("cannot persist snapshot after tool change: {e:#}");
+            }
+            self.publish_health().await;
             return;
-        };
-        let (before, after) = {
-            let mut snap = self.snapshot.write().await;
-            let before = snap.servers.get(name).map(|s| s.tools.len()).unwrap_or(0);
-            let after = entry.tools.len();
-            snap.generated_at = fresh.generated_at.clone();
-            snap.servers.insert(name.to_string(), entry);
-            (before, after)
-        };
-        tracing::info!("tools/list_changed: re-scanned '{name}', {before} -> {after} tools");
-        let to_save = self.snapshot.read().await.clone();
-        if let Err(e) = to_save.save(&self.snapshot_path) {
-            tracing::warn!("cannot persist snapshot after tool change: {e:#}");
         }
-        self.publish_health().await;
+        tracing::warn!(
+            "tools/list_changed: '{name}' re-scan lost to three consecutive config reloads — \
+             the snapshot keeps the reload's listing until the next change"
+        );
     }
 
     /// Spawn a background task that watches the config file for changes and
@@ -809,6 +851,18 @@ impl Proxy {
                 if rx.recv().await.is_none() {
                     break;
                 }
+                // The debounce this comment block always promised. An
+                // instantaneous drain coalesces only events that have ALREADY
+                // arrived — a truncate-in-place save (shell redirection,
+                // editors without atomic write) fires its first event while
+                // the file is half-written, and reading immediately either
+                // parses a valid PREFIX of the config (tearing down every
+                // backend past the truncation point, then rebuilding on the
+                // completing write) or fails the parse and publishes a
+                // spurious config error to health. Waiting out the write
+                // pattern first, then draining, reads the settled file once.
+                // Same shape as the skill watcher below.
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 // Drain any burst of events (editors write temp + rename,
                 // firing multiple events in quick succession).
                 while rx.try_recv().is_ok() {}
@@ -917,8 +971,19 @@ impl Proxy {
                         dead.push(backend.name.clone());
                     }
                 }
+                // Publish every sweep, not only when something died. Health
+                // is level-triggered by design ("we write the FULL current
+                // problem set every refresh") and this loop is the only
+                // periodic writer — publishing conditionally meant a proxy
+                // with a standing problem set never restored health.json
+                // after another instance overwrote it or the user deleted
+                // it. The skip-cache makes a quiet sweep cost one small file
+                // read, and its one-sided re-assertion rule (see
+                // should_skip_write) keeps two live instances from
+                // ping-ponging the file: problems reclaim it, healthy defers
+                // to any live foreign report.
+                proxy.publish_health().await;
                 if !dead.is_empty() {
-                    proxy.publish_health().await;
                     tracing::info!(
                         "health check: reset {} dead backend(s): {:?}",
                         dead.len(),
@@ -1032,6 +1097,12 @@ impl Proxy {
     /// Called by `spawn_hot_reload` when the config file changes, but also
     /// testable in isolation.
     pub async fn reload_from_config(&self, cfg: crate::config::Config) -> AnyhowResult<()> {
+        // Excludes any in-flight tools/list_changed re-scan for this whole
+        // span (see `reload_gate`): the registry swap below and the snapshot
+        // swap near the end bracket a slow rebuild, and a re-scan landing
+        // between them corrupted the snapshot in one direction or the other.
+        // Worst-case wait is one backend probe from `refresh_server`.
+        let _reload_gate = self.reload_gate.lock().await;
         // What the client can currently see, so the end of this can tell
         // whether the edit moved geco's own surface — turning `surface: lean`
         // on, or configuring a skill library for the first time.
@@ -1070,10 +1141,20 @@ impl Proxy {
 
         // Shut down removed backends after the swap. In-flight execute calls
         // holding old Arcs will reconnect on their next call (conn was reset).
+        // Concurrent for the same reason as shutdown_all: shutdown now waits
+        // for each child's teardown (up to 5s for one that ignores stdin
+        // EOF), and paying that per removed backend in sequence would stall
+        // the reload — and the snapshot rebuild behind it — with the count.
+        let mut shutdowns = tokio::task::JoinSet::new();
         for (name, backend) in &removed_backends {
-            backend.shutdown().await;
-            tracing::info!("hot-reload: shut down removed backend '{name}'");
+            let backend = backend.clone();
+            let name = name.clone();
+            shutdowns.spawn(async move {
+                backend.shutdown().await;
+                tracing::info!("hot-reload: shut down removed backend '{name}'");
+            });
         }
+        while shutdowns.join_next().await.is_some() {}
 
         // Rebuild snapshot — clone the registry and drop the read lock so
         // execute / list_mcp_servers aren't blocked during the build.
@@ -1820,7 +1901,7 @@ impl Proxy {
     }
 
     #[tool(
-        description = "Execute 1–10 tool calls. Cross-backend calls run in parallel. Results returned in input order as {server, tool, ok, result/error}. A single call: execute({calls: [{server, tool, arguments}]}). A tool that returns an image, audio or a resource lists it under `attachments` and the block itself follows the JSON."
+        description = "Execute 1–10 tool calls. Cross-backend calls run in parallel. Results returned in input order as {server, tool, ok, result/error}. A single call: execute({calls: [{server, tool, arguments}]}). A tool that returns an image, audio or a resource lists it under `attachments` and the block itself follows the JSON; a tool with structured output carries it under `structured`."
     )]
     pub async fn execute(
         &self,
@@ -1914,6 +1995,18 @@ impl Proxy {
                             "ok": ok,
                             "result": text,
                         });
+                        // MCP structuredContent (tools declaring an
+                        // outputSchema). The spec only says a server SHOULD
+                        // mirror it into a text block; a spec-legal backend
+                        // that doesn't used to flow through here as
+                        // {ok: true, result: ""} — the payload silently
+                        // destroyed, the model concluding the tool returned
+                        // nothing. The screenshot failure above, recreated
+                        // for structured output. Forwarded verbatim under
+                        // its own key.
+                        if let Some(structured) = &result.structured_content {
+                            entry["structured"] = structured.clone();
+                        }
                         // A descriptor, not the payload: this tells the model
                         // something arrived and what it is, in a handful of
                         // tokens, while the bytes ride along as content blocks
