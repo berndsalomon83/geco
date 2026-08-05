@@ -69,6 +69,19 @@ Tool catalogues come from a **snapshot** cached on disk. The proxy refreshes it 
 
 Calls to *different* backends in one `execute` run in parallel; results always come back in the order you sent them.
 
+## The lean way
+
+The whole project in one screen, for the reader who wants the path rather than the map:
+
+```bash
+bash install.sh                                   # 1. install the binary
+geco schema > ~/.config/geco/geco.schema.json      # 2. editor autocomplete (optional)
+$EDITOR ~/.config/geco/config.yaml                 # 3. move occasional servers behind geco
+geco refresh                                       # 4. snapshot them once
+```
+
+Three meta-tools, **2.5 KB flat**, whatever is behind the gate. Your agent searches before it acts, executes what it finds, and reads a skill when one applies. Nothing restarts when you add a server, a skill, or flip the surface — that is the design, not a feature. Everything else in this document is the reasoning, the measurements, and the traps; the five lines above are the whole loop.
+
 ## Install
 
 Prebuilt binaries are published for macOS (arm64, x86_64), Linux (x86_64 static, aarch64) and Windows (x86_64) — **no Rust toolchain required**. The installers download the right one, verify its SHA-256, and fall back to a source build for any other platform.
@@ -228,9 +241,7 @@ The limits are measured rather than assumed, against a 71-query corpus in the te
 | queries needing a synonym | 72.7% | 100% |
 | held out from all tuning | 65.0% | 80.0% |
 
-That third row is the one to believe, and the only one worth trusting about *your* tools. Twenty queries are held out — written after the synonym table, never consulted while building it, and twelve of them written specifically to break the next proposed change rather than to confirm it. The first two rows are measured partly on the queries the table was derived from, which always flatters.
-
-The guard earns its keep in both directions. It **rejected** a symmetric create/open synonym that raised the group it came from while lowering the group it didn't, and it **cleared** a `know` → `recall` mapping by leaving three deliberately planted "know"-means-something-else queries ranking correctly.
+That third row is the one to believe — twenty held-out queries written after the synonym table, twelve of them to break the next change rather than confirm it. The first two rows are measured partly on the queries the table was derived from, which always flatters. The guard earns its keep both ways: it **rejected** a symmetric create/open synonym that raised its origin group while lowering the held-out group, and **cleared** `know` → `recall` by leaving three planted "know"-means-something-else queries ranking correctly.
 
 If a tool you know exists isn't surfacing, the fix is its `description`: that is the text search reads, and the text the model reads when deciding.
 
@@ -281,11 +292,7 @@ The measurements above are all against **5,216 tools from 131 servers, which nob
 | BM25F's top 50 | 82% | 74.6% | 2.2 s |
 | **the whole catalogue** | **100%** | **94.8%** | **0.9 s** |
 
-Sending everything is both **more accurate and faster**, which sounds wrong twice over. Both have the same cause.
-
-*Accuracy:* precision did not fall under seven times the distractors — 90.5% against the shortlist's 90.7%, measured like for like — because **BM25F doesn't select random distractors, it selects the most confusable ones.** Every shortlisted candidate was chosen for sharing vocabulary with the query, so a shortlist is precisely the set of plausible wrong answers, while the tools it drops are mostly obvious non-answers a model rejects at a glance. The last 4 points came from something duller: putting the catalogue *before* the question rather than after it, which was done for caching and turned out to be worth 90.5% → 94.8% on its own.
-
-*Speed:* an unchanging catalogue is a **cacheable prompt prefix**. Measured at 15,243 prompt tokens: 96.6% served from cache, 13× faster than the same prompt reordered per call. A BM25F shortlist can never cache — it's recomputed per query by definition.
+Sending everything is both **more accurate and faster**, which sounds wrong twice over. *Accuracy:* precision did not fall under seven times the distractors (90.5% vs the shortlist's 90.7%), because **BM25F selects the most confusable candidates, not random ones** — a shortlist is precisely the set of plausible wrong answers, while the tools it drops are obvious non-answers. The last 4 points came from putting the catalogue *before* the question rather than after it (90.5% → 94.8% on its own). *Speed:* an unchanging catalogue is a **cacheable prompt prefix** — 96.6% served from cache, 13× faster than a per-query shortlist that can never cache.
 
 So geco hands the model your whole catalogue whenever it fits in `whole_catalogue_tokens` (default ~24k, about 500 tools), and falls back to `candidates` best lexical hits above that. Nothing to tune for a normal config.
 
@@ -327,13 +334,7 @@ Cost is real and worth sizing before you enable it — but less than it looks, b
 | `picker.candidates` | 50 | Fallback shortlist size, for catalogues over that budget. |
 | `picker.timeout_secs` | 20 | Give up and return the lexical order. |
 
-**Give the picker a small, fast, non-reasoning model.** Picking a tool is classification, and a reasoning model answers it as though it were reasoning: measured on one endpoint, `qwen4b` spent its whole 512-token budget in a hidden reasoning channel and returned **empty content on 7 of 8 searches**, while `qwen-coder` answered the identical prompt in **20 tokens**. Same box, same endpoint, same prompt — the fix was the model name, not a setting.
-
-That is the whole recommendation, because there is no geco knob for this and there cannot be one. geco has no model: under `sampling` your client picks it, and under `command` it is whatever your CLI or wrapper script runs. Where thinking is decided depends on that stack, and it is not always reachable from the request — on the endpoint above, neither `/no_think` in the prompt nor `enable_thinking: false` on the call changed anything, because the chat template had the last word. Swapping the model is one line; chasing the serving config is not.
-
-Getting it wrong costs latency, not correctness. Every failure degrades to the lexical order, which is what you get with the picker off anyway — so the real hazard is paying a round-trip per search for nothing, silently. geco watches for the signature (an empty reply at the token ceiling, or three consecutive searches with no usable answer) and logs what to do, because otherwise it looks exactly like a picker whose model agrees with lexical ranking every time.
-
-For scale: a deliberating model measured **8% rank-1 against the 13.3% lexical baseline** — worse than not asking at all. That is why the reply budget is sized for the answer rather than the thinking, and why geco does not simply raise it.
+**Give the picker a small, fast, non-reasoning model.** Picking a tool is classification, not reasoning: on one endpoint `qwen4b` spent its whole 512-token budget in a hidden reasoning channel and returned **empty content on 7 of 8 searches**, while `qwen-coder` answered the identical prompt in **20 tokens**. There is no geco knob for this — geco has no model, and where thinking is decided is the serving stack, not the request. Swapping the model is one line; chasing the serving config is not. Getting it wrong costs latency, not correctness — every failure degrades to the lexical order — so the real hazard is paying a round-trip per search for nothing. geco watches for the signature (empty reply at the token ceiling, or three consecutive no-answer searches) and logs it. For scale: a deliberating model measured **8% rank-1 against the 13.3% lexical baseline** — worse than not asking at all.
 
 ### What geco proxies (and what it doesn't)
 
@@ -405,17 +406,11 @@ geco schema                           # print the config JSON Schema (YAML + JSO
 
 ## Hot reload
 
-The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. No restart, no manual step. Removed backends are shut down; new ones are snapshotted and available immediately.
+The gateway watches its config file and auto-refreshes when it changes — add a server, edit a denylist, update a description, save, and the agent sees it within seconds. Removed backends are shut down; new ones are snapshotted and available immediately. The skill directories in `skills.dirs` and `skills.absorb` are watched too, so a skill written or dropped in while geco is running is searchable without anything being restarted.
 
-The same goes for skills: the directories in `skills.dirs` and `skills.absorb` are watched too, so a skill written or dropped in while geco is running is swept into the library and searchable without anything being restarted.
+**The reason almost none of this reaches your client is the whole design.** Its tool list is the same meta-tools throughout, so there is nothing to invalidate and nothing to reconnect. For the one case where geco's *own* list does move — your first skill library appearing, or `proxy.surface` changing — the set is computed per request from the current config, and geco advertises `tools/list_changed` and sends it. An unadvertised meta-tool stays callable rather than erroring, so a client that doesn't listen is no worse off. No restart either way.
 
-**The reason almost none of this reaches your client is the whole design.** Its tool list is the same meta-tools throughout, so there is nothing to invalidate and nothing to reconnect. Compare the usual case: a client asks for `tools/list` once at connect, so a new MCP server means restarting the harness.
-
-For the one case where geco's *own* list does move — your first skill library appearing, or `proxy.surface` changing — the advertised set is computed per request from the current config, and geco advertises `tools/list_changed` and sends it. A client that listens re-fetches; one that doesn't is no worse off than before, since an unadvertised meta-tool stays callable rather than erroring. No restart either way.
-
-The watcher triggers on **mtime**, not content, which is what makes `geco refresh` work against a live proxy: it rewrites the snapshot file *and* touches the config, so a running instance rebuilds instead of quietly serving its in-memory copy. (Content is untouched — only the timestamp moves.)
-
-That covers the one case nothing else does: a backend **upgraded in place**, where the config never changed and the server sends no `tools/list_changed`, so no automatic path notices. There is deliberately no `refresh_tools` meta-tool for the agent — installing software is something you do, and the agent shouldn't carry 480 bytes of schema in every session for it.
+The watcher triggers on **mtime**, not content, which is what makes `geco refresh` work against a live proxy: it rewrites the snapshot *and* touches the config, so a running instance rebuilds instead of serving its in-memory copy (content is untouched — only the timestamp moves). That covers the one case nothing else does: a backend **upgraded in place**, where the config never changed and the server sends no `tools/list_changed`. There is deliberately no `refresh_tools` meta-tool for the agent — installing software is something you do, and the agent shouldn't carry 480 bytes of schema in every session for it.
 
 ## Self-healing backends
 
@@ -471,36 +466,15 @@ surprise to the project; the research log in
 [docs/search-ranking.md](docs/search-ranking.md) has the full history including
 every idea that was measured and **rejected**.
 
-**Measured for tools, not for skills.** All the picker numbers — 94.8% rank-1,
-90.7% precision — come from 210 labelled queries over 5,216 real tools. Skills
-run through the identical code path and the wiring is tested end to end, but
-there is no labelled skill corpus yet, so "the picker works for skills" is a
-reasonable expectation rather than a measurement. Treat it as such.
+**Measured for tools, not for skills.** The picker numbers come from 210 labelled queries over 5,216 real tools. Skills run through the identical code path and the wiring is tested end to end, but there is no labelled skill corpus yet — "the picker works for skills" is a reasonable expectation, not a measurement.
 
-**The whole-catalogue threshold is a reasoned guess.** `whole_catalogue_tokens`
-defaults to ~24k (about 500 tools) because a 324-tool catalogue measured 94.8%
-and fitted comfortably. What happens at 805 or 1,589 tools is unmeasured — that
-is the point where a two-stage server-then-tool pick would earn its place, if
-it does.
+**The whole-catalogue threshold is a reasoned guess.** `whole_catalogue_tokens` defaults to ~24k (about 500 tools) because a 324-tool catalogue measured 94.8% and fitted comfortably. What happens at 805 or 1,589 tools is unmeasured — that is where a two-stage server-then-tool pick would earn its place, if it does.
 
-**The lean default is a judgement, not a measurement.** Everything the browse
-tools did is reachable through `search`, and a miss volunteers the catalogue
-without the model knowing any trick — but whether models actually take that
-route in daily use is unverified. `geco stats` counts calls per meta-tool, so
-your own workload will say. `proxy.surface: full` puts the three back.
+**The lean default is a judgement, not a measurement.** Everything the browse tools did is reachable through `search`, and a miss volunteers the catalogue — but whether models actually take that route in daily use is unverified. `geco stats` counts calls per meta-tool, so your own workload will say. `proxy.surface: full` puts the three back.
 
-**A picker prompt contains third-party text.** Tool descriptions come from
-whatever backends you configure and become part of a prompt sent to a model.
-You cannot pick a tool without showing a model what it does, so there is no
-clean fix; the practical mitigation is the ordinary one — run backends you
-trust. Worth knowing before pointing `picker.command` at an agent CLI that has
-shell access.
+**A picker prompt contains third-party text.** Tool descriptions become part of a prompt sent to a model — under `command` mode, potentially one with shell access. You cannot pick a tool without showing a model what it does, so there is no clean fix; the mitigation is the ordinary one: run backends you trust.
 
-**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0
-has been tagged, so the prebuilt binaries the installers fetch are older than
-this page describes — everything on `main`, including the picker and the lean
-surface, needs a source build for now (`--from-source`, or the installers fall
-back to it automatically when no matching binary exists).
+**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0 has been tagged, so the prebuilt binaries are older than this page describes — everything on `main`, including the picker and the lean surface, needs a source build for now (`--from-source`, or the installers fall back automatically).
 
 ## Working on geco
 
@@ -520,25 +494,9 @@ gh pr create --fill
 gh pr merge --auto --squash           # merges itself once CI is green
 ```
 
-The pre-push hook is a convenience, not the gate. CI is the gate: it runs on
-Linux, macOS and Windows and enforces things a local run can't — the e2e suite
-against a guaranteed Python, the macOS keychain round-trip, the MSRV floor,
-supply-chain and secret scanning. `git push --no-verify` skips the hook.
+The pre-push hook is a convenience, not the gate. CI is the gate: it runs on Linux, macOS and Windows and enforces things a local run can't — the e2e suite against a guaranteed Python, the macOS keychain round-trip, the MSRV floor, supply-chain and secret scanning. `git push --no-verify` skips the hook. On Windows the hook looks for cargo on `PATH`, then in `~/.cargo/bin`, then **through WSL** — a toolchain inside WSL is invisible to Git Bash, so the hook used to print "skipping" and check nothing.
 
-On Windows the hook looks for cargo on `PATH`, then in `~/.cargo/bin`, then
-**through WSL** — a toolchain installed inside WSL is invisible to Git Bash,
-so the hook used to print "skipping" on every push and check nothing at all.
-
-`scripts/lint.sh` mirrors CI's `lint` job: shellcheck, actionlint, typos,
-gitleaks, PSScriptAnalyzer. Missing tools are skipped rather than fatal — but
-it always prints which ones it **didn't** run, because a linter that silently
-checks nothing is worse than none at all. CI runs the full set regardless.
-
-CI also publishes a per-file **coverage** table to each run's summary, sorted
-worst-first. It gates nothing: a percentage target drives tests toward
-whatever is cheapest to cover, not whatever is riskiest. It exists so that
-"nothing tests this file at all" is visible — which is how `backend.rs` sat
-at 461 lines with no direct tests until its first one found a panic.
+`scripts/lint.sh` mirrors CI's `lint` job (shellcheck, actionlint, typos, gitleaks, PSScriptAnalyzer). Missing tools are skipped rather than fatal, but it always prints which ones it **didn't** run — a linter that silently checks nothing is worse than none at all. CI also publishes a per-file **coverage** table to each run's summary, sorted worst-first. It gates nothing; it exists so "nothing tests this file at all" is visible — which is how `backend.rs` sat at 461 lines with no direct tests until its first one found a panic.
 
 ## License
 
