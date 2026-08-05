@@ -72,6 +72,11 @@ struct Frontmatter {
 }
 
 fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
+    // A UTF-8 BOM (Windows Notepad, PowerShell 5.1 Out-File) is invisible in
+    // every editor but makes the file no longer START with "---", which
+    // silently discarded the whole frontmatter. Same class as the CRLF
+    // handling below: bytes Windows tooling adds, authors can't see.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let rest = text.strip_prefix("---")?;
     // Try each candidate closing delimiter. A YAML literal block scalar
     // can contain lines starting with ---, so we can't just find the first
@@ -158,8 +163,12 @@ fn quote_plain_scalar_values(frontmatter: &str) -> String {
             if val.is_empty() || val.starts_with('"') || val.starts_with('\'') {
                 return line.to_string();
             }
-            // Only needs quoting when the value itself contains ": ".
-            if !val.contains(": ") {
+            // Needs quoting when the value contains ": " — or ENDS in a bare
+            // colon ("description: Steps to follow:"), which YAML rejects
+            // with the same "mapping values are not allowed" error but which
+            // contains no colon-space, so the old check left the line
+            // byte-identical and the retry never reparsed.
+            if !val.contains(": ") && !val.ends_with(':') {
                 return line.to_string();
             }
             // A plain scalar ends at " #" — YAML would have dropped the rest as
@@ -175,6 +184,24 @@ fn quote_plain_scalar_values(frontmatter: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Cross-filesystem fallback for `rename` in `absorb_into`. Refuses a
+/// symlinked skill root outright: `read_dir` on the ROOT follows the link
+/// even though `copy_dir_recursive` skips symlink ENTRIES below it, so
+/// copying would pull the TARGET's tree into the library — and the
+/// `remove_dir_all` after it would delete only the link, silently forking
+/// the user's real skill source. `rename` (the primary path) moves a symlink
+/// as a symlink, which is the intended behavior; crossing a filesystem
+/// boundary must not change what absorb does to a link.
+fn copy_fallback(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(src)?.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "skill dir is a symlink; refusing to copy its target across filesystems",
+        ));
+    }
+    copy_dir_recursive(src, dst)
 }
 
 pub fn expand_tilde(p: &str) -> PathBuf {
@@ -228,7 +255,7 @@ pub fn absorb_into(library: &str, absorb_dirs: &[String]) -> (Vec<String>, Vec<S
                 Err(e) => {
                     // rename fails with EXDEV across filesystems — fall back
                     // to copy + remove so absorb works on cross-mounted dirs.
-                    if let Err(copy_err) = copy_dir_recursive(&src, &dst) {
+                    if let Err(copy_err) = copy_fallback(&src, &dst) {
                         // Clear the half-written destination. Left in place it
                         // makes `dst.exists()` true forever, so every later
                         // absorb reports "already in library (resolve
@@ -298,6 +325,27 @@ impl SkillIndex {
             }
         }
         idx.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        // Same name in two configured dirs: without this, search ranked ALL
+        // copies (a model could be sold on the second dir's description)
+        // while `get` resolved the FIRST — so read_skill served a different
+        // body than the one search advertised. Keep exactly the copy `get`
+        // returns (the stable sort preserves dir order among equal names, so
+        // first = earlier configured dir) and say so, instead of silently
+        // indexing both. dedup_by hands the closure (removal candidate,
+        // kept-previous) over consecutive elements, which sorting guarantees.
+        let SkillIndex { skills, errors } = &mut idx;
+        skills.dedup_by(|dup, kept| {
+            let same = dup.name == kept.name;
+            if same {
+                errors.push(format!(
+                    "duplicate skill name '{}': using {}, ignoring {}",
+                    dup.name,
+                    kept.dir.display(),
+                    dup.dir.display()
+                ));
+            }
+            same
+        });
         idx
     }
 
@@ -572,6 +620,82 @@ mod tests {
         assert_eq!(fm.description, "phases: one, two");
     }
 
+    /// A value ENDING in a bare colon fails YAML the same way colon-space
+    /// does, but contains no ": " — so the old retry produced a byte-identical
+    /// line and never reparsed. Both the description itself and a sibling key
+    /// with a trailing colon (which would take the whole frontmatter down with
+    /// it) must be rescued.
+    #[test]
+    fn frontmatter_value_ending_in_a_bare_colon_is_rescued() {
+        let fm =
+            parse_frontmatter("---\nname: colon\ndescription: Steps to follow:\n---\n\n# Body\n")
+                .expect("a trailing bare colon must parse via the quote-retry");
+        assert_eq!(fm.description, "Steps to follow:");
+
+        let fm = parse_frontmatter(
+            "---\nname: colon2\ndescription: fine on its own\nnote: remember this:\n---\n\n# Body\n",
+        )
+        .expect("a sibling key's trailing colon must not kill the frontmatter");
+        assert_eq!(fm.description, "fine on its own");
+    }
+
+    /// A UTF-8 BOM (Notepad, PowerShell 5.1 Out-File) is invisible to the
+    /// author but made the file no longer start with "---", silently
+    /// discarding the entire frontmatter — dir-name fallback, empty
+    /// description, nothing in idx.errors.
+    #[test]
+    fn frontmatter_survives_a_utf8_bom() {
+        let fm = parse_frontmatter(
+            "\u{feff}---\nname: bom-skill\ndescription: authored in notepad\n---\n\n# Body\n",
+        )
+        .expect("a BOM before the opening --- must not discard the frontmatter");
+        assert_eq!(fm.name.as_deref(), Some("bom-skill"));
+        assert_eq!(fm.description, "authored in notepad");
+    }
+
+    /// Two configured dirs, same skill name: search must not be able to rank
+    /// a copy that `get` (and therefore read_skill) will never serve. The
+    /// earlier dir wins, the loser is dropped from the index, and the
+    /// collision is reported instead of silently indexing both.
+    #[test]
+    fn duplicate_skill_names_keep_only_the_copy_get_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib1 = tmp.path().join("lib1");
+        let lib2 = tmp.path().join("lib2");
+        mk_skill(
+            &lib1,
+            "dup",
+            Some("dup"),
+            "kubernetes cluster administration",
+        );
+        mk_skill(&lib2, "dup", Some("dup"), "baking sourdough bread at home");
+
+        let idx = SkillIndex::scan(&[lib1.display().to_string(), lib2.display().to_string()]);
+        assert_eq!(
+            idx.skills.len(),
+            1,
+            "one copy survives, got {:?}",
+            idx.skills
+        );
+        assert!(idx.get("dup").unwrap().dir.starts_with(&lib1));
+        assert!(
+            idx.errors
+                .iter()
+                .any(|e| e.contains("duplicate skill name 'dup'")),
+            "the collision must be reported: {:?}",
+            idx.errors
+        );
+        // The copy search ranks is the copy read_skill serves.
+        let hits = idx.search("baking sourdough bread", 5);
+        for h in hits {
+            assert!(
+                h.dir.starts_with(&lib1),
+                "search surfaced the dropped copy: {:?}",
+                h.dir
+            );
+        }
+    }
+
     #[test]
     fn missing_dir_is_reported_not_fatal() {
         let idx = SkillIndex::scan(&["/nonexistent/skills".into()]);
@@ -619,6 +743,35 @@ mod tests {
             !dst.join("link_to_outside").join("secret.txt").exists(),
             "data from outside the skill must never reach the library"
         );
+    }
+
+    /// Same defect class one level UP: `read_dir` on a symlinked ROOT follows
+    /// the link even though entries below it are checked, so the fallback
+    /// would copy the target's tree and absorb would then delete only the
+    /// link — forking the user's real skill source. The fallback must refuse
+    /// instead. Driven directly for the same portability reason as above.
+    #[cfg(unix)]
+    #[test]
+    fn copy_fallback_refuses_a_symlinked_skill_root() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-skill");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: s\ndescription: d\n---\n").unwrap();
+
+        let link = tmp.path().join("linked-skill");
+        symlink(&real, &link).unwrap();
+
+        let dst = tmp.path().join("copied");
+        copy_fallback(&link, &dst).expect_err("a symlinked root must be refused, not dereferenced");
+        assert!(!dst.exists(), "nothing may be created for a refused copy");
+        assert!(
+            real.join("SKILL.md").is_file(),
+            "the real source must be untouched"
+        );
+        // A regular directory still copies through the same entry point.
+        copy_fallback(&real, &dst).expect("a real dir must still copy");
+        assert!(dst.join("SKILL.md").is_file());
     }
 
     #[test]
