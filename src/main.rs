@@ -126,16 +126,44 @@ async fn main() -> Result<()> {
     // the full picture here.
     if matches!(cli.command, Some(Cmd::Health)) {
         let health_path = geco::health::health_path();
-        let Some(report) = geco::health::read(&health_path) else {
-            // Not an error: no file means no proxy has run, which is a
-            // different situation from a proxy reporting trouble.
-            eprintln!(
-                "no health file at {} — the proxy has not run yet",
-                health_path.display()
-            );
-            return Ok(());
+        let report = match geco::health::read(&health_path) {
+            geco::health::HealthFile::Missing => {
+                // Not an error: no file means no proxy has run, which is a
+                // different situation from a proxy reporting trouble.
+                eprintln!(
+                    "no health file at {} — the proxy has not run yet",
+                    health_path.display()
+                );
+                return Ok(());
+            }
+            geco::health::HealthFile::Unreadable(e) => {
+                // A file that EXISTS but cannot be parsed is not "never
+                // ran" — saying so sent people hunting for a missing file
+                // sitting right there, possibly full of recorded errors.
+                // Exit 1: the state is unknown, and unknown must not pass
+                // a health gate.
+                eprintln!(
+                    "health file {} exists but cannot be read: {e}\n\
+                     remove it, or let a running proxy rewrite it",
+                    health_path.display()
+                );
+                std::process::exit(1);
+            }
+            geco::health::HealthFile::Report(r) => *r,
         };
         let client = report.client.as_deref().unwrap_or("unknown client");
+        // A clean shutdown marker means nothing is serving: yesterday's
+        // issues are not "currently broken", and must not fail a script
+        // gating on this exit code today.
+        if let Some(stopped) = &report.stopped_at {
+            let state = if report.issues.is_empty() {
+                "was healthy".to_string()
+            } else {
+                format!("last state: {} issue(s)", report.issues.len())
+            };
+            eprintln!("proxy stopped at {stopped} ({client}) — {state}");
+            return Ok(());
+        }
         if report.issues.is_empty() {
             eprintln!("healthy — no issues as of {} ({client})", report.updated_at);
             return Ok(());
@@ -167,7 +195,7 @@ async fn main() -> Result<()> {
     if matches!(cli.command, Some(Cmd::Stats)) {
         let health_path = geco::health::health_path();
         match geco::health::read(&health_path) {
-            Some(report) => {
+            geco::health::HealthFile::Report(report) => {
                 if let Some(metrics) = &report.metrics {
                     eprintln!("geco metrics (since {})", metrics.started_at);
                     eprintln!("  total calls:    {}", metrics.total_calls);
@@ -242,8 +270,12 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            None => eprintln!(
+            geco::health::HealthFile::Missing => eprintln!(
                 "no health file at {} — is the proxy running?",
+                health_path.display()
+            ),
+            geco::health::HealthFile::Unreadable(e) => eprintln!(
+                "health file {} exists but cannot be read: {e}",
                 health_path.display()
             ),
         }
@@ -509,6 +541,11 @@ async fn main() -> Result<()> {
 
             let _ = service.waiting().await;
             proxy.shutdown_backends().await;
+            // Health.json outlives this process; without the marker, a
+            // script running `geco health` tomorrow reads yesterday's
+            // issues as "currently broken" (or a last healthy write as
+            // proof something is serving when nothing is).
+            geco::health::mark_stopped();
         }
     }
     Ok(())

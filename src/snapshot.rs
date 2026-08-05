@@ -40,10 +40,21 @@ impl Snapshot {
         let dir = directories::ProjectDirs::from("dev", "geco", "geco")
             .map(|d| d.cache_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from(".geco-cache"));
-        // One snapshot per config file location.
+        // One snapshot per config file location. CANONICALIZED, because
+        // find_config returns the literal relative "geco.yaml" for a locally
+        // discovered config — hashed verbatim, every project's local config
+        // mapped to the SAME cache file: project B started with project A's
+        // snapshot (hash mismatch, full backend-spawning rebuild on every
+        // cross-project start), concurrent sessions in different projects
+        // clobbered each other's saves, and `geco inspect` showed another
+        // project's servers. Canonicalizing also unifies ./geco.yaml,
+        // geco.yaml, and the absolute path to one identity. Falls back to
+        // the raw path when the file does not (yet) exist.
+        let identity =
+            std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
         let mut h = sha2::Sha256::new();
         use sha2::Digest;
-        h.update(config_path.to_string_lossy().as_bytes());
+        h.update(identity.to_string_lossy().as_bytes());
         let tag: String = h
             .finalize()
             .iter()
