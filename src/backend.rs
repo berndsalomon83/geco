@@ -154,7 +154,17 @@ impl Backend {
                 envs.len()
             );
         }
-        TokioChildProcess::new(Command::new(&bin).configure(|c| {
+        // PATH resolution via `which` first, raw name as the fallback. On
+        // Windows this is load-bearing, not cosmetic: npm ships npx/npm as
+        // npx.cmd with no .exe, Rust's std only appends ".exe" when searching
+        // PATH, so the README's canonical `"command": "npx"` config failed
+        // with NotFound — and the hint below then blamed a PATH that was
+        // fine. `which` honours PATHEXT and hands back the npx.cmd path,
+        // which std DOES know how to spawn. When `which` cannot resolve
+        // (unusual bin shapes, or genuinely missing), Command::new(&bin)
+        // preserves the exact old behavior including the curated error.
+        let command = rmcp::transport::which_command(&bin).unwrap_or_else(|_| Command::new(&bin));
+        TokioChildProcess::new(command.configure(|c| {
             c.args(&argv);
             // Order matters: clear first, then apply. `envs` already contains
             // the baseline plus whatever the server declared.
@@ -319,21 +329,15 @@ impl Backend {
                 ) || conn.is_closed();
                 let msg = format!("{e:#}");
                 if is_dead {
-                    *self.conn.lock().await = None;
-                    *self.status.lock().await = Status::Failed {
-                        error: format!("transport error: {msg}"),
-                        at: now(),
-                    };
+                    self.reset_if_current(&conn, format!("transport error: {msg}"))
+                        .await;
                 }
                 Err(anyhow!("backend '{}' call failed: {e}", self.name))
             }
             Err(_) => {
                 // Timeout: connection state unknown — reset so we reconnect.
-                *self.conn.lock().await = None;
-                *self.status.lock().await = Status::Failed {
-                    error: format!("call to '{tool}' timed out"),
-                    at: now(),
-                };
+                self.reset_if_current(&conn, format!("call to '{tool}' timed out"))
+                    .await;
                 Err(anyhow!(
                     "backend '{}' timed out after {}s calling '{tool}'",
                     self.name,
@@ -343,32 +347,89 @@ impl Backend {
         }
     }
 
+    /// Clear the cached connection and mark the backend Failed — but only if
+    /// `used` is still the connection in the cache. Two slow calls sharing a
+    /// dying connection both hit their reset arms; between them another call
+    /// may already have reconnected and cached a fresh, HEALTHY connection.
+    /// An unconditional clear would discard that connection (killing its
+    /// child once the in-flight users drop their Arcs) and stamp Failed over
+    /// a backend that just recovered — spurious churn, worst on the
+    /// exclusive-resource backends the connect gate exists to protect.
+    /// `check_health` has always carried this guard; the call paths get the
+    /// same one. Returns whether the reset actually happened.
+    async fn reset_if_current(&self, used: &Conn, error: String) -> bool {
+        let mut guard = self.conn.lock().await;
+        let same = guard
+            .as_ref()
+            .map(|c| Arc::ptr_eq(c, used))
+            .unwrap_or(false);
+        if !same {
+            return false;
+        }
+        *guard = None;
+        drop(guard);
+        *self.status.lock().await = Status::Failed { error, at: now() };
+        true
+    }
+
     /// List tools for the snapshot. Reuses a live connection if present,
     /// otherwise connects briefly and tears down again (stays lazy).
     pub async fn snapshot_tools(&self, proxy: &ProxyConfig) -> Result<Vec<ToolSnapshot>> {
         let startup = self.cfg.startup_timeout(proxy);
         let list_timeout = self.cfg.call_timeout(proxy);
+        // The ephemeral connect goes through the same gate `connection()`
+        // uses. Without it, a snapshot refresh racing an execute cold-start
+        // spawned TWO children for one backend — the exact double-spawn the
+        // gate exists to prevent (an exclusive-resource backend can fail
+        // BECAUSE of the loser). The gate is held until the ephemeral child
+        // is torn down again, so a queued execute connects only after our
+        // probe child is gone; re-check the cache after acquiring it, since
+        // the connect we queued behind may have just parked its connection.
+        let mut gate = None;
         let (conn, ephemeral) = {
-            let guard = self.conn.lock().await;
-            match guard.as_ref() {
-                Some(c) => (Some(c.clone()), false),
-                None => (None, true),
+            let cached = self.conn.lock().await.as_ref().cloned();
+            match cached {
+                Some(c) => (c, false),
+                None => {
+                    let g = self.connect_gate.lock().await;
+                    let cached = self.conn.lock().await.as_ref().cloned();
+                    match cached {
+                        Some(c) => (c, false),
+                        None => {
+                            let c = self.connect_raw(startup).await?;
+                            gate = Some(g);
+                            (c, true)
+                        }
+                    }
+                }
             }
         };
-        let conn = if let Some(c) = conn {
-            c
-        } else {
-            self.connect_raw(startup).await?
-        };
-        let listed = tokio::time::timeout(list_timeout, conn.list_all_tools())
-            .await
-            .map_err(|_| anyhow!("backend '{}' tools/list timed out", self.name))?
-            .with_context(|| format!("backend '{}' tools/list failed", self.name))?;
+        let listed = tokio::time::timeout(list_timeout, conn.list_all_tools()).await;
         if ephemeral {
-            // Tear down: we only wanted the catalogue. Dropping the last Arc
-            // kills the child process via the transport.
+            // Tear down: we only wanted the catalogue. AWAITED, not dropped:
+            // dropping the Arc only fires rmcp's cancellation guard, and the
+            // child then lives up to its 3s stdin-EOF grace inside a task we
+            // never see — so releasing the gate on a plain drop let a queued
+            // execute spawn its second child while the probe child still
+            // held the exclusive resource, the very failure this gate hold
+            // exists to prevent (reproduced with a fixed-port stub). The
+            // refcount is 1 here (never cached), so try_unwrap always
+            // succeeds; close_with_timeout returns only after the serve task
+            // has run the kill sequence, and THEN the gate opens. This runs
+            // BEFORE the `?` below on purpose: the listing's failure paths
+            // used to early-return past the teardown, freeing the gate with
+            // the probe child still dying — the same overlap, reachable via
+            // a mere tools/list timeout.
+            if let Ok(mut service) = Arc::try_unwrap(conn) {
+                let _ = service.close_with_timeout(Duration::from_secs(5)).await;
+            }
+            drop(gate);
+        } else {
             drop(conn);
         }
+        let listed = listed
+            .map_err(|_| anyhow!("backend '{}' tools/list timed out", self.name))?
+            .with_context(|| format!("backend '{}' tools/list failed", self.name))?;
         let mut tools: Vec<ToolSnapshot> = listed
             .into_iter()
             .filter(|t| self.cfg.tool_allowed(&t.name))
@@ -382,10 +443,52 @@ impl Backend {
         Ok(tools)
     }
 
+    /// Tear the connection down and AWAIT the child's cleanup when possible.
+    ///
+    /// Just dropping the Arc is not enough at process exit: rmcp's Drop only
+    /// fires a cancellation guard, and the actual child kill runs in tasks a
+    /// tokio runtime being torn down never polls — so `main` returning right
+    /// after shutdown orphaned every backend that ignores stdin EOF (browser
+    /// drivers, DB servers: exactly the children that must not outlive the
+    /// proxy). When we hold the last Arc, `close_with_timeout` awaits rmcp's
+    /// graceful sequence (stdin EOF, 3s grace, then kill) to completion
+    /// BEFORE the runtime can go away. When in-flight calls still share the
+    /// connection, cancel the token so their calls fail fast — and then WAIT
+    /// for them to drop their clones, bounded, so the awaited close still
+    /// happens. Returning immediately there re-ran the exact orphaning this
+    /// fix targets: at process exit "the last dropper finishes it" is
+    /// exactly the never-polled-task mechanism the paragraph above declares
+    /// broken (reproduced: an EOF-ignoring child survived main's return).
+    /// After cancel, in-flight rmcp calls error promptly, so the unwrap
+    /// usually succeeds within milliseconds; a caller wedged past the
+    /// deadline gets today's best-effort drop rather than a hang.
     pub async fn shutdown(&self) {
-        let mut guard = self.conn.lock().await;
-        *guard = None;
+        let taken = { self.conn.lock().await.take() };
         *self.status.lock().await = Status::Cold;
+        let Some(conn) = taken else { return };
+        let mut conn = match Arc::try_unwrap(conn) {
+            Ok(service) => Some(service),
+            Err(shared) => {
+                shared.cancellation_token().cancel();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                let mut shared = shared;
+                loop {
+                    match Arc::try_unwrap(shared) {
+                        Ok(service) => break Some(service),
+                        Err(back) => {
+                            if tokio::time::Instant::now() >= deadline {
+                                break None;
+                            }
+                            shared = back;
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                    }
+                }
+            }
+        };
+        if let Some(service) = conn.as_mut() {
+            let _ = service.close_with_timeout(Duration::from_secs(5)).await;
+        }
     }
 
     /// Is a warm backend's connection actually alive? A cold backend has
@@ -452,25 +555,18 @@ impl Backend {
         // reconnected, or a `shutdown` may have cleared it; clobbering either
         // would be its own bug. If it was replaced, the death we saw belongs
         // to a connection nobody uses anymore, so report healthy.
-        let mut guard = self.conn.lock().await;
-        let same = guard
-            .as_ref()
-            .map(|c| Arc::ptr_eq(c, &conn))
-            .unwrap_or(false);
-        if !same {
-            return true;
+        if self
+            .reset_if_current(&conn, "connection lost (health probe failed)".into())
+            .await
+        {
+            tracing::warn!(
+                "backend '{}' failed its health probe — resetting",
+                self.name
+            );
+            false
+        } else {
+            true
         }
-        tracing::warn!(
-            "backend '{}' failed its health probe — resetting",
-            self.name
-        );
-        *guard = None;
-        drop(guard);
-        *self.status.lock().await = Status::Failed {
-            error: "connection lost (health probe failed)".into(),
-            at: now(),
-        };
-        false
     }
 }
 
@@ -580,10 +676,16 @@ impl Registry {
         snap
     }
 
+    /// Concurrent on purpose: `shutdown` now awaits each child's teardown
+    /// (up to 5s for one that ignores stdin EOF), and paying that per warm
+    /// backend in sequence would stretch proxy exit with the backend count.
     pub async fn shutdown_all(&self) {
+        let mut set = tokio::task::JoinSet::new();
         for backend in self.backends.values() {
-            backend.shutdown().await;
+            let backend = backend.clone();
+            set.spawn(async move { backend.shutdown().await });
         }
+        while set.join_next().await.is_some() {}
     }
 
     /// Route every backend's `tools/list_changed` notifications to `tx`.
