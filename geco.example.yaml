@@ -78,7 +78,10 @@ proxy:
 mcpServers:
   playwright:
     command: [npx, "@playwright/mcp@latest"]
-    description: "Browser automation: navigate, click, screenshots, E2E checks."
+    # The description is what search ranks on (alongside the name). Write it
+    # in the words a task gets asked in — "navigate, click, screenshot", not
+    # "browser integration" — so a request sharing that vocabulary finds it.
+    description: "Browser automation: navigate, click, fill forms, take screenshots, run E2E checks. Use for anything requiring a real browser."
     # Per-server timeout overrides, for the one backend that's legitimately
     # slow — rather than loosening the bound for every other server too.
     startup_timeout_secs: 120
@@ -86,14 +89,14 @@ mcpServers:
 
   context7:
     command: [npx, -y, "@upstash/context7-mcp"]
-    description: "Up-to-date library docs and code examples."
+    description: "Up-to-date library and framework documentation and code examples. Use when coding against an API you're not 100% sure about."
 
   github:
     command: [github-mcp-server, stdio]
     env:
       GITHUB_PERSONAL_ACCESS_TOKEN: "${keychain:github_token}"
       GITHUB_TOOLSETS: "repos,issues,pull_requests"
-    description: "GitHub: repos, issues, pull requests."
+    description: "GitHub: repos, issues, pull requests, branches, commits. Create issues, open and review PRs, search code."
     deny: ["delete_*"]
     # pass_env: ["GITHUB_TOKEN"]  # hand THIS server a var from geco's env;
                                   # servers that don't list it never see it
@@ -102,4 +105,4 @@ mcpServers:
     command: [npx, -y, mcp-searxng]
     env:
       SEARXNG_URL: "http://spark.local:8888"
-    description: "Web search via self-hosted SearXNG; also reads result URLs."
+    description: "Web search and page content retrieval. Find current information online, read a URL's content."

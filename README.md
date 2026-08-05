@@ -141,16 +141,18 @@ Create `~/.config/geco/config.yaml` (see `geco.example.yaml`; JSON is equally ac
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}" },
-      "description": "GitHub: issues, PRs, repos",
+      "description": "GitHub: repos, issues, pull requests, branches, commits. Create issues, open and review PRs, search code.",
       "deny": ["delete_*"]
     },
     "filesystem": {
       "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "${HOME}/Documents"],
-      "description": "Files under ~/Documents"
+      "description": "Read, write, and list files under ~/Documents."
     }
   }
 }
 ```
+
+**Write `description` in the words a task gets asked in.** Search ranks over the tokenised name, server name, and description (name weighted highest), so a description that shares no vocabulary with the request won't surface. Put the verbs and nouns a user would say — "create issues, review PRs", not "GitHub integration". `geco stats` lists recent queries that matched nothing; each is a tool you don't have or a description that doesn't say what it's for. See [how search ranks](#how-search-ranks).
 
 ## Skills on demand
 
@@ -221,7 +223,7 @@ covered by tests that run on Linux, macOS and Windows.
 
 **Format:** YAML is the standard (`config.yaml`); JSON works identically for paste-compat with agent configs. A JSON Schema — generated from the binary's own structs, so it can't drift — powers editor validation and autocomplete: `geco schema > ~/.config/geco/geco.schema.json`, referenced from the YAML via the `# yaml-language-server: $schema=…` header (see the example file).
 
-Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `pass_env` (hand this server a variable from geco's own environment), `description` (shown in `list_mcp_servers` — write a good one, it's what the agent decides by), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`, and `call_timeout_secs` / `startup_timeout_secs` to override the proxy defaults for one slow backend.
+Per server: `command` (string **or** array), `args`, `env` (with `${VAR}` expansion), `pass_env` (hand this server a variable from geco's own environment), `description` (what search ranks on alongside the name — write it in the words a task gets asked in, not marketing prose), `allow` / `deny` (glob patterns, deny wins; enforced at listing **and** execution), `enabled`, and `call_timeout_secs` / `startup_timeout_secs` to override the proxy defaults for one slow backend.
 
 `geco stats` reports search effectiveness alongside call counts: how many searches ran, how many found nothing, how often a search hit was actually executed, how often a skill was surfaced and then read, and the recent queries that matched nothing — each of those is either a tool you don't have or a description that doesn't say what the tool is for.
 
