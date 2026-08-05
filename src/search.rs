@@ -105,10 +105,37 @@ pub fn tokenize(s: &str) -> Vec<String> {
 
 /// Deliberately crude plural stripping, so "issues" finds `create_issue`.
 /// Over-stemming is harmless here because queries and documents go through
-/// the same function — "status" and "status" still agree as "statu". The
-/// guards just avoid the cases where it would be obviously silly.
+/// the same function — but ONLY when both sides converge on the same or a
+/// prefix-compatible form. Stripping a single 's' from an -es plural does
+/// the opposite: "branches" became "branche", one char LONGER than the
+/// singular's stem "branch", so neither the exact nor the prefix path could
+/// ever fire and the query returned zero hits.
+///
+/// The cure is NOT a table of sibilant -es rules. That was tried: every arm
+/// broke a family the plain rule already handled, because "-Xes" cannot say
+/// whether the singular is "-X" or "-Xe" ("branches"/"caches",
+/// "boxes"/"sizes", "echoes"/"shoes") — and the stripped roots fell under
+/// MIN_PREFIX_LEN, severing shoes<->shoe entirely. Both directions of the
+/// mismatch are instead handled in `count_in`, whose prefix test is
+/// symmetric: "branche" (query stem of "branches") prefix-matches the doc
+/// stem "branch" without any guess about which family the word belongs to,
+/// and "cache"/"size"/"shoe" keep their exact matches untouched.
+///
+/// Two rules stay, for pairs a symmetric prefix cannot rescue:
+/// - "ies" strips whole (n >= 7 keeps roots >= 4): "repositorie" and
+///   "repository" share no prefix (i vs y), while "repositor" is a prefix of
+///   both singular families' stems — repository AND cookie.
+/// - "es" after an x-root: "fix"/"box" are 3-char stems, below
+///   MIN_PREFIX_LEN, so "fixes" must land on "fix" EXACTLY. Safe because
+///   "-xe" singulars (axe) are all too short for the n >= 5 guard to fire.
 fn stem(t: &str) -> String {
     let n = t.len();
+    if n >= 7 && t.ends_with("ies") {
+        return t[..n - 3].to_string();
+    }
+    if n >= 5 && t.ends_with("es") && t.as_bytes()[n - 3] == b'x' {
+        return t[..n - 2].to_string();
+    }
     if n >= 4 && t.ends_with('s') && !t.ends_with("ss") && !t.ends_with("us") && !t.ends_with("is")
     {
         t[..n - 1].to_string()
@@ -249,11 +276,22 @@ struct QueryTerm {
 }
 
 /// How many times `q` occurs in `field`, counting exact token matches and
-/// prefix matches for long-enough query tokens.
+/// prefix matches for long-enough tokens — in BOTH directions. The doc-token
+/// -starts-with-query direction alone made every "-es" plural query a
+/// zero-hit: stem("branches") is "branche", one char longer than the doc's
+/// "branch", and no stemming rule can shorten it correctly without knowing
+/// whether the singular is "-ch" or "-che" (branch/cache). Symmetric prefix
+/// sidesteps the guess: whichever side carries the extra letter, the shorter
+/// stem is a prefix of the longer one. The MIN_PREFIX_LEN guard applies to
+/// the SHORTER side each way, so 3-char tokens still never fuzzy-match.
 fn count_in(field: &[String], q: &str) -> f64 {
     field
         .iter()
-        .filter(|t| *t == q || (q.len() >= MIN_PREFIX_LEN && t.starts_with(q)))
+        .filter(|t| {
+            *t == q
+                || (q.len() >= MIN_PREFIX_LEN && t.starts_with(q))
+                || (t.len() >= MIN_PREFIX_LEN && q.starts_with(t.as_str()))
+        })
         .count() as f64
 }
 
@@ -585,6 +623,100 @@ mod tests {
         assert_eq!(stem("class"), "class");
         assert_eq!(stem("status"), "status");
         assert_eq!(stem("analysis"), "analysis");
+    }
+
+    /// Token-level view of the plural fix: does one side's stem meet the
+    /// other's, by equality or symmetric prefix? Asserted through the same
+    /// predicate `count_in` uses, in BOTH directions, because the first
+    /// version of this fix pinned stem() spellings instead — and its
+    /// sibilant -es table produced 3-char stems ("sho", "siz") that severed
+    /// shoes<->shoe and sizes<->size while every spelling assertion passed.
+    #[test]
+    fn plural_and_singular_stems_meet_both_ways() {
+        let meets = |a: &str, b: &str| {
+            let (a, b) = (stem(a), stem(b));
+            a == b
+                || (a.len() >= MIN_PREFIX_LEN && b.starts_with(&a))
+                || (b.len() >= MIN_PREFIX_LEN && a.starts_with(&b))
+        };
+        // The zero-recall family this fix exists for.
+        for (plural, singular) in [
+            ("branches", "branch"),
+            ("searches", "search"),
+            ("matches", "match"),
+            ("classes", "class"),
+            ("statuses", "status"),
+            ("processes", "process"),
+            ("boxes", "box"),
+            ("fixes", "fix"),
+            ("indexes", "index"),
+            ("repositories", "repository"),
+            ("queries", "query"),
+            // Families the first fix attempt broke — regression pins.
+            ("caches", "cache"),
+            ("sizes", "size"),
+            ("shoes", "shoe"),
+            ("cookies", "cookie"),
+            ("movies", "movie"),
+            ("houses", "house"),
+            ("databases", "database"),
+            ("cases", "case"),
+            ("issues", "issue"),
+            ("files", "file"),
+        ] {
+            assert!(meets(plural, singular), "{plural} must meet {singular}");
+            assert!(meets(singular, plural), "{singular} must meet {plural}");
+        }
+    }
+
+    /// The reverse direction, end to end: a singular query against a tool
+    /// that only ever says the plural. The first fix attempt's -ies rule
+    /// broke exactly this ("cookie" scored `get_cookies` at zero because the
+    /// doc token had been stemmed to "cook").
+    #[test]
+    fn singular_query_finds_plural_tool() {
+        let mut s = Snapshot::default();
+        s.servers.insert(
+            "browser".into(),
+            ServerSnapshot {
+                tools: vec![ToolSnapshot {
+                    name: "get_cookies".into(),
+                    description: "List all cookies for the current page".into(),
+                    input_schema: serde_json::json!({}),
+                }],
+                ..Default::default()
+            },
+        );
+        let hits = search(&s, "cookie", 5);
+        assert_eq!(
+            hits.first().map(|h| h.tool.as_str()),
+            Some("get_cookies"),
+            "got {hits:?}"
+        );
+    }
+
+    /// End-to-end regression for the zero-recall bug: a plural -es query
+    /// against a tool that only ever says the singular.
+    #[test]
+    fn plural_es_query_finds_singular_tool() {
+        let mut s = Snapshot::default();
+        s.servers.insert(
+            "github".into(),
+            ServerSnapshot {
+                tools: vec![ToolSnapshot {
+                    name: "create_branch".into(),
+                    description: "Create a new branch in a repository".into(),
+                    input_schema: serde_json::json!({}),
+                }],
+                ..Default::default()
+            },
+        );
+        let hits = search(&s, "list branches", 5);
+        assert_eq!(
+            hits.first().map(|h| h.tool.as_str()),
+            Some("create_branch"),
+            "got {hits:?}"
+        );
     }
 
     #[test]
