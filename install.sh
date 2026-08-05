@@ -169,11 +169,18 @@ elif [ -f "$PICKER_DIR/pick.sh" ]; then
 fi
 # The picker agent for opencode — a minimal named agent with no tools. Goes
 # where opencode discovers agents. Only for people who actually have opencode:
-# creating ~/.config/opencode here would also make the health-plugin block
-# below think opencode is installed, and drop a plugin on a machine that has
-# never seen it.
-OC_AGENTS_DIR="$HOME/.config/opencode/agents"
-if [ -d "$HOME/.config/opencode" ] && [ -f "$REPO_DIR/picker/picker.md" ]; then
+# creating the opencode config dir here would also make the health-plugin
+# block below think opencode is installed, and drop a plugin on a machine
+# that has never seen it.
+#
+# ${XDG_CONFIG_HOME:-…}, not a hardcoded ~/.config: opencode resolves its
+# global config through XDG_CONFIG_HOME, so on a machine that sets it, the
+# hardcoded path checked (and wrote) a tree opencode never reads — pick.sh
+# then ran `--agent picker` against a missing agent file and every pick
+# errored.
+OC_CFG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+OC_AGENTS_DIR="$OC_CFG_ROOT/agents"
+if [ -d "$OC_CFG_ROOT" ] && [ -f "$REPO_DIR/picker/picker.md" ]; then
     if [ ! -f "$OC_AGENTS_DIR/picker.md" ]; then
         mkdir -p "$OC_AGENTS_DIR"
         cp "$REPO_DIR/picker/picker.md" "$OC_AGENTS_DIR/picker.md" &&
@@ -227,11 +234,18 @@ for l in sys.stdin:
 fi
 
 # Companion opencode TUI plugin: toasts gateway health problems in-app.
-OC_PLUGIN_DIR="$HOME/.config/opencode/plugins"
-if [ -d "$HOME/.config/opencode" ]; then
+# Guarded on the source file like the picker copies above, and for the same
+# reason: the release tarball ships no opencode-plugin/ directory, and under
+# `set -e` an unguarded cp killed the install right here — binary in place,
+# but the final wire-it-into-your-agent instructions never printed.
+OC_PLUGIN_DIR="$OC_CFG_ROOT/plugins"
+if [ -d "$OC_CFG_ROOT" ] && [ -f "$REPO_DIR/opencode-plugin/geco-tui.ts" ]; then
     mkdir -p "$OC_PLUGIN_DIR"
-    cp "$REPO_DIR/opencode-plugin/geco-tui.ts" "$OC_PLUGIN_DIR/geco-tui.ts"
-    say "Installed opencode health plugin: $OC_PLUGIN_DIR/geco-tui.ts (restart opencode)"
+    if cp "$REPO_DIR/opencode-plugin/geco-tui.ts" "$OC_PLUGIN_DIR/geco-tui.ts"; then
+        say "Installed opencode health plugin: $OC_PLUGIN_DIR/geco-tui.ts (restart opencode)"
+    else
+        warn "health plugin not installed — copy opencode-plugin/geco-tui.ts to $OC_PLUGIN_DIR yourself"
+    fi
 fi
 
 cat <<EOT

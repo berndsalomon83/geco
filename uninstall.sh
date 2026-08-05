@@ -82,23 +82,30 @@ else
     say "Config kept at ~/.config/geco (re-run with --purge to delete)"
 fi
 
-# Remove the opencode health plugin (installed by install.sh).
+# Remove the opencode health plugin (installed by install.sh). Same
+# XDG_CONFIG_HOME resolution as install.sh now uses — checking only
+# ~/.config would leave the plugin behind on machines that set it.
+OC_CFG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 for d in "plugins" "plugin"; do
-    f="$HOME/.config/opencode/$d/geco-tui.ts"
-    if [ -f "$f" ]; then
-        rm -f "$f"
-        say "Removed opencode health plugin ($d/)"
-    fi
+    for root in "$OC_CFG_ROOT" "$HOME/.config/opencode"; do
+        f="$root/$d/geco-tui.ts"
+        if [ -f "$f" ]; then
+            rm -f "$f"
+            say "Removed opencode health plugin ($f)"
+        fi
+    done
 done
 
 # The picker agent, also dropped by install.sh into opencode's own tree. It
 # lives outside ~/.config/geco, so --purge would never have reached it — an
 # uninstalled geco left an agent named "picker" in the user's opencode.
 for d in "agents" "agent"; do
-    f="$HOME/.config/opencode/$d/picker.md"
-    if [ -f "$f" ]; then
-        rm -f "$f"
-        say "Removed picker agent ($d/)"
-    fi
+    for root in "$OC_CFG_ROOT" "$HOME/.config/opencode"; do
+        f="$root/$d/picker.md"
+        if [ -f "$f" ]; then
+            rm -f "$f"
+            say "Removed picker agent ($f)"
+        fi
+    done
 done
 say "Done. Restart your agents; re-add any servers you still want direct."

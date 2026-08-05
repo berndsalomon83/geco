@@ -97,17 +97,68 @@ if ((Test-Path $Dest) -and -not $Force) {
     $existing = & $Dest --version 2>$null
     Say "Existing install: $existing"
 }
-Copy-Item $Bin $Dest -Force
+# Windows locks a RUNNING exe's image against overwrite (Copy-Item throws
+# a sharing violation) but allows renaming it — and geco serve is a
+# long-lived process an open MCP client keeps alive, so a plain overwrite
+# aborted every upgrade attempted while a client was open, with a raw
+# IOException under ErrorActionPreference=Stop. Rename-then-copy, the
+# Windows analogue of install.sh's remove-then-copy.
+if (Test-Path $Dest) {
+    $Stale = "$Dest.old.$PID"
+    try {
+        Move-Item $Dest $Stale -Force
+        Copy-Item $Bin $Dest -Force
+        Remove-Item $Stale -Force -ErrorAction SilentlyContinue  # fails while still running: cleaned next install
+    } catch {
+        # Put the working binary back rather than leaving nothing installed.
+        if (-not (Test-Path $Dest) -and (Test-Path $Stale)) { Move-Item $Stale $Dest -Force }
+        Die "cannot replace $Dest ($($_.Exception.Message)) - close MCP clients using geco and retry"
+    }
+} else {
+    Copy-Item $Bin $Dest -Force
+}
+# Leftover from a previous in-use upgrade, deletable now that its process is gone.
+Get-ChildItem -Path $DestDir -Filter "geco.exe.old.*" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 Say "Installed to $Dest"
 
 # Add to PATH if not already there.
+#
+# Read and written through the REGISTRY, not [Environment]:: — the .NET
+# getter expands REG_EXPAND_SZ (returning %JAVA_HOME%\bin as its current
+# expansion) and the setter writes plain REG_SZ, so the round-trip froze
+# every variable-based PATH entry at its install-time value and downgraded
+# the value type. Silent corruption of user configuration, discovered long
+# after. GetValue with DoNotExpandEnvironmentNames + SetValue as
+# ExpandString preserves both the %VAR% text and the type.
 $PathDirs = $env:PATH -split ";"
 if ($DestDir -notin $PathDirs) {
     Say "Adding $DestDir to user PATH"
-    $UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-    if ($DestDir -notin ($UserPath -split ";")) {
-        [Environment]::SetEnvironmentVariable("PATH", "$UserPath;$DestDir", "User")
-        $env:PATH = "$env:PATH;$DestDir"
+    $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    try {
+        $UserPath = $EnvKey.GetValue("PATH", "",
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($DestDir -notin ($UserPath -split ";")) {
+            $NewPath = if ([string]::IsNullOrEmpty($UserPath)) { $DestDir } else { "$UserPath;$DestDir" }
+            $EnvKey.SetValue("PATH", $NewPath,
+                [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            $env:PATH = "$env:PATH;$DestDir"
+            # The [Environment]:: setter broadcast WM_SETTINGCHANGE so new
+            # shells see the change before the next login; a raw registry
+            # write does not. Best effort — a failed broadcast just means
+            # the change waits for re-login, same as no broadcast at all.
+            try {
+                $Sig = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]' +
+                    'public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+                $SM = Add-Type -MemberDefinition $Sig -Name "EnvBroadcast" -Namespace "Win32" -PassThru
+                [UIntPtr]$Out = [UIntPtr]::Zero
+                # 0xffff = HWND_BROADCAST, 0x1A = WM_SETTINGCHANGE, 2 = SMTO_ABORTIFHUNG
+                $SM::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero,
+                    "Environment", 2, 5000, [ref]$Out) | Out-Null
+            } catch { }
+        }
+    } finally {
+        $EnvKey.Close()
     }
 }
 

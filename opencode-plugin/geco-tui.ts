@@ -27,8 +27,15 @@ function healthPath(): string {
     return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"),
                      "geco", "geco", "data", "health.json")
   }
+  // Linux: bare lowercased app name, NOT the reverse-DNS bundle id. The
+  // directories crate ignores qualifier/organization on Linux (verified in
+  // directories 6.0.0 src/lin.rs: project_dirs_from(_qualifier,
+  // _organization, application)), so Rust writes $XDG_DATA_HOME/geco/…
+  // while macOS gets dev.geco.geco. uninstall.sh documents the same shape.
+  // This branch has now been wrong in BOTH directions — check the crate
+  // source, not the other platforms' branches, before touching it again.
   return path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"),
-                   "dev.geco.geco", "health.json")
+                   "geco", "health.json")
 }
 
 type Issue = { kind: string; subject: string; detail: string; severity: string }
