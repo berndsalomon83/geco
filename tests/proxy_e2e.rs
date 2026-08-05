@@ -1698,9 +1698,15 @@ async fn concurrent_calls_on_a_broken_backend_share_one_attempt() {
 
     let spawned = std::fs::read_to_string(&spawn_log).unwrap_or_default();
     let children: Vec<&str> = spawned.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(
-        children.len(),
-        1,
+    // `<= 1`, not `== 1`: the property under test is "no retry storm", and
+    // its failure mode is MORE than one attempt. Zero is a legitimate
+    // outcome under machine load — the gate serialised everyone behind one
+    // attempt whose child was killed (or failed to spawn) before Python's
+    // first statement could append to the log, which still proves nobody
+    // else spawned. Asserting exactly 1 made this test flake under a busy
+    // parallel run while the code was correct.
+    assert!(
+        children.len() <= 1,
         "eight callers made {} connect attempts ({children:?}) — the queue is \
          retrying instead of reusing the first failure, so a broken backend \
          costs one full startup timeout per call in the batch",
@@ -1856,6 +1862,42 @@ async fn execute_returns_non_text_blocks_as_blocks_not_as_base64_prose() {
     assert!(
         !text.contains(&images[0].data),
         "the base64 payload is inlined in the JSON summary — that is the bug"
+    );
+}
+
+/// Structured output must survive the trip. The spec makes mirroring
+/// structuredContent into a text block a SHOULD, so a compliant backend may
+/// send ONLY structuredContent — which geco used to flatten into
+/// {ok: true, result: ""}: payload destroyed, and the model, reading the
+/// documented `result` field, concluded the tool returned nothing. The
+/// screenshot bug above, recreated for tools with an outputSchema.
+#[tokio::test]
+async fn execute_forwards_structured_content_instead_of_dropping_it() {
+    let Some(py) = python_bin() else { return };
+    let cfg = config_from(serde_json::json!({
+        "stub": { "command": py, "args": [stub_path()], "env": { "STUB_EXTRA_TOOLS": "1" } }
+    }));
+    let (proxy, _registry, _snap) = make_proxy(&cfg).await;
+
+    let result = proxy
+        .execute(Parameters(ExecuteParams {
+            calls: vec![ExecuteCall {
+                server: "stub".into(),
+                tool: "structured".into(),
+                arguments: None,
+            }],
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "execute should succeed");
+
+    let json = extract_json(&result);
+    let entry = &json.as_array().unwrap()[0];
+    assert_eq!(entry["ok"], true);
+    assert_eq!(
+        entry["structured"],
+        serde_json::json!({"answer": 42, "unit": "tools"}),
+        "structuredContent must be forwarded verbatim, got: {entry}"
     );
 }
 

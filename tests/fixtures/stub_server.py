@@ -58,6 +58,12 @@ if os.environ.get("STUB_EXTRA_TOOLS"):
         # JSON string.
         {"name": "screenshot", "description": "Reply with a text block and an image block",
          "inputSchema": {"type": "object", "properties": {}}},
+        # Structured output ONLY, no content array. Mirroring
+        # structuredContent into a text block is a SHOULD in the spec, so a
+        # compliant backend may reply exactly like this; geco used to flatten
+        # it into {ok: true, result: ""} and the payload vanished.
+        {"name": "structured", "description": "Reply with structuredContent and no content blocks",
+         "inputSchema": {"type": "object", "properties": {}}},
     ]
 
 # A 1x1 transparent PNG. The pixels are irrelevant; what matters is that the
@@ -121,6 +127,9 @@ for line in sys.stdin:
                 {"type": "text", "text": "captured"},
                 {"type": "image", "data": PNG_1PX, "mimeType": "image/png"},
             ], "isError": False})
+        elif name == "structured":
+            reply(id_, {"structuredContent": {"answer": 42, "unit": "tools"},
+                        "isError": False})
         elif name == "echo":
             reply(id_, {"content": [{"type": "text", "text": args.get("text", "")}], "isError": False})
         elif name == "add":
