@@ -23,6 +23,232 @@ minor bump may break.
 
 ### Fixed
 
+- **Plural `-es`/`-ies` queries returned zero results against singular tools.**
+  The stemmer stripped exactly one trailing `s`, so "branches" became
+  "branche" — one character *longer* than the singular's stem "branch" —
+  and neither the exact nor the prefix path could ever fire: "list branches"
+  scored `create_branch` at zero. The fix is NOT a table of sibilant `-es`
+  stem rules: that was built first, and adversarial review showed every arm
+  breaking a family the plain rule already handled, because "-Xes" cannot
+  say whether the singular is "-X" or "-Xe" (branches/caches, boxes/sizes,
+  echoes/shoes) — with stripped roots falling under the prefix minimum and
+  severing shoes↔shoe entirely. Instead the token matcher's prefix test is
+  now *symmetric*: whichever side carries the extra letter, the shorter stem
+  prefixes the longer one, so branches↔branch, classes↔class and even the
+  previously-hopeless statuses↔status all match without guessing word
+  families, and cache/size/shoe keep their exact matches. Two stem rules
+  remain for pairs a prefix cannot rescue: `ies` strips whole
+  ("repositor" prefixes both repository- and cookie-family stems), and `es`
+  after an x-root lands "fixes"/"boxes" exactly on the too-short-to-prefix
+  "fix"/"box". Eval corpus unchanged: lexical MRR 0.938, recall@3 100%.
+- **`"command": "npx"` — the README's canonical config — could not spawn on
+  Windows.** npm ships npx as `npx.cmd` with no `.exe`; Rust's std only
+  appends `.exe` when searching PATH, so every Node-based backend failed with
+  NotFound and the curated hint blamed a PATH that was fine. Spawn resolution
+  now goes through `which` (rmcp's `which-command` feature), which honours
+  PATHEXT and hands back the `npx.cmd` path std does know how to spawn; when
+  `which` cannot resolve, the raw name is used and the old behavior —
+  including the curated error — is exactly preserved. The picker's command
+  spawn gets the same resolution, since the README's suggested Windows
+  picker commands (`claude -p`, `codex exec`) are npm `.cmd` shims with the
+  same problem.
+- **A whole-catalogue pick blew the Windows command-line limit.** The prompt
+  travelled as one argv entry; CreateProcessW caps the whole line at 32,767
+  UTF-16 units and the default whole-catalogue budget is 96,000 chars, so on
+  Windows the documented `["claude", "-p", "{prompt}"]` transport failed
+  every search at realistic catalogue sizes — spawn error, lexical fallback,
+  and the miss-streak advice blaming the model. Above the limit the prompt
+  now travels on the command's stdin *instead of* argv — never both, since
+  agent CLIs concatenate a piped stdin with their message argument and an
+  always-on stdin copy would have shipped the catalogue twice. The Windows
+  cap measures the *escaped* command line (std quotes the arg and escapes
+  quotes/backslashes into the same 32,767-unit budget), not raw bytes.
+  `pick.sh` passes an inherited stdin prompt straight through to the CLI
+  rather than re-expanding it into an argv entry, which on Linux would have
+  re-hit the 128 KiB single-argument cap this path exists to avoid.
+- **A timed-out pick left the billed inference running.** `kill_on_drop`
+  reaches only the direct child, and the scaffolded `pick.sh` ran the agent
+  CLI as a plain grandchild — so the timeout killed bash while the reparented
+  `opencode run` finished its inference for an answer nobody would read,
+  precisely the leak the kill comment promised to prevent (default timeout
+  20s vs a measured 53s cold-model first call: the first search of a session
+  orphaned one inference). `pick.sh` now `exec`s the runner, making the CLI
+  the direct child the kill actually reaches.
+- **A tool that returned only `structuredContent` read as "returned
+  nothing".** The spec makes mirroring structured output into a text block a
+  SHOULD, and `execute` read only `content` — so a spec-legal backend's
+  payload was silently destroyed and the model, following the documented
+  `result` field, concluded the tool returned nothing (the screenshot
+  flattening bug, recreated for structured output). `execute` now forwards it
+  verbatim under its own `structured` key.
+- **Two slow calls sharing a dying connection could discard a healthy new
+  one.** Both error arms in `call()` cleared the connection cache
+  unconditionally: call A times out and resets, a retry reconnects and caches
+  a healthy child, then call B's older timeout fires and evicts that fresh
+  connection — killing the new child once in-flight users drop it, stamping
+  Failed over a backend that had just recovered. Both arms now use the same
+  Arc-identity guard `check_health` has always had: reset only if the
+  connection being blamed is still the one in the cache.
+- **A snapshot refresh racing an execute cold-start spawned two children for
+  one backend.** `snapshot_tools`'s ephemeral probe called `connect_raw`
+  directly, bypassing the connect gate whose whole purpose is that
+  double-spawn (an exclusive-resource backend can fail *because* of the
+  loser). The probe now takes the same gate, re-checks the cache after
+  acquiring it in case the connect it queued behind just parked a
+  connection, and holds it until the probe child is *actually dead* — on
+  the listing's error paths too — because releasing on a plain Arc drop
+  left the child alive through its 3s stdin-EOF grace while the next caller
+  spawned against the still-held resource (reproduced with a fixed-port
+  stub, and again through a mere tools/list timeout when the first version
+  of this fix awaited the teardown only on success).
+- **Proxy exit could orphan backend children.** `shutdown()` only dropped the
+  connection Arc; rmcp's Drop fires a cancellation guard whose actual child
+  kill runs in tasks a runtime being torn down never polls, so `main`
+  returning right after shutdown left any backend that ignores stdin EOF —
+  browser drivers, DB servers — running. Shutdown now awaits rmcp's graceful
+  close (stdin EOF, 3s grace, then kill, capped at 5s). When in-flight calls
+  still share the connection it cancels the token — their calls fail fast —
+  and then *waits, bounded,* for the last clone to drop so the close is
+  still awaited: returning immediately there would have re-run the exact
+  never-polled-task orphaning at exit (reproduced with an EOF-ignoring
+  child that survived main's return). `shutdown_all` and the hot-reload's
+  removed-backend teardown run backends concurrently so exit and reload
+  time don't stretch with the backend count.
+- **A config reload could resurrect a server it had just removed.** The
+  tools/list_changed handler clones the registry, probes the backend (up to
+  the startup timeout), and only then merges into the snapshot — a hot-reload
+  completing in that window swapped in a new registry and snapshot, and the
+  handler's stale clone re-inserted the deleted server, persisted under the
+  *new* config hash, so the phantom survived restarts: search kept surfacing
+  its tools, every execute failed with unknown_server. Hash checks and
+  lock-free epoch schemes were tried first and each left a losing
+  interleaving (a re-scan's fresher listing could still be overwritten by
+  the reload's staler probe, with the notification already consumed);
+  re-scan and reload are now mutually exclusive via a dedicated gate, and a
+  re-scan that queued behind a reload repeats against the post-reload
+  registry — which either yields the fresh listing or finds the server
+  gone.
+- **The hot-reload's promised 500ms debounce did not exist.** The doc comment
+  pledged it; the loop drained already-arrived events and read the file
+  immediately, so a truncate-in-place save could be read half-written —
+  parsing a valid *prefix* of the config tears down every backend past the
+  truncation point, an unparseable one publishes a spurious config error to
+  health. The wait is now real, same shape as the skill watcher's.
+- **Moving a glob from `allow` to `deny` was invisible to the snapshot
+  hash.** Fields were length-prefixed but collections had no separators, so
+  adjacent groups collided across their shared boundary: allow↔deny edits,
+  `description` vs `pass_env`, `args` vs `env` all hashed identically — an
+  edit made while the proxy was stopped served a snapshot filtered by the old
+  rules, with the staleness check calling it current (execution-time
+  enforcement still blocked denied tools; the damage was stale advertising).
+  Every collection now hashes behind a tag and element count. Existing
+  snapshots rebuild once on the next start.
+- **`geco validate` failed working configs and passed broken ones.** Three
+  gaps, one theme — validate must judge what the runtime does: it checked
+  keychain refs *untrimmed* while the runtime trims (a natural
+  `${keychain: name}` spacing validated as an error yet spawned fine); it
+  never looked at keychain refs in `command`/`args` at all, swallowing the
+  resolution error silently (exactly the will-fail-at-spawn class it exists
+  to catch); and it said nothing about a picker whose `mode` was mis-typed or
+  whose `command` list was empty, both of which the picker resolves to
+  silently-off.
+- **Every project with a local `geco.yaml` shared one snapshot file.** The
+  cache path hashed the config path *as given*, and local discovery returns
+  the literal relative `geco.yaml` — identical string, identical cache file:
+  cross-project starts always saw a hash mismatch and paid a full
+  backend-spawning rebuild, concurrent sessions in different projects
+  clobbered each other's saves, and `geco inspect` showed another project's
+  servers. The path is canonicalized before hashing.
+- **A second geco instance — or a deleted file — silently erased standing
+  health issues.** The skip-identical-write cache consulted only process
+  memory, and health.json is one global file: proxy B overwrites it, proxy
+  A's every later publish rebuilds an identical body, the map says "already
+  written", and A's dead-backend report stays vanished from disk forever
+  (deleting the file as a manual reset had the same effect). The skip now
+  verifies the bytes on disk are the process's own last write, and the
+  health sweep publishes every pass — level-triggered in fact, not just in
+  the module doc — so an externally clobbered file is restored within one
+  interval. Re-assertion is deliberately one-sided: a problem set always
+  reclaims the file, a healthy report reclaims it only from a missing,
+  unreadable, or cleanly-stopped one — two live instances symmetrically
+  rewriting each other would make `geco health`'s exit code oscillate with
+  whichever sweep ran last (measured under the symmetric rule: 63 flips in
+  200 samples).
+- **A corrupt health.json read as "the proxy has not run yet".** I/O and
+  parse failures collapsed into the same `None`, so `geco health` exited 0
+  about a present file full of recorded errors — the absent-vs-corrupt
+  conflation already fixed for snapshots, unfixed for health. Missing and
+  unreadable are now distinct (unreadable exits 1: unknown must not pass a
+  health gate), and `HealthReport` gained the struct-level `serde(default)`
+  that `Metrics` always documented as the forward-compat guard.
+- **`geco health` reported a dead proxy's last day as current.** Nothing
+  wrote on shutdown, so the file always outlived its writer: yesterday's
+  outage failed today's scripts with exit 1, and a last healthy write passed
+  a gate while nothing was serving. A clean exit now stamps a `stopped_at`
+  marker (any live publish clears it), and `geco health` reports a stopped
+  proxy as stopped, exit 0.
+- **A UTF-8 BOM discarded a skill's entire frontmatter.** Notepad's and
+  PowerShell 5.1's invisible three bytes meant the file no longer *started*
+  with `---`: name fell back to the directory, description emptied, nothing
+  in errors. Same class as the CRLF handling this parser already has; the BOM
+  is now stripped first.
+- **A frontmatter value ending in a bare colon still killed the whole
+  block.** `description: Steps to follow:` fails YAML with the same error as
+  the fixed colon-space case but contains no `": "`, so the quote-retry
+  produced a byte-identical line and never reparsed — and a sibling key with
+  a trailing colon took the description down with it. The retry now also
+  quotes line-final colons.
+- **Duplicate skill names: search advertised one copy, `read_skill` served
+  another.** With the same name in two configured dirs, ranking saw every
+  copy while resolution returned the first — a model persuaded by the second
+  dir's description silently received the first dir's body. The scan now
+  keeps exactly the copy resolution returns (earlier dir wins) and reports
+  the collision instead of indexing both.
+- **The absorb copy fallback dereferenced a symlinked skill root.** The
+  previous fix made the copy skip symlink *entries*, but `read_dir` on a
+  symlinked *root* still follows the link — cross-filesystem absorb of a
+  linked skill would copy the target's tree into the library and then delete
+  only the link, silently forking the user's real source. The fallback now
+  refuses a symlinked root outright; `rename`, the primary path, keeps
+  moving links as links.
+- **A user's `~/.sqliterc` broke every pick.** sqlite3 loads it even
+  non-interactively, so `.headers on` / `.mode column` turned the discovered
+  model into decorated multi-line text that opencode rejected as a `-m`
+  argument. The query now runs with `-batch -noheader -init /dev/null` —
+  verified against a real rc; `-init /dev/null` is the load-bearing flag,
+  since sqlite finds the rc via getpwuid, not `$HOME`.
+- **The picker agent could land where opencode never looks.** install.sh
+  hardcoded `~/.config/opencode`, but opencode resolves its config through
+  `XDG_CONFIG_HOME` — on machines that set it, the installer checked and
+  wrote a tree opencode never reads, and `pick.sh`'s unconditional
+  `--agent picker` then errored every pick. Installer and uninstaller now
+  honour `XDG_CONFIG_HOME`, and `pick.sh` only passes `--agent` when the
+  agent file actually exists, warning and running the default agent
+  otherwise.
+- **install.sh aborted from a release tarball when opencode was present.**
+  The tarball ships no `opencode-plugin/`, and the plugin copy — unlike the
+  picker copies right above it, guarded for exactly this reason — ran an
+  unguarded `cp` under `set -e`: binary installed, script dead before the
+  wire-it-into-your-agent instructions printed. Same guard, same
+  non-fatality.
+- **install.ps1 corrupted variable-based PATH entries and could not upgrade
+  a running geco.** `[Environment]::GetEnvironmentVariable` returns
+  REG_EXPAND_SZ values pre-expanded and the setter writes plain REG_SZ, so
+  installing froze every `%VAR%` PATH entry at its install-time expansion
+  and downgraded the value type — silent, discovered much later. The PATH
+  edit now goes through the registry with `DoNotExpandEnvironmentNames` and
+  writes back as ExpandString (with the WM_SETTINGCHANGE broadcast the .NET
+  setter used to do). And because Windows locks a running exe's image
+  against overwrite but allows renaming it, upgrades now rename-then-copy —
+  the analogue of install.sh's remove-then-copy — instead of dying on a raw
+  IOException whenever an MCP client still had geco open.
+- **The plugin's Linux health path was wrong — again, in the other
+  direction.** A previous fix changed it to `dev.geco.geco`, but the
+  `directories` crate ignores qualifier and organization on Linux and uses
+  the bare app name: Rust writes `$XDG_DATA_HOME/geco/health.json`, macOS is
+  the platform that gets the reverse-DNS id. Verified against the locked
+  crate source this time, and the comment now says to check there, not the
+  neighbouring branches, before touching it a third time.
 - **The absorb copy fallback followed symlinks out of a skill.** When the
   library and an absorb dir sit on different filesystems, `absorb_into` falls
   back from `rename` to a recursive copy, and that copy decided directory-vs-file
