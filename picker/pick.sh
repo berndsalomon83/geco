@@ -21,7 +21,15 @@ PROMPT=""
 PICKER_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="${GECO_CLIENT:-}"
 
-# Extract the prompt argument (geco substitutes {prompt} or appends it)
+# Extract the prompt argument (geco substitutes {prompt} or appends it).
+# When there is no argument, the prompt is arriving on STDIN instead: geco
+# skips argv when the prompt would blow the OS command-line limit (32k on
+# Windows; one 128 KiB arg on Linux). Deliberately NOT slurped into a
+# variable here — re-expanding an over-limit prompt into a single argv entry
+# would hit the same E2BIG this path exists to avoid, and a bare `$(cat)`
+# hangs a hand-run `./pick.sh` on its terminal. The still-unread pipe is
+# simply left as fd 0 for the runner: `opencode run` (like claude -p) reads
+# its prompt from a non-TTY stdin when no message argument is given.
 for arg in "$@"; do
     PROMPT="$arg"
 done
@@ -52,7 +60,14 @@ discover_opencode() {
     # Say nothing on success; only the failures above are worth a line. Without
     # them a missing sqlite3 silently swapped the session's model for whatever
     # opencode defaults to, and the picks just quietly got worse.
-    sqlite3 "$db" \
+    #
+    # -batch -noheader -init /dev/null: sqlite3 loads ~/.sqliterc even when
+    # non-interactive, and a user's `.headers on` / `.mode column` there turns
+    # this single value into decorated multi-line text that opencode then
+    # rejects as a -m argument — every pick broken by an unrelated dotfile.
+    # `-init /dev/null` is the load-bearing flag (sqlite finds the rc via
+    # getpwuid, not $HOME); the other two cover rc-less format defaults.
+    sqlite3 -batch -noheader -init /dev/null "$db" \
         "SELECT json_extract(model, '\$.providerID') || '/' || json_extract(model, '\$.id') \
          FROM session ORDER BY time_created DESC LIMIT 1;"
 }
@@ -71,13 +86,36 @@ discover_unknown() { return 1; }
 # The picker opencode.json (alongside this script) disables all tools,
 # stripping the system prompt from ~10k tokens to ~737 so a per-search
 # call is cheap. The picker agent is scaffolded into
-# ~/.config/opencode/agents/picker.md by install.sh.
+# ${XDG_CONFIG_HOME:-~/.config}/opencode/agents/picker.md by install.sh —
+# but only if opencode's config dir existed at install time, so check before
+# asking for it: `--agent picker` against a missing agent file errors every
+# pick, where the default agent merely costs the fat system prompt once.
+#
+# `exec`, not a plain call: geco's timeout kill reaches only its direct
+# child. As a grandchild, the CLI survived the kill and ran its inference to
+# completion — billing the user for an answer nobody reads, which is the
+# exact leak geco's own kill_on_drop comment promises to prevent. exec makes
+# the CLI *be* the direct child. (Keep it if you edit this script.)
 run_opencode() {
     local model="$1" prompt="$2"
-    if [[ -n "$model" ]]; then
-        opencode run --dir "$PICKER_DIR" --agent picker -m "$model" "$prompt"
+    local extra=()
+    if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agents/picker.md" ]]; then
+        extra+=(--agent picker)
     else
-        opencode run --dir "$PICKER_DIR" --agent picker "$prompt"
+        echo "pick.sh: no picker agent file — running with opencode's default agent" >&2
+    fi
+    if [[ -n "$model" ]]; then
+        extra+=(-m "$model")
+    fi
+    # The prompt goes as the message argument when we have one, and rides
+    # through on the inherited stdin pipe when we don't (opencode reads a
+    # non-TTY stdin as the prompt) — never both, which would concatenate.
+    # ${arr[@]+...}: macOS ships bash 3.2, where expanding an EMPTY array
+    # under `set -u` is an "unbound variable" error.
+    if [[ -n "$prompt" ]]; then
+        exec opencode run --dir "$PICKER_DIR" ${extra[@]+"${extra[@]}"} "$prompt" </dev/null
+    else
+        exec opencode run --dir "$PICKER_DIR" ${extra[@]+"${extra[@]}"}
     fi
 }
 

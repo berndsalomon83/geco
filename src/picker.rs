@@ -517,17 +517,62 @@ impl Picker {
         // it the same way skills dirs are expanded. A bare PATH name like
         // `opencode` has no `~/` prefix, so it comes back untouched and still
         // resolves through PATH.
-        let mut cmd = tokio::process::Command::new(crate::skills::expand_tilde(bin));
+        // The same PATH/PATHEXT resolution the backend spawn gets, for the
+        // same reason: the README's suggested Windows picker commands
+        // (`claude -p`, `codex exec`) are npm .cmd shims that a bare
+        // Command::new cannot find. Tilde-expanded first, so the scaffolded
+        // `~/.config/geco/picker/pick.sh` keeps working.
+        let expanded = crate::skills::expand_tilde(bin);
+        let mut cmd = rmcp::transport::which_command(&expanded)
+            .unwrap_or_else(|_| tokio::process::Command::new(&expanded));
+        // Windows's CreateProcessW caps the whole command line at 32,767
+        // UTF-16 units (and a cmd.exe shim like npm's claude.cmd at 8,191);
+        // Linux caps a single argv entry at 128 KiB. The default
+        // whole-catalogue budget is 96,000 chars — past both — and a spawn
+        // over the cap fails outright, so the documented Windows config
+        // (`["claude", "-p", "{prompt}"]`) failed EVERY search at realistic
+        // catalogue sizes, with the miss-streak advice blaming the model.
+        // Above the cap the prompt travels on stdin INSTEAD (an arg that was
+        // pure "{prompt}" is dropped, so `claude -p` style commands fall
+        // back to reading stdin); below it, argv substitution keeps working
+        // and stdin stays null. Never both: agent CLIs concatenate a non-TTY
+        // stdin with their message argument (claude -p and opencode run both
+        // do), so "argv plus a stdin copy" would ship the catalogue TWICE.
+        //
+        // The Windows cost is the ESCAPED length: std wraps the arg in
+        // quotes, turns every `"` into `\"`, and doubles backslash runs
+        // before quotes, and the whole line shares the 32,767-unit budget —
+        // a raw-byte cap passed quote-dense catalogues that still failed the
+        // spawn. Counting every quote and backslash over-estimates, which is
+        // the safe direction; the ~2,700-unit remainder covers program path
+        // and fixed args.
+        const ARGV_PROMPT_MAX: usize = if cfg!(windows) { 30_000 } else { 100_000 };
+        let prompt_cost = if cfg!(windows) {
+            prompt.encode_utf16().count()
+                + prompt.matches('"').count()
+                + prompt.matches('\\').count()
+                + 2
+        } else {
+            prompt.len()
+        };
+        let fits_argv = prompt_cost <= ARGV_PROMPT_MAX;
         let mut substituted = false;
         for a in args {
             if a.contains("{prompt}") {
                 substituted = true;
-                cmd.arg(a.replace("{prompt}", prompt));
+                if fits_argv {
+                    cmd.arg(a.replace("{prompt}", prompt));
+                } else {
+                    let stripped = a.replace("{prompt}", "");
+                    if !stripped.is_empty() {
+                        cmd.arg(stripped);
+                    }
+                }
             } else {
                 cmd.arg(a);
             }
         }
-        if !substituted {
+        if !substituted && fits_argv {
             cmd.arg(prompt);
         }
         // A nested agent must not load geco again and recurse into another
@@ -541,7 +586,16 @@ impl Picker {
         if let Some(name) = client {
             cmd.env("GECO_CLIENT", name);
         }
-        cmd.stdin(std::process::Stdio::null());
+        // stdin carries the prompt exactly when argv does not (see above);
+        // when argv has it, stdin is null so a stdin-concatenating CLI reads
+        // nothing extra.
+        if fits_argv {
+            cmd.stdin(std::process::Stdio::null());
+        } else {
+            cmd.stdin(std::process::Stdio::piped());
+        }
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
         // Without this, a timeout leaks the process. `timeout` only drops the
         // future; tokio does NOT reap a child on drop unless told to. The
         // command here is typically an agent CLI, so the abandoned process
@@ -551,12 +605,35 @@ impl Picker {
         // orphan apiece, invisible to geco, while the picker logs nothing
         // worse than a clean fallback.
         cmd.kill_on_drop(true);
-        let out = tokio::time::timeout(self.timeout, cmd.output())
-            .await
-            .map_err(|_| tracing::debug!("picker: command timed out after {:?}", self.timeout))
-            .ok()?;
-        let out = out
+        let mut child = cmd
+            .spawn()
             .map_err(|e| tracing::warn!("picker: cannot run the configured command: {e}"))
+            .ok()?;
+        // Feed stdin CONCURRENTLY with collecting output: writing first and
+        // joining after would deadlock with a child that streams output
+        // before draining its stdin (both pipes full, both sides blocked).
+        // A child that never reads stdin gets EPIPE here, which is ignored —
+        // and one that neither reads nor exits blocks the write until the
+        // timeout kills it, which is the bound doing its job.
+        let stdin = child.stdin.take();
+        let prompt_bytes = prompt.as_bytes().to_vec();
+        let out = tokio::time::timeout(self.timeout, async move {
+            let write = async {
+                if let Some(mut pipe) = stdin {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = pipe.write_all(&prompt_bytes).await;
+                    // Dropped here: EOF, so a stdin-reading command knows
+                    // the prompt is complete.
+                }
+            };
+            let (_, out) = tokio::join!(write, child.wait_with_output());
+            out
+        })
+        .await
+        .map_err(|_| tracing::debug!("picker: command timed out after {:?}", self.timeout))
+        .ok()?;
+        let out = out
+            .map_err(|e| tracing::warn!("picker: command failed: {e}"))
             .ok()?;
         if !out.status.success() {
             // A wrapper script that exits non-zero has failed, and its stdout

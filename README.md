@@ -320,7 +320,7 @@ proxy:
 
 On Windows, or if you'd rather not use the wrapper, point `command` at anything that prints an answer to stdout — `claude -p`, `codex exec`, a three-line curl script.
 
-`{prompt}` anywhere in the arguments is substituted; with no placeholder the prompt is appended as the final argument. A leading `~/` in the *program* is expanded; arguments are left alone, since one of them is the query. The child is spawned with `GECO_NO_PICKER=1` so a nested geco can refuse to recurse.
+`{prompt}` anywhere in the arguments is substituted; with no placeholder the prompt is appended as the final argument. When the prompt would exceed the OS command-line limit (a hard 32k on Windows — a whole-catalogue prompt clears it easily) argv substitution is skipped and the prompt arrives on the command's stdin instead — never both, since agent CLIs concatenate a piped stdin with their message argument. A command should therefore fall back to reading stdin when its prompt argument is empty; the shipped `pick.sh` does. A leading `~/` in the *program* is expanded; arguments are left alone, since one of them is the query. The child is spawned with `GECO_NO_PICKER=1` so a nested geco can refuse to recurse.
 
 **Every failure degrades to the lexical order** — unsupported, unreachable, timed out, answered in prose, named a tool that doesn't exist. Enabling a picker can cost you latency; it cannot break search or return something that isn't yours. One asymmetry is deliberate: a client that *advertises* sampling and then refuses to serve it is asked exactly once per session, because otherwise every search would pay a doomed round-trip — and, on clients that prompt for approval, show you a dialog — for a lexical answer geco was always going to return.
 

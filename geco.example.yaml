@@ -54,6 +54,11 @@ proxy:
   # `mode: auto` borrows your CLIENT's model over MCP sampling — zero config,
   # but only works if your client implements it. `mode: command` runs a
   # script and reads stdout; `{prompt}` is substituted, or appended if absent.
+  # When the prompt would exceed the OS command-line limit (a real ceiling
+  # on Windows), argv substitution is skipped and the prompt arrives on the
+  # command's STDIN instead — never both, since agent CLIs concatenate a
+  # piped stdin with their message argument. A command should therefore read
+  # stdin whenever its prompt argument is empty; the shipped pick.sh does.
   #
   # install.sh (macOS/Linux) scaffolds a wrapper script at
   # ~/.config/geco/picker/pick.sh that discovers the calling harness's current
