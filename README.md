@@ -100,7 +100,7 @@ git clone https://github.com/berndsalomon83/geco.git; cd geco
 .\install.ps1
 ```
 
-Add `--from-source` (`-FromSource` on Windows) to build with cargo instead. See [INSTALL.md](INSTALL.md) for checksums, macOS Gatekeeper, and the private-repo caveat.
+Add `--from-source` (`-FromSource` on Windows) to build with cargo instead. See [INSTALL.md](INSTALL.md) for checksums and macOS Gatekeeper.
 
 ### Wire it into your agent
 
@@ -425,7 +425,7 @@ The probe is necessary rather than incidental: a dead child leaves the connectio
 The gateway is headless, so a dead backend or a partial refresh would otherwise live only in a stderr log. Instead it writes its current problem set to `<data-dir>/health.json` (level-triggered: empty = healthy, tagged with the MCP client name). Three ways to see it:
 
 - **`geco health`** — the full report, for you.
-- **The opencode toast plugin** (`opencode-plugin/geco-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick.
+- **The opencode toast plugin** (`opencode-plugin/geco-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick. *Currently parked:* recent opencode versions load it but never fire its hooks, so no toast appears — see [opencode-plugin/TODO.md](opencode-plugin/TODO.md). The other two routes are unaffected.
 - **Every `search` response**, for the agent — an `issues` array rides along whenever the gateway has a problem, and is omitted entirely when it doesn't. With `surface: full`, `list_mcp_servers` carries the same array plus per-server `status` and `last_refresh`.
 
 There is deliberately no `health` meta-tool. It would cost every session's context to answer a question that only arises once something is already broken, and by then the answer has already been delivered twice: `execute` returns a typed `error.code` (`backend_error`, `timeout`, `not_allowed`) with the reason at the moment of failure, and `search` carries the rest. Diagnostics belong in the payload, where they cost nothing until needed — not in the schema, where they cost something always.
@@ -476,7 +476,7 @@ every idea that was measured and **rejected**.
 
 **A picker prompt contains third-party text.** Tool descriptions become part of a prompt sent to a model — under `command` mode, potentially one with shell access. You cannot pick a tool without showing a model what it does, so there is no clean fix; the mitigation is the ordinary one: run backends you trust.
 
-**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0 has been tagged, so the prebuilt binaries are older than this page describes — everything on `main`, including the picker and the lean surface, needs a source build for now (`--from-source`, or the installers fall back automatically).
+**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0 has been tagged, so the prebuilt binaries are older than this page describes — everything on `main`, including the picker and the lean surface, needs a source build for now. Pass `--from-source` (`-FromSource` on Windows): without it the installers download the v0.7.0 binary, since a prebuilt exists.
 
 ## Working on geco
 

@@ -1336,7 +1336,7 @@ mcpServers:
   websearch:
     command: [npx, -y, mcp-searxng]
     env:
-      SEARXNG_URL: http://spark.local:8888
+      SEARXNG_URL: http://localhost:8888
     description: private web search
     deny: ["*_dangerous"]
 "#,

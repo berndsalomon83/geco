@@ -11,8 +11,8 @@ on:
 permissions:
   contents: read
 
-# A push that supersedes an in-flight run cancels it. Actions minutes are
-# metered on a private repo and the older result is worthless anyway.
+# A push that supersedes an in-flight run cancels it: the older result is
+# worthless once a newer commit is being tested.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

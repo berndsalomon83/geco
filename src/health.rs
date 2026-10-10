@@ -4,8 +4,9 @@
 //! an absorb collides, or a refresh partially fails, a tracing::warn to stderr
 //! is a scream in an empty room. This module records the current problem set
 //! to a small JSON file that a companion opencode TUI plugin polls and turns
-//! into a toast — and the `health` meta-tool returns the same set on demand so
-//! the agent (or you) can ask "is the gateway OK?" and get a real answer.
+//! into a toast — and the same set rides on `search` responses as `issues`,
+//! while `geco health` reports it from the CLI, so the agent (or you) can ask
+//! "is the gateway OK?" and get a real answer.
 //!
 //! Design: level-triggered, not edge. We write the FULL current problem set
 //! every refresh (empty = healthy). The plugin diffs against what it last

@@ -1239,8 +1239,8 @@ impl Proxy {
         self.metrics.read().await.clone()
     }
 
-    /// The current full issue set (backends + absorb) — used by the
-    /// `health` meta-tool and `publish_health` so they always agree.
+    /// The current full issue set (backends + absorb) — used by the `issues`
+    /// key on responses and by `publish_health`, so they always agree.
     /// Checks both the snapshot's refresh_status AND the live backend
     /// status (a warm backend that crashed after a successful snapshot
     /// has refresh_status="ok" but Status::Failed).
