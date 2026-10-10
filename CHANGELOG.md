@@ -23,6 +23,20 @@ minor bump may break.
 
 ### Fixed
 
+- **Every default install reported a broken proxy.** Both installers verify
+  the served meta-tools by name, and the list still required
+  `list_mcp_servers` and `list_tools` — which the `lean` surface, now the
+  default, does not serve. A clean install of `main` therefore ended in
+  `WARN proxy did not serve: list_mcp_servers list_tools`, the false alarm
+  the by-name check was written to stop. Only `search` and `execute` are
+  required now: they are served on every surface and every config.
+- **`install.sh` dropped the opencode health plugin on machines without
+  opencode.** It decided "is opencode here?" by looking for
+  `~/.config/opencode` — after running `geco refresh`, whose absorb step
+  creates the example config's skill library at
+  `~/.config/opencode/skills-library`. The check found the directory geco had
+  just made. Reproduced in a throwaway HOME; it is now decided once, before
+  the refresh, and both the plugin and the picker agent follow that answer.
 - **Plural `-es`/`-ies` queries returned zero results against singular tools.**
   The stemmer stripped exactly one trailing `s`, so "branches" became
   "branche" — one character *longer* than the singular's stem "branch" —

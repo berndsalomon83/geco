@@ -30,7 +30,7 @@ function Get-Prebuilt {
     try {
         $gh = Get-Command gh -ErrorAction SilentlyContinue
         if ($gh) {
-            # gh carries credentials, which a private repo needs.
+            # gh is authenticated, so it avoids the anonymous API rate limit.
             & $gh.Source release download --repo $GhRepo --pattern "*$target*" --pattern "SHA256SUMS" --dir $tmp 2>$null | Out-Null
         }
         if (-not (Get-ChildItem $tmp -Filter *.zip -ErrorAction SilentlyContinue)) {
@@ -242,10 +242,12 @@ $ErrorActionPreference = $prevEap
 $result = $raw | ConvertFrom-Json
 # Checked BY NAME, not by count; see the matching comment in install.sh. The
 # old `-eq 8` went stale when the surface dropped to 6 and then warned on
-# every install, which teaches the user to ignore this line entirely. @() so
-# a single result still counts as a collection.
+# every install, which teaches the user to ignore this line entirely. Only
+# search and execute are required: the browse tools are served under
+# `proxy.surface: full` alone, so requiring them warned on every default
+# (lean) install. @() so a single result still counts as a collection.
 $names = @(($result | Where-Object { $_.id -eq 2 }).result.tools.name)
-$missing = @(@("list_mcp_servers", "list_tools", "search", "execute") |
+$missing = @(@("search", "execute") |
     Where-Object { $names -notcontains $_ })
 if ($missing.Count -eq 0) {
     Say "Proxy OK - meta-tools: $($names -join ', ')"
