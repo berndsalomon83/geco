@@ -6,6 +6,22 @@ minor bump may break.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-10
+
+**The first release since 0.7.0.** 0.8.0 was never tagged, so this release
+also ships everything listed under [0.8.0] below. Three changes can break an
+existing setup:
+
+- **The default surface is three meta-tools, not six** (`proxy.surface:
+  lean`). `proxy.surface: full` restores `list_mcp_servers`, `list_tools` and
+  `list_skills`. See *BREAKING (surface)* below.
+- **`execute` returns non-text content as real content blocks**, described
+  under `attachments`, instead of serialising them into the JSON text; tool
+  `structuredContent` is forwarded under `structured`.
+- **`geco refresh` exits 1 when a backend fails to refresh**, matching
+  `geco health` and `geco validate`. Scripts that ignored its exit code are
+  unaffected; ones that relied on it always being 0 are not.
+
 ### Added
 
 - **The picker can use the model you are already talking to.** geco now passes
@@ -768,7 +784,7 @@ because it was not real.
   *"no leaks found"*. A clean result from a scan that read nothing is the
   worst possible output. Narrower than CI, which still scans all history.
 
-## [0.8.0] — 2026-07-24
+## [0.8.0] — 2026-07-24 (never tagged; released as part of 0.9.0)
 
 **The always-on surface drops from eight meta-tools to six, ~4.7 KB to
 ~4.3 KB.** Both retirements follow the same rule: a capability that only
