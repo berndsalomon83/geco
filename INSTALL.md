@@ -28,7 +28,7 @@ Same flow, installing to `~/.local/bin/geco.exe` (adds to PATH if needed). Use `
 
 ### Notes on downloads
 
-- **The repository is private.** Release assets therefore need credentials: install `gh` and run `gh auth login`, and the installers will use it. Without that they fall back to a source build. Once the repo is public, plain `curl` works and no auth is needed.
+- **No account needed.** Release assets are public, so plain `curl` works. If `gh` is installed and logged in, the installers use it instead, which avoids GitHub's anonymous API rate limit.
 - **macOS Gatekeeper.** The binaries are unsigned, so a downloaded geco may be quarantined. If macOS refuses to run it: `xattr -d com.apple.quarantine "$(command -v geco)"`. The installer already re-signs ad-hoc as a fallback.
 - **Verifying by hand:** every release carries `SHA256SUMS`; `sha256sum -c SHA256SUMS` in the download directory checks all of them.
 
@@ -137,7 +137,7 @@ Install-specific issues:
 
 - **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing binary, or a variable it no longer inherits (see the callout under Migrate). Fix, then `geco refresh`.
 - **First `execute` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm with `geco refresh`.
-- **Installer fell back to a source build** — it couldn't fetch a release asset. The repo is private, so `gh auth login` first; or pass `--from-source` deliberately.
+- **Installer fell back to a source build** — it couldn't fetch a release asset: no network, no prebuilt for your platform, or GitHub's anonymous API rate limit (`gh auth login` avoids that). Or pass `--from-source` deliberately.
 
 Everything else — PATH differences under a GUI-launched agent, keychain misses, "the agent can't find a tool", stale tool lists, macOS quarantine — is in **[README → Troubleshooting](README.md#troubleshooting)**.
 
@@ -161,7 +161,7 @@ skills:
 
 (`geco refresh` sweeps any configured `skills.absorb` dirs into the library before it rebuilds the snapshot — it moves files, not only cache entries.)
 
-Restart the agent. `list_skills` shows the whole catalogue; `search` with `kind="skills"` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `geco refresh` re-scans the library (the gateway also watches it and picks up changes on its own). Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
+Restart the agent. `search("*", kind="skills")` lists the whole catalogue (`list_skills` too, under `proxy.surface: full`); `search` with `kind="skills"` finds playbooks by intent; `read_skill` loads the full SKILL.md + bundled file inventory. `geco refresh` re-scans the library (the gateway also watches it and picks up changes on its own). Keep a handful of daily-driver skills in the native dir if you want opencode's built-in skill UX for them — the gateway serves the long tail.
 
 ### The absorb model (nothing is ever native)
 
@@ -186,4 +186,4 @@ skills in the library directly; the gateway's watcher picks them up, or run `gec
 
 ## Health toasts in opencode
 
-The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugins/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. From a shell, `geco health` reports the failing backends and why, and exits 1 when something is wrong. Asking the model works too: `list_mcp_servers` carries an `issues` key whenever the gateway has any. (There is no `health` meta-tool — 0.8.0 retired it. It cost every session 218 bytes of context to answer a question only ever asked once something is already broken, and the per-server half of its answer was already in `list_mcp_servers`.)
+The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugins/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. *Currently parked:* recent opencode versions load the plugin but never fire its hooks, so no toast appears — see `opencode-plugin/TODO.md`. From a shell, `geco health` reports the failing backends and why, and exits 1 when something is wrong. Asking the model works too: every `search` response carries an `issues` key whenever the gateway has any (and so does `list_mcp_servers`, under `proxy.surface: full`). (There is no `health` meta-tool — 0.8.0 retired it. It cost every session 218 bytes of context to answer a question only ever asked once something is already broken.)

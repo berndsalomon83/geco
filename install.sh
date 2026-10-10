@@ -53,8 +53,8 @@ fetch_prebuilt() {
     [ -n "$target" ] || return 1
     tmp="$(mktemp -d)"
 
-    # `gh` first: it carries credentials, which is what a private repo needs.
-    # Plain curl works once the repo is public.
+    # `gh` first when it is logged in: authenticated, so it is not subject to
+    # GitHub's anonymous API rate limit. Plain curl works for everyone else.
     if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
         gh release download --repo "$GH_REPO" --pattern "*${target}*" \
             --pattern "SHA256SUMS" --dir "$tmp" >/dev/null 2>&1 || return 1
@@ -180,7 +180,13 @@ fi
 # errored.
 OC_CFG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 OC_AGENTS_DIR="$OC_CFG_ROOT/agents"
-if [ -d "$OC_CFG_ROOT" ] && [ -f "$REPO_DIR/picker/picker.md" ]; then
+# Decided ONCE, here, before `geco refresh` runs. The example config's skill
+# library lives under ~/.config/opencode, and refresh's absorb step creates
+# it — so a check made after the refresh found the dir geco itself had just
+# made, and dropped the health plugin on a machine that never had opencode.
+HAVE_OPENCODE=0
+[ -d "$OC_CFG_ROOT" ] && HAVE_OPENCODE=1
+if [ "$HAVE_OPENCODE" -eq 1 ] && [ -f "$REPO_DIR/picker/picker.md" ]; then
     if [ ! -f "$OC_AGENTS_DIR/picker.md" ]; then
         mkdir -p "$OC_AGENTS_DIR"
         cp "$REPO_DIR/picker/picker.md" "$OC_AGENTS_DIR/picker.md" &&
@@ -213,14 +219,15 @@ for l in sys.stdin:
     # the release the surface dropped to 6, and then warned on every single
     # install — which trains a user to ignore the one line whose whole job is
     # to tell them the install is broken. A count is also the wrong invariant:
-    # `list_skills` and `read_skill` are served only when a skill library is
-    # configured, so the correct total is 6 or 4 depending on config. The four
-    # below are the always-on gateway surface; the rest are reported, not
-    # required.
+    # `read_skill` is served only when a skill library is configured, and the
+    # browse tools (list_mcp_servers, list_tools, list_skills) only under
+    # `proxy.surface: full` — requiring them warned on every default install
+    # once `lean` became the default. The two below are served on every
+    # surface and config; the rest are reported, not required.
     # if/else rather than `A && B || C`, which runs C when B fails, not only
     # when A does.
     MISSING=""
-    for t in list_mcp_servers list_tools search execute; do
+    for t in search execute; do
         case " $TOOLS " in
             *" $t "*) ;;
             *) MISSING="$MISSING $t" ;;
@@ -239,7 +246,7 @@ fi
 # `set -e` an unguarded cp killed the install right here — binary in place,
 # but the final wire-it-into-your-agent instructions never printed.
 OC_PLUGIN_DIR="$OC_CFG_ROOT/plugins"
-if [ -d "$OC_CFG_ROOT" ] && [ -f "$REPO_DIR/opencode-plugin/geco-tui.ts" ]; then
+if [ "$HAVE_OPENCODE" -eq 1 ] && [ -f "$REPO_DIR/opencode-plugin/geco-tui.ts" ]; then
     mkdir -p "$OC_PLUGIN_DIR"
     if cp "$REPO_DIR/opencode-plugin/geco-tui.ts" "$OC_PLUGIN_DIR/geco-tui.ts"; then
         say "Installed opencode health plugin: $OC_PLUGIN_DIR/geco-tui.ts (restart opencode)"

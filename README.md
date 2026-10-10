@@ -100,7 +100,7 @@ git clone https://github.com/berndsalomon83/geco.git; cd geco
 .\install.ps1
 ```
 
-Add `--from-source` (`-FromSource` on Windows) to build with cargo instead. See [INSTALL.md](INSTALL.md) for checksums, macOS Gatekeeper, and the private-repo caveat.
+Add `--from-source` (`-FromSource` on Windows) to build with cargo instead. See [INSTALL.md](INSTALL.md) for checksums and macOS Gatekeeper.
 
 ### Wire it into your agent
 
@@ -320,7 +320,7 @@ proxy:
 
 On Windows, or if you'd rather not use the wrapper, point `command` at anything that prints an answer to stdout — `claude -p`, `codex exec`, a three-line curl script.
 
-`{prompt}` anywhere in the arguments is substituted; with no placeholder the prompt is appended as the final argument. When the prompt would exceed the OS command-line limit (a hard 32k on Windows — a whole-catalogue prompt clears it easily) argv substitution is skipped and the prompt arrives on the command's stdin instead — never both, since agent CLIs concatenate a piped stdin with their message argument. A command should therefore fall back to reading stdin when its prompt argument is empty; the shipped `pick.sh` does. A leading `~/` in the *program* is expanded; arguments are left alone, since one of them is the query. The child is spawned with `GECO_NO_PICKER=1` so a nested geco can refuse to recurse.
+`{prompt}` anywhere in the arguments is substituted; with no placeholder the prompt is appended as the final argument. When the prompt would exceed the OS command-line limit (a hard 32k on Windows — a whole-catalogue prompt clears it easily) argv substitution is skipped and the prompt arrives on the command's stdin instead — never both, since agent CLIs concatenate a piped stdin with their message argument. A Windows `.cmd`/`.bat` command — npm's `claude.cmd` and `codex.cmd` shims among them — always takes the stdin route, whatever the size: it runs through cmd.exe, which cannot be handed the multi-line prompt as an argument. A command should therefore fall back to reading stdin when its prompt argument is empty; the shipped `pick.sh` does. A leading `~/` in the *program* is expanded; arguments are left alone, since one of them is the query. The child is spawned with `GECO_NO_PICKER=1` so a nested geco can refuse to recurse.
 
 **Every failure degrades to the lexical order** — unsupported, unreachable, timed out, answered in prose, named a tool that doesn't exist. Enabling a picker can cost you latency; it cannot break search or return something that isn't yours. One asymmetry is deliberate: a client that *advertises* sampling and then refuses to serve it is asked exactly once per session, because otherwise every search would pay a doomed round-trip — and, on clients that prompt for approval, show you a dialog — for a lexical answer geco was always going to return.
 
@@ -425,7 +425,7 @@ The probe is necessary rather than incidental: a dead child leaves the connectio
 The gateway is headless, so a dead backend or a partial refresh would otherwise live only in a stderr log. Instead it writes its current problem set to `<data-dir>/health.json` (level-triggered: empty = healthy, tagged with the MCP client name). Three ways to see it:
 
 - **`geco health`** — the full report, for you.
-- **The opencode toast plugin** (`opencode-plugin/geco-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick.
+- **The opencode toast plugin** (`opencode-plugin/geco-tui.ts`, installed automatically when opencode is present) — polls `health.json` and raises an in-app toast when a problem appears or clears. A persistent problem toasts once, not every tick. *Currently parked:* recent opencode versions load it but never fire its hooks, so no toast appears — see [opencode-plugin/TODO.md](opencode-plugin/TODO.md). The other two routes are unaffected.
 - **Every `search` response**, for the agent — an `issues` array rides along whenever the gateway has a problem, and is omitted entirely when it doesn't. With `surface: full`, `list_mcp_servers` carries the same array plus per-server `status` and `last_refresh`.
 
 There is deliberately no `health` meta-tool. It would cost every session's context to answer a question that only arises once something is already broken, and by then the answer has already been delivered twice: `execute` returns a typed `error.code` (`backend_error`, `timeout`, `not_allowed`) with the reason at the moment of failure, and `search` carries the rest. Diagnostics belong in the payload, where they cost nothing until needed — not in the schema, where they cost something always.
@@ -476,7 +476,7 @@ every idea that was measured and **rejected**.
 
 **A picker prompt contains third-party text.** Tool descriptions become part of a prompt sent to a model — under `command` mode, potentially one with shell access. You cannot pick a tool without showing a model what it does, so there is no clean fix; the mitigation is the ordinary one: run backends you trust.
 
-**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0 has been tagged, so the prebuilt binaries are older than this page describes — everything on `main`, including the picker and the lean surface, needs a source build for now (`--from-source`, or the installers fall back automatically).
+**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0 has been tagged, so the prebuilt binaries are older than this page describes — everything on `main`, including the picker and the lean surface, needs a source build for now. Pass `--from-source` (`-FromSource` on Windows): without it the installers download the v0.7.0 binary, since a prebuilt exists.
 
 ## Working on geco
 

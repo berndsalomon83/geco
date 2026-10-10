@@ -68,6 +68,8 @@ proxy:
   #
   # On Windows there is no pick.sh: point `command` at anything that prints an
   # answer on stdout, e.g. ["claude", "-p", "{prompt}"] or your own wrapper.
+  # A .cmd/.bat command (npm's claude.cmd, codex.cmd) always gets the prompt
+  # on STDIN — cmd.exe cannot take it as a multi-line argument.
   # picker:
   #   mode: command
   #   command: ["~/.config/geco/picker/pick.sh", "{prompt}"]
@@ -109,5 +111,5 @@ mcpServers:
   websearch:
     command: [npx, -y, mcp-searxng]
     env:
-      SEARXNG_URL: "http://spark.local:8888"
+      SEARXNG_URL: "http://localhost:8888"   # your SearXNG instance
     description: "Web search and page content retrieval. Find current information online, read a URL's content."

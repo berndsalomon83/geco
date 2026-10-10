@@ -23,6 +23,32 @@ minor bump may break.
 
 ### Fixed
 
+- **Every default install reported a broken proxy.** Both installers verify
+  the served meta-tools by name, and the list still required
+  `list_mcp_servers` and `list_tools` — which the `lean` surface, now the
+  default, does not serve. A clean install of `main` therefore ended in
+  `WARN proxy did not serve: list_mcp_servers list_tools`, the false alarm
+  the by-name check was written to stop. Only `search` and `execute` are
+  required now: they are served on every surface and every config.
+- **`install.sh` dropped the opencode health plugin on machines without
+  opencode.** It decided "is opencode here?" by looking for
+  `~/.config/opencode` — after running `geco refresh`, whose absorb step
+  creates the example config's skill library at
+  `~/.config/opencode/skills-library`. The check found the directory geco had
+  just made. Reproduced in a throwaway HOME; it is now decided once, before
+  the refresh, and both the plugin and the picker agent follow that answer.
+- **The documented Windows picker never picked anything.** The README and
+  example config suggest `["claude", "-p", "{prompt}"]` (or `codex exec`) on
+  Windows, which resolves to an npm `.cmd` shim, and a batch file runs through
+  cmd.exe. std refuses to hand a batch file an argument containing a newline
+  — the spawn fails with `InvalidInput` ("batch file arguments are invalid")
+  — and the prompt is always multi-line, so every search fell back to the
+  lexical order while the miss streak advised checking the model. A `.cmd` or
+  `.bat` picker command now always gets the prompt on stdin, the route an
+  over-long prompt already took; the `{prompt}` argument is dropped, so
+  `claude -p` reads stdin as it does above the size cap. A Windows-only e2e
+  test drives a shim of npm's shape and was watched failing in CI on the
+  exact `InvalidInput` before the fix.
 - **Plural `-es`/`-ies` queries returned zero results against singular tools.**
   The stemmer stripped exactly one trailing `s`, so "branches" became
   "branche" — one character *longer* than the singular's stem "branch" —
@@ -132,7 +158,7 @@ minor bump may break.
   pledged it; the loop drained already-arrived events and read the file
   immediately, so a truncate-in-place save could be read half-written —
   parsing a valid *prefix* of the config tears down every backend past the
-  truncation point, an unparseable one publishes a spurious config error to
+  truncation point, an unparsable one publishes a spurious config error to
   health. The wait is now real, same shape as the skill watcher's.
 - **Moving a glob from `allow` to `deny` was invisible to the snapshot
   hash.** Fields were length-prefixed but collections had no separators, so
@@ -149,7 +175,7 @@ minor bump may break.
   `${keychain: name}` spacing validated as an error yet spawned fine); it
   never looked at keychain refs in `command`/`args` at all, swallowing the
   resolution error silently (exactly the will-fail-at-spawn class it exists
-  to catch); and it said nothing about a picker whose `mode` was mis-typed or
+  to catch); and it said nothing about a picker whose `mode` was mistyped or
   whose `command` list was empty, both of which the picker resolves to
   silently-off.
 - **Every project with a local `geco.yaml` shared one snapshot file.** The
