@@ -98,7 +98,7 @@ if ((Test-Path $Dest) -and -not $Force) {
     Say "Existing install: $existing"
 }
 # Windows locks a RUNNING exe's image against overwrite (Copy-Item throws
-# a sharing violation) but allows renaming it — and geco serve is a
+# a sharing violation) but allows renaming it - and geco serve is a
 # long-lived process an open MCP client keeps alive, so a plain overwrite
 # aborted every upgrade attempted while a client was open, with a raw
 # IOException under ErrorActionPreference=Stop. Rename-then-copy, the
@@ -124,7 +124,7 @@ Say "Installed to $Dest"
 
 # Add to PATH if not already there.
 #
-# Read and written through the REGISTRY, not [Environment]:: — the .NET
+# Read and written through the REGISTRY, not [Environment]:: - the .NET
 # getter expands REG_EXPAND_SZ (returning %JAVA_HOME%\bin as its current
 # expansion) and the setter writes plain REG_SZ, so the round-trip froze
 # every variable-based PATH entry at its install-time value and downgraded
@@ -145,8 +145,9 @@ if ($DestDir -notin $PathDirs) {
             $env:PATH = "$env:PATH;$DestDir"
             # The [Environment]:: setter broadcast WM_SETTINGCHANGE so new
             # shells see the change before the next login; a raw registry
-            # write does not. Best effort — a failed broadcast just means
-            # the change waits for re-login, same as no broadcast at all.
+            # write does not. Best effort - a failed broadcast just means
+            # the change waits for re-login, same as no broadcast at all, so
+            # the catch only leaves a trace for -Verbose.
             try {
                 $Sig = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]' +
                     'public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
@@ -155,7 +156,9 @@ if ($DestDir -notin $PathDirs) {
                 # 0xffff = HWND_BROADCAST, 0x1A = WM_SETTINGCHANGE, 2 = SMTO_ABORTIFHUNG
                 $SM::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero,
                     "Environment", 2, 5000, [ref]$Out) | Out-Null
-            } catch { }
+            } catch {
+                Write-Verbose "WM_SETTINGCHANGE broadcast failed: $($_.Exception.Message)"
+            }
         }
     } finally {
         $EnvKey.Close()
