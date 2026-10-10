@@ -1,30 +1,39 @@
-# geco — Install, Migrate, Verify, Uninstall
+# geco — Install, Set up, Verify, Uninstall
 
 ## Requirements
 
-**No Rust toolchain needed** for the platforms with published binaries: macOS (arm64, x86_64), Linux (x86_64 static/musl, aarch64), Windows (x86_64). Anything else falls back to a source build and needs rustup.rs.
+**No Rust toolchain needed** for the platforms with published binaries: macOS (arm64, x86_64), Linux (x86_64 static/musl, aarch64), Windows (x86_64). Anything else builds from source and needs rustup.rs.
 
-On macOS/Linux: `python3` (used by the install script for JSON verification). Backends need whatever they always needed (`npx`, `uvx`, binaries…) — the proxy just spawns them later instead of your agent spawning them at startup.
+On macOS/Linux: `curl`, and `python3` for the final self-check (skipped with a note when absent). Backends need whatever they always needed (`npx`, `uvx`, binaries…) — the proxy just spawns them later instead of your agent spawning them at startup.
 
 ## Install
 
 ### macOS / Linux
 
 ```bash
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/berndsalomon83/geco/main/install.sh | bash
 ```
 
 Downloads the prebuilt binary for your platform, verifies its SHA-256 against the release's `SHA256SUMS`, and installs it (existing location → `/opt/homebrew/bin` → `~/.local/bin`; remove-then-copy so macOS signing stays valid). Then scaffolds `~/.config/geco/config.yaml` from the example if missing, builds the first tool snapshot, and verifies the proxy answers with the gateway meta-tools.
 
-Pass `--from-source` to build with cargo instead. That also happens automatically if no prebuilt binary matches your platform, or the download fails.
-
-### Windows
+### Windows (PowerShell)
 
 ```powershell
-.\install.ps1
+irm https://raw.githubusercontent.com/berndsalomon83/geco/main/install.ps1 | iex
 ```
 
-Same flow, installing to `~/.local/bin/geco.exe` (adds to PATH if needed). Use `-FromSource` to build locally. Windows on ARM64 always builds from source — the published Windows binary is x86_64 and would otherwise run under emulation.
+Same flow, installing to `~/.local/bin/geco.exe` and adding it to your user PATH (new terminals pick it up). Piped like this, no script file runs, so the execution policy does not get in the way.
+
+### From a clone, or another platform
+
+```bash
+git clone https://github.com/berndsalomon83/geco.git && cd geco
+bash install.sh --from-source
+```
+
+On Windows: `powershell -ExecutionPolicy Bypass -File install.ps1 -FromSource`. Without the flag, a clone install still prefers the prebuilt binary and falls back to building only when none matches your platform or the download fails. Windows on ARM64 always builds from source — the published Windows binary is x86_64 and would otherwise run under emulation.
+
+The same scripts ship inside every release archive: extract one and run `bash install.sh` (or the `.ps1`) there to install that archive's binary without downloading anything.
 
 ### Notes on downloads
 
@@ -32,7 +41,7 @@ Same flow, installing to `~/.local/bin/geco.exe` (adds to PATH if needed). Use `
 - **macOS Gatekeeper.** The binaries are unsigned, so a downloaded geco may be quarantined. If macOS refuses to run it: `xattr -d com.apple.quarantine "$(command -v geco)"`. The installer already re-signs ad-hoc as a fallback.
 - **Verifying by hand:** every release carries `SHA256SUMS`; `sha256sum -c SHA256SUMS` in the download directory checks all of them.
 
-## Migrate servers behind the proxy
+## Move servers behind the proxy
 
 Take the occasional servers out of your agent config and move them into the proxy config. Example, OpenCode:
 
@@ -77,8 +86,8 @@ geco refresh     # snapshot the moved servers once
 Restart the agent. Context cost for those servers drops to ~2.5 KB flat.
 
 > **Moving a server that reads a token from your shell? Read this.**
-> Since 0.7 a backend does **not** inherit geco's environment. A server that
-> worked directly because `GITHUB_TOKEN` was exported in your shell will start
+> A backend does **not** inherit geco's environment. A server that worked
+> directly because `GITHUB_TOKEN` was exported in your shell will start
 > without it once it sits behind geco. Nothing fails at startup — it fails at
 > the first `execute`, with whatever opaque auth error the backend produces.
 >
@@ -89,8 +98,8 @@ Restart the agent. Context cost for those servers drops to ~2.5 KB flat.
 >   pass_env: ["GITHUB_TOKEN"]        # hand THIS server that one variable
 > ```
 > Better still, take it out of the shell entirely with
-> `${keychain:github_token}` as above. `proxy.inherit_env: true` restores the
-> old behaviour wholesale, but then every server can read every secret you
+> `${keychain:github_token}` as above. `proxy.inherit_env: true` hands every
+> backend geco's whole environment, but then every server can read every secret you
 > have — see the README for why that is the thing being fixed.
 
 **Rule of thumb:** keep proactive-use servers (memory, core workflow) direct; gate everything you use occasionally.
@@ -111,23 +120,25 @@ The full reference lives in **[README → Config reference](README.md#config-ref
 The two you are most likely to want while installing:
 
 - `proxy.startup_timeout_secs` — raise it if a first `npx`/`uvx` run downloads a large package.
-- `pass_env` on a server — the thing to reach for when a migrated backend suddenly can't authenticate (see the callout above).
+- `pass_env` on a server — the thing to reach for when a backend you moved behind geco can't authenticate (see the callout above).
 
 ## Uninstall
 
 ### macOS / Linux
 
 ```bash
-bash uninstall.sh          # removes binary + geco entries from agent configs (with .bak backups)
-bash uninstall.sh --purge  # …and config + snapshot cache
+curl -fsSL https://raw.githubusercontent.com/berndsalomon83/geco/main/uninstall.sh | bash                 # binary + geco entries in agent configs (.bak backups)
+curl -fsSL https://raw.githubusercontent.com/berndsalomon83/geco/main/uninstall.sh | bash -s -- --purge   # …and config + snapshot cache
 ```
 
 ### Windows
 
 ```powershell
-.\uninstall.ps1            # removes binary + geco entries from agent configs
-.\uninstall.ps1 -Purge     # …and config + cache
+irm https://raw.githubusercontent.com/berndsalomon83/geco/main/uninstall.ps1 | iex                                   # binary + geco entries in agent configs
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/berndsalomon83/geco/main/uninstall.ps1))) -Purge   # …and config + cache
 ```
+
+From a clone, `bash uninstall.sh [--purge]` and `powershell -ExecutionPolicy Bypass -File uninstall.ps1 [-Purge]` do the same.
 
 Re-add any servers you still want directly to your agent config afterwards.
 
@@ -135,9 +146,9 @@ Re-add any servers you still want directly to your agent config afterwards.
 
 Install-specific issues:
 
-- **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing binary, or a variable it no longer inherits (see the callout under Migrate). Fix, then `geco refresh`.
+- **Backend shows `error:` in `inspect`** — run the backend's command by hand; usually a missing binary, or a variable it does not inherit (see the callout under *Move servers behind the proxy*). Fix, then `geco refresh`.
 - **First `execute` times out** — cold `npx`/`uvx` fetch. Raise `startup_timeout_secs`, or pre-warm with `geco refresh`.
-- **Installer fell back to a source build** — it couldn't fetch a release asset: no network, no prebuilt for your platform, or GitHub's anonymous API rate limit (`gh auth login` avoids that). Or pass `--from-source` deliberately.
+- **"no prebuilt binary for this machine"** — the installer couldn't fetch a release asset: no network, no prebuilt for your platform, or GitHub's anonymous API rate limit (`gh auth login` avoids that). Build from a clone instead (see *From a clone, or another platform*).
 
 Everything else — PATH differences under a GUI-launched agent, keychain misses, "the agent can't find a tool", stale tool lists, macOS quarantine — is in **[README → Troubleshooting](README.md#troubleshooting)**.
 
@@ -186,4 +197,4 @@ skills in the library directly; the gateway's watcher picks them up, or run `gec
 
 ## Health toasts in opencode
 
-The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugins/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. *Currently parked:* recent opencode versions load the plugin but never fire its hooks, so no toast appears — see `opencode-plugin/TODO.md`. From a shell, `geco health` reports the failing backends and why, and exits 1 when something is wrong. Asking the model works too: every `search` response carries an `issues` key whenever the gateway has any (and so does `list_mcp_servers`, under `proxy.surface: full`). (There is no `health` meta-tool — 0.8.0 retired it. It cost every session 218 bytes of context to answer a question only ever asked once something is already broken.)
+The gateway runs headless — when a backend endpoint is down or a refresh half-fails, that pain would otherwise sit in an unread log. `install.sh` drops a companion TUI plugin at `~/.config/opencode/plugins/geco-tui.ts` that polls the gateway's `health.json` and raises an opencode toast when a problem appears (error/warning) or clears (success). Restart opencode to load it. *Currently parked:* recent opencode versions load the plugin but never fire its hooks, so no toast appears — see `opencode-plugin/TODO.md`. From a shell, `geco health` reports the failing backends and why, and exits 1 when something is wrong. Asking the model works too: every `search` response carries an `issues` key whenever the gateway has any (and so does `list_mcp_servers`, under `proxy.surface: full`). (There is deliberately no `health` meta-tool: it would cost every session's context to answer a question only ever asked once something is already broken.)

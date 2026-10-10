@@ -1,17 +1,35 @@
 #!/usr/bin/env bash
 # geco installer
-#   1. download a prebuilt binary (or --from-source / fall back to cargo build)
+#
+#   curl -fsSL https://raw.githubusercontent.com/berndsalomon83/geco/main/install.sh | bash
+#
+# or `bash install.sh [--from-source]` from a clone or an extracted release
+# archive.
+#
+#   1. take the binary from the release archive this script sits in, else
+#      download a prebuilt (or --from-source / fall back to cargo build)
 #   2. install the binary (existing install > /opt/homebrew/bin > ~/.local/bin)
 #      — remove-then-copy, never overwrite in place (macOS signature cache)
 #   3. scaffold ~/.config/geco/config.yaml if missing
 #   4. build the first tool snapshot + verify the meta-tool surface
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Where this script lives — empty when it is piped from curl, which has no
+# file and no directory beside it. `:-` because bash leaves BASH_SOURCE empty
+# for a script read from stdin, and `set -u` would abort on the bare
+# expansion before the first line of output.
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 GH_REPO="berndsalomon83/geco"
+RAW_URL="https://raw.githubusercontent.com/$GH_REPO/main"
 CFG_DIR="$HOME/.config/geco"
 CFG="$CFG_DIR/config.yaml"
-CFG_LEGACY="$CFG_DIR/config.json"
+CFG_JSON="$CFG_DIR/config.json"
+# Downloads land here and are removed on exit, whatever the outcome.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN\033[0m %s\n' "$*"; }
@@ -46,12 +64,25 @@ detect_target() {
     esac
 }
 
-# Print the path to an extracted prebuilt binary, or nothing. Never fatal:
-# every failure here falls back to building from source.
+# SHA-256 of a file. macOS ships `shasum`, not `sha256sum`; checking only for
+# the latter skipped verification on every Mac without a word.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# Print the path to an extracted prebuilt binary, or nothing. Returns 1 when
+# there is no usable prebuilt (the caller falls back to a source build) and 2
+# on a checksum mismatch, which must stop the install rather than fall back.
+# It runs inside $(…), so it reports by return code and the caller decides
+# what is fatal.
 fetch_prebuilt() {
     target="$(detect_target)"
     [ -n "$target" ] || return 1
-    tmp="$(mktemp -d)"
+    tmp="$WORK"
 
     # `gh` first when it is logged in: authenticated, so it is not subject to
     # GitHub's anonymous API rate limit. Plain curl works for everyone else.
@@ -75,12 +106,14 @@ fetch_prebuilt() {
     [ -n "$archive" ] || return 1
 
     # Verify if we got sums; a missing SHA256SUMS is not fatal, a mismatch is.
-    if [ -s "$tmp/SHA256SUMS" ] && command -v sha256sum >/dev/null 2>&1; then
+    if [ -s "$tmp/SHA256SUMS" ]; then
         want="$(grep "$(basename "$archive")" "$tmp/SHA256SUMS" | awk '{print $1}' | head -1)"
-        if [ -n "$want" ]; then
-            got="$(sha256sum "$archive" | awk '{print $1}')"
-            [ "$want" = "$got" ] || die "checksum mismatch on $(basename "$archive") — refusing to install"
+        got="$(sha256_of "$archive")"
+        if [ -n "$want" ] && [ -n "$got" ] && [ "$want" != "$got" ]; then
+            printf '\033[1;31mERROR\033[0m checksum mismatch on %s\n' "$(basename "$archive")" >&2
+            return 2
         fi
+        [ -n "$got" ] || warn "no sha256sum or shasum — skipping checksum verification" >&2
     fi
 
     tar xzf "$archive" -C "$tmp" || return 1
@@ -90,19 +123,37 @@ fetch_prebuilt() {
 }
 
 NEW_BIN=""
-if [ "$FROM_SOURCE" -eq 0 ]; then
+if [ "$FROM_SOURCE" -eq 0 ] && [ -n "$SCRIPT_DIR" ] && [ -x "$SCRIPT_DIR/geco" ]; then
+    # Run from an extracted release archive: the binary is right here.
+    NEW_BIN="$SCRIPT_DIR/geco"
+    say "Using the geco binary from this release archive"
+elif [ "$FROM_SOURCE" -eq 0 ]; then
     say "Looking for a prebuilt geco…"
-    NEW_BIN="$(fetch_prebuilt || true)"
+    rc=0
+    NEW_BIN="$(fetch_prebuilt)" || rc=$?
+    [ "$rc" -eq 2 ] && die "refusing to install a download that does not match its published checksum"
     [ -n "$NEW_BIN" ] && say "Using prebuilt binary (no Rust toolchain needed)"
 fi
 
 if [ -z "$NEW_BIN" ]; then
+    if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/Cargo.toml" ]; then
+        die "no prebuilt binary for this machine — build from source instead:
+  git clone https://github.com/$GH_REPO.git && cd geco && bash install.sh --from-source"
+    fi
     [ "$FROM_SOURCE" -eq 1 ] || warn "no prebuilt binary available — falling back to a source build"
     command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust first: https://rustup.rs"
-    [ -f "$REPO_DIR/Cargo.toml" ] || die "run this from the geco checkout"
     say "Building geco (release)…"
-    ( cd "$REPO_DIR" && cargo build --release )
-    NEW_BIN="$REPO_DIR/target/release/geco"
+    ( cd "$SCRIPT_DIR" && cargo build --release )
+    NEW_BIN="$SCRIPT_DIR/target/release/geco"
+fi
+
+# The example config, picker wrapper and opencode files come from the clone
+# or archive this script sits in, or — when piped from curl — from the
+# release archive just downloaded, which ships them beside the binary.
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/geco.example.yaml" ]; then
+    ASSET_DIR="$SCRIPT_DIR"
+else
+    ASSET_DIR="$(dirname "$NEW_BIN")"
 fi
 
 OLD_BIN="$(command -v geco 2>/dev/null || true)"
@@ -132,12 +183,14 @@ fi
 "$DEST" --version >/dev/null 2>&1 || die "installed binary does not run"
 say "Installed: $("$DEST" --version)"
 
-if [ -f "$CFG_LEGACY" ] && [ ! -f "$CFG" ]; then
-    CFG="$CFG_LEGACY"
-    say "Using existing JSON config: $CFG (YAML is the standard now; migrate when convenient)"
+if [ -f "$CFG_JSON" ] && [ ! -f "$CFG" ]; then
+    CFG="$CFG_JSON"
+    say "Using existing JSON config: $CFG"
 elif [ ! -f "$CFG" ]; then
+    [ -f "$ASSET_DIR/geco.example.yaml" ] ||
+        die "no geco.example.yaml to scaffold from — copy it from $RAW_URL/geco.example.yaml to $CFG"
     mkdir -p "$CFG_DIR"
-    cp "$REPO_DIR/geco.example.yaml" "$CFG"
+    cp "$ASSET_DIR/geco.example.yaml" "$CFG"
     "$NEW_BIN" schema > "$CFG_DIR/geco.schema.json" 2>/dev/null || true
     say "Scaffolded config: $CFG (+ editor schema)  ← EDIT THIS: move your occasional MCP servers in"
 else
@@ -152,13 +205,13 @@ fi
 #
 # Guarded on the FILE, not the directory: a first run that created the dir and
 # then failed would otherwise mean the assets are never scaffolded again. The
-# copies are non-fatal because a release-tarball install has no repo to copy
-# from, and a missing picker must not abort an otherwise good install.
+# copies are non-fatal because a missing picker must not abort an otherwise
+# good install.
 PICKER_DIR="$CFG_DIR/picker"
-if [ ! -f "$PICKER_DIR/pick.sh" ] && [ -f "$REPO_DIR/picker/pick.sh" ]; then
+if [ ! -f "$PICKER_DIR/pick.sh" ] && [ -f "$ASSET_DIR/picker/pick.sh" ]; then
     mkdir -p "$PICKER_DIR"
-    if cp "$REPO_DIR/picker/pick.sh" "$PICKER_DIR/pick.sh" &&
-       cp "$REPO_DIR/picker/opencode.json" "$PICKER_DIR/opencode.json"; then
+    if cp "$ASSET_DIR/picker/pick.sh" "$PICKER_DIR/pick.sh" &&
+       cp "$ASSET_DIR/picker/opencode.json" "$PICKER_DIR/opencode.json"; then
         chmod +x "$PICKER_DIR/pick.sh"
         say "Scaffolded picker: $PICKER_DIR/pick.sh (+ opencode.json)"
     else
@@ -186,10 +239,10 @@ OC_AGENTS_DIR="$OC_CFG_ROOT/agents"
 # made, and dropped the health plugin on a machine that never had opencode.
 HAVE_OPENCODE=0
 [ -d "$OC_CFG_ROOT" ] && HAVE_OPENCODE=1
-if [ "$HAVE_OPENCODE" -eq 1 ] && [ -f "$REPO_DIR/picker/picker.md" ]; then
+if [ "$HAVE_OPENCODE" -eq 1 ] && [ -f "$ASSET_DIR/picker/picker.md" ]; then
     if [ ! -f "$OC_AGENTS_DIR/picker.md" ]; then
         mkdir -p "$OC_AGENTS_DIR"
-        cp "$REPO_DIR/picker/picker.md" "$OC_AGENTS_DIR/picker.md" &&
+        cp "$ASSET_DIR/picker/picker.md" "$OC_AGENTS_DIR/picker.md" &&
             say "Scaffolded picker agent: $OC_AGENTS_DIR/picker.md"
     else
         say "Picker agent exists: $OC_AGENTS_DIR/picker.md (not overwritten)"
@@ -241,14 +294,14 @@ for l in sys.stdin:
 fi
 
 # Companion opencode TUI plugin: toasts gateway health problems in-app.
-# Guarded on the source file like the picker copies above, and for the same
-# reason: the release tarball ships no opencode-plugin/ directory, and under
-# `set -e` an unguarded cp killed the install right here — binary in place,
-# but the final wire-it-into-your-agent instructions never printed.
+# Guarded on the source file: release archives (and so a curl-piped install)
+# ship no opencode-plugin/ directory — the plugin is parked, see
+# opencode-plugin/TODO.md — and under `set -e` an unguarded cp would end the
+# install before the wire-it-into-your-agent instructions print.
 OC_PLUGIN_DIR="$OC_CFG_ROOT/plugins"
-if [ "$HAVE_OPENCODE" -eq 1 ] && [ -f "$REPO_DIR/opencode-plugin/geco-tui.ts" ]; then
+if [ "$HAVE_OPENCODE" -eq 1 ] && [ -f "$ASSET_DIR/opencode-plugin/geco-tui.ts" ]; then
     mkdir -p "$OC_PLUGIN_DIR"
-    if cp "$REPO_DIR/opencode-plugin/geco-tui.ts" "$OC_PLUGIN_DIR/geco-tui.ts"; then
+    if cp "$ASSET_DIR/opencode-plugin/geco-tui.ts" "$OC_PLUGIN_DIR/geco-tui.ts"; then
         say "Installed opencode health plugin: $OC_PLUGIN_DIR/geco-tui.ts (restart opencode)"
     else
         warn "health plugin not installed — copy opencode-plugin/geco-tui.ts to $OC_PLUGIN_DIR yourself"
@@ -265,6 +318,6 @@ Done. Wire it into your agent (and REMOVE the servers you moved behind it):
   Claude Desktop (claude_desktop_config.json):
     "mcpServers": { "geco": { "command": "$DEST", "args": ["serve"] } }
 
-Uninstall:  bash $REPO_DIR/uninstall.sh [--purge]
-Windows:    .\install.ps1  /  .\uninstall.ps1 -Purge
+Uninstall:  curl -fsSL $RAW_URL/uninstall.sh | bash
+            (add  -s -- --purge  after bash to delete config and caches too)
 EOT
