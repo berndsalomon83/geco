@@ -86,11 +86,14 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/geco" "dist/${name}/"
           fi
-          # picker/ ships too: geco.example.yaml's picker block points at
-          # ~/.config/geco/picker/pick.sh, and install.sh scaffolds it from
-          # here. Without it a release install offers a config referencing
-          # files the release does not contain.
-          cp README.md LICENSE geco.example.yaml install.sh uninstall.sh "dist/${name}/"
+          # The installers read their assets from this archive: run from an
+          # extracted archive they install the bundled binary, and piped from
+          # curl / irm they download this archive and take geco.example.yaml
+          # and picker/ from beside the binary. picker/ matters because
+          # geco.example.yaml's picker block points at
+          # ~/.config/geco/picker/pick.sh, which install.sh scaffolds from here.
+          cp README.md LICENSE geco.example.yaml \
+             install.sh uninstall.sh install.ps1 uninstall.ps1 "dist/${name}/"
           cp -r picker "dist/${name}/"
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
