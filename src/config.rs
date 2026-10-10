@@ -35,13 +35,14 @@ pub struct ProxyConfig {
     /// 0 = disabled. When a dead connection is detected, it is reset
     /// so the next execute reconnects fresh.
     pub health_check_secs: u64,
-    /// Give backends geco's whole environment (pre-0.7 behaviour).
+    /// Give backends geco's whole environment.
     ///
     /// Default false: a backend starts from a clean environment containing
     /// only the OS/runtime baseline (see `env_passthrough`), whatever its
     /// `env` and `pass_env` declare, and nothing else. That way a
     /// `GITHUB_TOKEN` exported in your shell for one server isn't handed to
-    /// every other server you run. Set true to restore inheritance.
+    /// every other server you run. Set true to let every backend inherit
+    /// everything.
     pub inherit_env: bool,
     /// How many backends may be probed at once during a snapshot refresh.
     ///
@@ -227,7 +228,7 @@ pub struct EnvPolicy {
 }
 
 impl EnvPolicy {
-    /// Pre-0.7 behaviour: the child inherits everything.
+    /// The child inherits everything (`inherit_env: true`).
     pub fn inherit_all() -> Self {
         Self {
             inherit: true,
@@ -437,11 +438,10 @@ pub struct ServerConfig {
     /// Environment variables to forward from the proxy's own environment
     /// to THIS backend at spawn time, e.g. `pass_env: ["GITHUB_TOKEN"]`.
     ///
-    /// Since 0.7 backends no longer inherit geco's environment, so this is
-    /// how a server gets an ambient secret — and only the servers that list
-    /// it do. (Before 0.7 it was a no-op: every child already had every
-    /// variable.) Missing variables are skipped silently, which is the right
-    /// behaviour for optional ones; use `env` to fail loudly instead.
+    /// Backends do not inherit geco's environment, so this is how a server
+    /// gets an ambient secret — and only the servers that list it do.
+    /// Missing variables are skipped silently, which is the right behaviour
+    /// for optional ones; use `env` to fail loudly instead.
     #[serde(default)]
     pub pass_env: Vec<String>,
     /// Override `proxy.call_timeout_secs` for this server only.
@@ -509,7 +509,7 @@ impl ServerConfig {
     /// declared `env`/`pass_env` on top — so an explicit value always wins
     /// over an inherited one of the same name. Under `inherit_env: true` the
     /// child keeps geco's whole environment and we only layer the declared
-    /// vars on, which is what every version before 0.7 did.
+    /// vars on.
     pub fn env_for_spawn(&self, policy: &EnvPolicy) -> Result<(bool, BTreeMap<String, String>)> {
         let declared = self.env_expanded()?;
         if policy.inherit {

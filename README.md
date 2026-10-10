@@ -74,33 +74,30 @@ Calls to *different* backends in one `execute` run in parallel; results always c
 The whole project in one screen, for the reader who wants the path rather than the map:
 
 ```bash
-bash install.sh                                   # 1. install the binary
-geco schema > ~/.config/geco/geco.schema.json      # 2. editor autocomplete (optional)
-$EDITOR ~/.config/geco/config.yaml                 # 3. move occasional servers behind geco
-geco refresh                                       # 4. snapshot them once
+curl -fsSL https://raw.githubusercontent.com/berndsalomon83/geco/main/install.sh | bash   # 1. install
+$EDITOR ~/.config/geco/config.yaml      # 2. move occasional servers behind geco
+geco refresh                            # 3. snapshot them once
 ```
 
-Three meta-tools, **2.5 KB flat**, whatever is behind the gate. Your agent searches before it acts, executes what it finds, and reads a skill when one applies. Nothing restarts when you add a server, a skill, or flip the surface — that is the design, not a feature. Everything else in this document is the reasoning, the measurements, and the traps; the five lines above are the whole loop.
+Three meta-tools, **2.5 KB flat**, whatever is behind the gate. Your agent searches before it acts, executes what it finds, and reads a skill when one applies. Nothing restarts when you add a server, a skill, or flip the surface — that is the design, not a feature. Everything else in this document is the reasoning, the measurements, and the traps; the three lines above are the whole loop.
 
 ## Install
 
-Prebuilt binaries are published for macOS (arm64, x86_64), Linux (x86_64 static, aarch64) and Windows (x86_64) — **no Rust toolchain required**. The installers download the right one, verify its SHA-256, and fall back to a source build for any other platform.
+Prebuilt binaries are published for macOS (arm64, x86_64), Linux (x86_64 static, aarch64) and Windows (x86_64) — **no Rust toolchain required**. The installer downloads the right one, verifies its SHA-256, puts `geco` on your PATH, scaffolds `~/.config/geco/config.yaml` with an editor schema, and builds the first tool snapshot.
 
 ### macOS / Linux
 
 ```bash
-git clone https://github.com/berndsalomon83/geco.git && cd geco
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/berndsalomon83/geco/main/install.sh | bash
 ```
 
-### Windows
+### Windows (PowerShell)
 
 ```powershell
-git clone https://github.com/berndsalomon83/geco.git; cd geco
-.\install.ps1
+irm https://raw.githubusercontent.com/berndsalomon83/geco/main/install.ps1 | iex
 ```
 
-Add `--from-source` (`-FromSource` on Windows) to build with cargo instead. See [INSTALL.md](INSTALL.md) for checksums and macOS Gatekeeper.
+For any other platform, build from a clone: `bash install.sh --from-source`, or on Windows `powershell -ExecutionPolicy Bypass -File install.ps1 -FromSource`. See [INSTALL.md](INSTALL.md) for checksums, uninstalling and macOS Gatekeeper.
 
 ### Wire it into your agent
 
@@ -128,11 +125,7 @@ Remove the individual server entries you moved behind geco — restart the agent
 
 ## Quick start
 
-```bash
-bash install.sh          # downloads a prebuilt binary, or builds if none matches
-```
-
-Create `~/.config/geco/config.yaml` (see `geco.example.yaml`; JSON is equally accepted) — entries are copy-paste compatible with both Claude Desktop and OpenCode shapes:
+Edit `~/.config/geco/config.yaml` — the installer scaffolds it from `geco.example.yaml`, and JSON is equally accepted. Entries are copy-paste compatible with both Claude Desktop and OpenCode shapes:
 
 ```jsonc
 {
@@ -163,7 +156,7 @@ skills:
   dirs: ["~/.config/opencode/skills-library"]
 ```
 
-`read_skill` appears — the full SKILL.md plus bundled file paths, which the agent runs via its shell exactly as a native skill would instruct. `search` was already there and now covers skills too: `kind="skills"` finds a playbook by intent, and `search("*", kind="skills")` lists the library. (With `surface: full` you also get `list_skills`, which is the same list under its own name.) Migration: move skills out of the auto-loaded dir into the library; keep your few daily drivers native if you like:
+`read_skill` appears — the full SKILL.md plus bundled file paths, which the agent runs via its shell exactly as a native skill would instruct. `search` covers skills too: `kind="skills"` finds a playbook by intent, and `search("*", kind="skills")` lists the library. (With `surface: full` you also get `list_skills`, which is the same list under its own name.) To set it up, move skills out of the auto-loaded dir into the library; keep your few daily drivers native if you like:
 
 ```bash
 mkdir -p ~/.config/opencode/skills-library
@@ -354,11 +347,11 @@ snapshot-based — refresh them manually or let a config change do it.
 
 ### Backend environment isolation
 
-Since 0.7, a backend does **not** inherit geco's environment. Each child starts clean and receives only an OS/runtime baseline — `PATH`, `HOME`/`USERPROFILE`, temp dirs, locale, TLS trust (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, …) and proxy settings (`HTTP_PROXY` and friends) — plus whatever its own `env` and `pass_env` declare.
+A backend does **not** inherit geco's environment. Each child starts clean and receives only an OS/runtime baseline — `PATH`, `HOME`/`USERPROFILE`, temp dirs, locale, TLS trust (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, …) and proxy settings (`HTTP_PROXY` and friends) — plus whatever its own `env` and `pass_env` declare.
 
-The point: a `GITHUB_TOKEN` exported in your shell for one server is no longer handed to every other server you run. Aggregating many backends behind one gateway means one compromised or careless server otherwise sees every secret in the environment.
+The point: a `GITHUB_TOKEN` exported in your shell for one server is not handed to every other server you run. Aggregating many backends behind one gateway means one compromised or careless server otherwise sees every secret in the environment.
 
-If a server needs an ambient variable, name it: `pass_env: ["GITHUB_TOKEN"]`. For non-secret tool configuration wanted by *every* backend, use `proxy.env_passthrough: ["NODE_*"]` (glob patterns). To restore the old behaviour wholesale, `proxy.inherit_env: true` — but then any server can read anything.
+If a server needs an ambient variable, name it: `pass_env: ["GITHUB_TOKEN"]`. For non-secret tool configuration wanted by *every* backend, use `proxy.env_passthrough: ["NODE_*"]` (glob patterns). To give every backend geco's whole environment, `proxy.inherit_env: true` — but then any server can read anything.
 
 ### The `proxy` block
 
@@ -371,7 +364,7 @@ Gateway-wide settings, all optional:
 | `refresh_on_start` | true | Re-scan backends at startup when the config hash changed. |
 | `health_check_secs` | 30 | How often to check warm backends are still alive. `0` disables. |
 | `refresh_concurrency` | 8 | How many backends may be probed at once during a refresh. `0` = unlimited. Caps the process storm when many servers are configured. |
-| `inherit_env` | false | Give backends geco's whole environment (pre-0.7 behaviour). See above. |
+| `inherit_env` | false | Give backends geco's whole environment. See above. |
 | `env_passthrough` | `[]` | Extra non-secret variables every backend receives, as globs. |
 | `surface` | `lean` | Serves `search`, `execute` and `read_skill`. `full` adds `list_mcp_servers`, `list_tools`, `list_skills` for ~1 KB — see [a leaner surface](#a-leaner-surface). |
 | `search_synonyms` | `[]` | Extra interchangeable-word groups for ranking, e.g. `[["k8s","kubernetes"]]`. Applied on top of the built-in table; picked up on hot reload. |
@@ -436,8 +429,8 @@ A failing backend reports the reason it actually gave, which is usually the one 
 
 Start with `geco health` (what's broken right now), then `geco validate` (config mistakes), `geco inspect` (what the snapshot actually holds) and `geco stats` (what the agent has been doing).
 
-**A server worked before 0.7 and now fails with an auth or config error.**
-The most likely cause, and the nastiest to spot, because it fails *late*: since 0.7 backends no longer inherit geco's environment, so a server that quietly relied on a variable exported in your shell now starts without it. There is no startup error — it fails on first `execute`, with whatever opaque message the backend produces. Name the variable: `pass_env: ["THE_VAR"]`. To confirm that's the cause, set `proxy.inherit_env: true` temporarily; if it works again, that was it.
+**A server that works when connected directly fails behind geco with an auth or config error.**
+The most likely cause, and the nastiest to spot, because it fails *late*: backends do not inherit geco's environment, so a server that quietly relied on a variable exported in your shell starts without it. There is no startup error — it fails on first `execute`, with whatever opaque message the backend produces. Name the variable: `pass_env: ["THE_VAR"]`. To confirm that's the cause, set `proxy.inherit_env: true` temporarily; if it works again, that was it.
 
 **`backend 'x': command 'npx' not found. Is it installed and on the PATH geco was started with?`**
 The command isn't on geco's `PATH`, and geco's PATH is not necessarily your shell's. Two common causes: the agent launched geco from a GUI (which often has a much shorter PATH than your terminal), or the tool was installed by a version manager — `nvm`, `fnm`, `volta` — that only edits the PATH in your shell's rc file. Fix by launching the agent from a shell where the command works, or use an absolute path in `command`. `geco validate` warns about commands it can't resolve before you hit this at runtime.

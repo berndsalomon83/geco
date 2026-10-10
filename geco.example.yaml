@@ -18,11 +18,11 @@ proxy:
   health_check_secs: 30        # 0 to disable dead-backend detection
   refresh_concurrency: 8       # backends probed at once on refresh (0 = all)
 
-  # Backends do NOT inherit geco's environment (since 0.7). Each child gets
+  # Backends do NOT inherit geco's environment. Each child gets
   # an OS/runtime baseline — PATH, HOME, TMPDIR, locale, TLS trust, proxy
   # settings — plus whatever its own `env` / `pass_env` declare. So a token
   # exported in your shell for one server never reaches the others.
-  # inherit_env: true            # restore pre-0.7 behaviour (not recommended)
+  # inherit_env: true            # give backends geco's whole environment (not recommended)
   # env_passthrough: ["NODE_*"]  # extra non-secret vars for every backend
 
   # Words a query and a tool use differently for the same thing. Applied on
