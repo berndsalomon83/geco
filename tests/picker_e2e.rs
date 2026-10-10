@@ -936,6 +936,74 @@ async fn a_picker_command_under_a_tilde_is_found() {
     );
 }
 
+/// The Windows picker the README documents — `["claude", "-p", "{prompt}"]`,
+/// or `codex exec` — resolves to an npm `.cmd` shim, and a batch file runs
+/// through cmd.exe, which cannot be handed a multi-line argument. The prompt is
+/// always multi-line, so every search fell back to the lexical order while the
+/// miss streak told the user to check their model.
+///
+/// The shim here is the shape npm writes: a `.cmd` forwarding `%*` to an
+/// interpreter. The stub behind it reads its prompt the way `claude -p` does —
+/// the argument when there is one, stdin when there is not — and refuses to
+/// answer without the whole prompt, so neither a failed spawn nor a truncated
+/// argument can pass by looking like a model that agreed with BM25F.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_batch_file_picker_command_gets_the_whole_prompt() {
+    let Some(python) = python_path() else { return };
+
+    let plain = proxy_with(json!({ "mode": "off" }));
+    let lexical = search_order(&plain, "read").await;
+    assert!(lexical.len() >= 2, "need two hits: {lexical:?}");
+    let (want_server, want_tool) = lexical.last().unwrap().clone();
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pick.py"),
+        format!(
+            "import sys\n\
+             p = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()\n\
+             assert 'read' in p and '/no_think' in p, repr(p[:200])\n\
+             print('{{\"server\": \"{want_server}\", \"tool\": \"{want_tool}\"}}')\n"
+        ),
+    )
+    .unwrap();
+    let shim = dir.path().join("pick.cmd");
+    std::fs::write(
+        &shim,
+        format!("@\"{}\" \"%~dp0pick.py\" %*\r\n", python.display()),
+    )
+    .unwrap();
+
+    // What std does with a multi-line argument to a batch file on this
+    // toolchain. Printed rather than asserted — it is the platform's
+    // behaviour, not geco's — but it names the mechanism when this fails.
+    let direct = std::process::Command::new(&shim)
+        .args(["-p", "line one\nline two"])
+        .stdin(std::process::Stdio::null())
+        .output();
+    eprintln!(
+        "direct spawn of a .cmd with a multi-line arg: {:?}",
+        direct
+            .as_ref()
+            .map(|o| (o.status, String::from_utf8_lossy(&o.stderr).to_string()))
+    );
+
+    let proxy = proxy_with(json!({
+        "mode": "command",
+        "command": [shim.to_string_lossy(), "-p", "{prompt}"],
+        "candidates": 10,
+        "timeout_secs": 30,
+    }));
+    let picked = search_order(&proxy, "read").await;
+    assert_eq!(
+        picked.first(),
+        Some(&(want_server, want_tool)),
+        "a .cmd picker must receive the whole prompt and be heard, was: {picked:?} \
+         (lexical: {lexical:?})"
+    );
+}
+
 /// The harness name from the MCP handshake must reach the picker child as
 /// `GECO_CLIENT`. That variable is the entire point of the coupling: a wrapper
 /// script branches on it to discover the calling harness's model. Nothing
