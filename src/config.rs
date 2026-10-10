@@ -1674,7 +1674,7 @@ mcpServers:
             findings
                 .iter()
                 .any(|(s, m)| s == "warning" && m.contains("'comand'")),
-            "a mis-typed picker.mode must be flagged: {findings:?}"
+            "a mistyped picker.mode must be flagged: {findings:?}"
         );
 
         let raw =

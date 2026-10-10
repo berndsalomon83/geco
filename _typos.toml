@@ -6,3 +6,13 @@
 # Quoted stemmer output in a comment in src/search.rs: the stemmer maps
 # "status" to "statu", and the comment shows that literally.
 statu = "statu"
+# More of the same, in src/search.rs comments and the CHANGELOG entry for the
+# plural fix: "branches" -> "branche", "repositories" -> "repositor", and the
+# 3-char "siz" a rejected -es table produced. Correcting them would make the
+# explanations wrong.
+branche = "branche"
+repositor = "repositor"
+siz = "siz"
+# The misspelled `picker.mode` that validate_flags_a_picker_that_can_never_run
+# feeds in on purpose — the test is about catching exactly this typo.
+comand = "comand"

@@ -158,7 +158,7 @@ minor bump may break.
   pledged it; the loop drained already-arrived events and read the file
   immediately, so a truncate-in-place save could be read half-written —
   parsing a valid *prefix* of the config tears down every backend past the
-  truncation point, an unparseable one publishes a spurious config error to
+  truncation point, an unparsable one publishes a spurious config error to
   health. The wait is now real, same shape as the skill watcher's.
 - **Moving a glob from `allow` to `deny` was invisible to the snapshot
   hash.** Fields were length-prefixed but collections had no separators, so
@@ -175,7 +175,7 @@ minor bump may break.
   `${keychain: name}` spacing validated as an error yet spawned fine); it
   never looked at keychain refs in `command`/`args` at all, swallowing the
   resolution error silently (exactly the will-fail-at-spawn class it exists
-  to catch); and it said nothing about a picker whose `mode` was mis-typed or
+  to catch); and it said nothing about a picker whose `mode` was mistyped or
   whose `command` list was empty, both of which the picker resolves to
   silently-off.
 - **Every project with a local `geco.yaml` shared one snapshot file.** The
