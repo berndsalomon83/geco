@@ -555,7 +555,22 @@ impl Picker {
         } else {
             prompt.len()
         };
-        let fits_argv = prompt_cost <= ARGV_PROMPT_MAX;
+        // A Windows batch file never gets the prompt in argv, at any size.
+        // Those npm shims are the commands the README suggests on Windows, and
+        // a `.cmd`/`.bat` runs through cmd.exe, which cannot be handed a
+        // newline — std refuses the spawn outright (InvalidInput, "batch file
+        // arguments are invalid"; observed on the Windows CI runner), and the
+        // prompt is always multi-line. Resolving the shim (above) only moved
+        // the failure from "not found" to the spawn itself, so every pick
+        // still fell back to the lexical order. stdin is the route an
+        // over-cap prompt already takes, and it also stays clear of cmd.exe's
+        // 8,191-character line.
+        let is_batch = cfg!(windows)
+            && std::path::Path::new(cmd.as_std().get_program())
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+        let fits_argv = !is_batch && prompt_cost <= ARGV_PROMPT_MAX;
         let mut substituted = false;
         for a in args {
             if a.contains("{prompt}") {

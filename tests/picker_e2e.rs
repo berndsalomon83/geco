@@ -906,8 +906,9 @@ async fn a_picker_command_under_a_tilde_is_found() {
     // The obvious alternative — write a script into a temp HOME — does not
     // work on Windows: a `.bat`/`.cmd` program is routed through cmd.exe, and
     // the prompt geco appends is multi-line, which cmd cannot be handed
-    // safely. That is a genuine platform limit rather than a test artifact,
-    // and it is why the shipped wrapper is documented as macOS/Linux.
+    // safely. geco therefore sends a batch file its prompt on stdin (see
+    // `a_batch_file_picker_command_gets_the_whole_prompt`), but this test's
+    // stub reads argv, so it needs a program spawned directly.
     let dir = python
         .parent()
         .expect("interpreter has a parent")

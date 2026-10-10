@@ -68,6 +68,8 @@ proxy:
   #
   # On Windows there is no pick.sh: point `command` at anything that prints an
   # answer on stdout, e.g. ["claude", "-p", "{prompt}"] or your own wrapper.
+  # A .cmd/.bat command (npm's claude.cmd, codex.cmd) always gets the prompt
+  # on STDIN — cmd.exe cannot take it as a multi-line argument.
   # picker:
   #   mode: command
   #   command: ["~/.config/geco/picker/pick.sh", "{prompt}"]
