@@ -48,7 +48,7 @@
           "default": 30
         },
         "inherit_env": {
-          "description": "Give backends geco's whole environment (pre-0.7 behaviour).\n\nDefault false: a backend starts from a clean environment containing\nonly the OS/runtime baseline (see `env_passthrough`), whatever its\n`env` and `pass_env` declare, and nothing else. That way a\n`GITHUB_TOKEN` exported in your shell for one server isn't handed to\nevery other server you run. Set true to restore inheritance.",
+          "description": "Give backends geco's whole environment.\n\nDefault false: a backend starts from a clean environment containing\nonly the OS/runtime baseline (see `env_passthrough`), whatever its\n`env` and `pass_env` declare, and nothing else. That way a\n`GITHUB_TOKEN` exported in your shell for one server isn't handed to\nevery other server you run. Set true to let every backend inherit\neverything.",
           "type": "boolean",
           "default": false
         },
@@ -199,7 +199,7 @@
           "default": true
         },
         "pass_env": {
-          "description": "Environment variables to forward from the proxy's own environment\nto THIS backend at spawn time, e.g. `pass_env: [\"GITHUB_TOKEN\"]`.\n\nSince 0.7 backends no longer inherit geco's environment, so this is\nhow a server gets an ambient secret — and only the servers that list\nit do. (Before 0.7 it was a no-op: every child already had every\nvariable.) Missing variables are skipped silently, which is the right\nbehaviour for optional ones; use `env` to fail loudly instead.",
+          "description": "Environment variables to forward from the proxy's own environment\nto THIS backend at spawn time, e.g. `pass_env: [\"GITHUB_TOKEN\"]`.\n\nBackends do not inherit geco's environment, so this is how a server\ngets an ambient secret — and only the servers that list it do.\nMissing variables are skipped silently, which is the right behaviour\nfor optional ones; use `env` to fail loudly instead.",
           "type": "array",
           "items": {
             "type": "string"
