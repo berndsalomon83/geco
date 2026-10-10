@@ -476,8 +476,6 @@ every idea that was measured and **rejected**.
 
 **A picker prompt contains third-party text.** Tool descriptions become part of a prompt sent to a model — under `command` mode, potentially one with shell access. You cannot pick a tool without showing a model what it does, so there is no clean fix; the mitigation is the ordinary one: run backends you trust.
 
-**The last release is v0.7.0.** `Cargo.toml` says 0.8.0 and nothing since 0.7.0 has been tagged, so the prebuilt binaries are older than this page describes — everything on `main`, including the picker and the lean surface, needs a source build for now. Pass `--from-source` (`-FromSource` on Windows): without it the installers download the v0.7.0 binary, since a prebuilt exists.
-
 ## Working on geco
 
 `main` is protected: force-pushes and deletion are blocked, and the CI checks
