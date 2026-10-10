@@ -6,6 +6,13 @@ minor bump may break.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-10-10
+
+### Changed
+
+- Dependency updates: `tokio` 1.53.2, `clap` 4.6.7, `schemars` 1.2.2 (which
+  moves `serde_derive_internals` to 0.30). No behaviour change in geco.
+
 ## [0.9.0] — 2026-10-10
 
 First public release.
@@ -44,5 +51,6 @@ they are asked for.
   aarch64) and Windows (x86_64), with SHA256SUMS and a CycloneDX SBOM, and
   one-line installers: `curl … | bash` and `irm … | iex`.
 
-[Unreleased]: https://github.com/berndsalomon83/geco/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/berndsalomon83/geco/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/berndsalomon83/geco/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/berndsalomon83/geco/releases/tag/v0.9.0
