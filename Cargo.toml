@@ -9,7 +9,7 @@ description = "geco — the generic connector: MCP gateway that keeps tools, ski
 license = "MIT"
 
 [dependencies]
-rmcp = { version = "2.2", features = ["server", "client", "macros", "transport-io", "transport-child-process", "which-command"] }
+rmcp = { version = "3.5", features = ["server", "client", "macros", "transport-io", "transport-child-process", "which-command"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-std", "time", "sync", "fs", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
